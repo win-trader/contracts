@@ -1,0 +1,38 @@
+name: publish
+
+# Publishes the public TS packages to GitHub Packages.
+# Trigger: push a tag like `v0.1.0`, or run manually. Versions come from each
+# package.json (bump by hand, then tag). Packages already at their published
+# version are skipped, so re-running is safe.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - name: Publish to GitHub Packages
+        run: |
+          for d in packages/config packages/protocol-math packages/protocol-clients packages/bindings; do
+            echo "::group::publish $d"
+            (cd "$d" && pnpm publish --no-git-checks) || echo "skipped $d (version may already exist)"
+            echo "::endgroup::"
+          done

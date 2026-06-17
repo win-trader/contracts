@@ -1,7 +1,6 @@
 {
   "name": "@win-trader/config",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -19,5 +18,17 @@
   "devDependencies": {
     "@types/node": "^22.19.15",
     "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "files": [
+    "dist",
+    "addresses.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/win-trader/contracts.git",
+    "directory": "packages/config"
   }
 }

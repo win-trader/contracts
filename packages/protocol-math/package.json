@@ -1,7 +1,6 @@
 {
   "name": "@win-trader/protocol-math",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,5 +13,16 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/win-trader/contracts.git",
+    "directory": "packages/protocol-math"
   }
 }

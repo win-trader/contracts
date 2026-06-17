@@ -39,7 +39,6 @@ cat > "$BIND_OUT/package.json" <<'EOF'
 {
   "name": "@win-trader/bindings",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
   "exports": {
     "./vault": "./vault/dist/index.js",
@@ -49,6 +48,9 @@ cat > "$BIND_OUT/package.json" <<'EOF'
     "./oracle": "./oracle/dist/index.js",
     "./mock-token": "./mock-token/dist/index.js"
   },
+  "files": ["vault/dist", "position-manager/dist", "config-manager/dist", "oracle-router/dist", "oracle/dist", "mock-token/dist"],
+  "publishConfig": { "registry": "https://npm.pkg.github.com" },
+  "repository": { "type": "git", "url": "git+https://github.com/win-trader/contracts.git", "directory": "packages/bindings" },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.1.1",
     "buffer": "6.0.3"
