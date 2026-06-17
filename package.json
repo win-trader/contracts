@@ -1,0 +1,11 @@
+{
+  "name": "win-trader-contracts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r --if-present run test"
+  },
+  "engines": { "node": ">=18" }
+}

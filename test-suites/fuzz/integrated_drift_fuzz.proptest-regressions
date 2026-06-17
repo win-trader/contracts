@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2bfac7c154b17c97fc1e6895a8997e48ec7f11e5f4f6784f1569e7b7c1c3d4ff # shrinks to actions = [AdvanceTime { secs: 3586 }, UpdateIndices, Open { trader_idx: 0, size_usdc: 1000000000, collateral_pct: 600, is_long: false }, Open { trader_idx: 0, size_usdc: 1000000000, collateral_pct: 600, is_long: false }, Open { trader_idx: 0, size_usdc: 1000000000, collateral_pct: 600, is_long: false }]

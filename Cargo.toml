@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "contracts/shared",
+    "contracts/interfaces",
+    "contracts/vault",
+    "contracts/position-manager",
+    "contracts/config-manager",
+    "contracts/oracle",
+    "contracts/oracle-router",
+    "test-suites",
+    "mocks/mock-token",
+    "mocks/mock-oracle",
+]
+
+[workspace.dependencies]
+soroban-sdk = { version = "=23.5.2" }
+shared = { path = "contracts/shared" }
+interfaces = { path = "contracts/interfaces" }
+stellar-tokens = { version = "=0.6.0" }
+stellar-access = { version = "=0.6.0" }
+stellar-contract-utils = { version = "=0.6.0" }
+stellar-macros = { version = "=0.6.0" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = false
+strip = "symbols"
+lto = true
+codegen-units = 1
+panic = "abort"

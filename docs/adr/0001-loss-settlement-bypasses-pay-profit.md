@@ -1,0 +1,3 @@
+# Loss settlement bypasses Vault.pay_profit
+
+PositionManager settles trader losses via a direct `token.transfer` from PM into Vault followed by an event-only `record_absorbed_collateral` notification, never via `Vault.pay_profit`. The bypass exists because Soroban's `mock_all_auths()` can't synthesize nested auth from a non-root caller, which made the natural "PM calls Vault, Vault pulls tokens from trader" path untestable; the audit validated the direct-transfer pattern as the long-term shape, so `Vault.pay_profit` is profit-only and a future cleanup should not re-consolidate the two paths without first resolving the nested-auth-in-tests limitation.

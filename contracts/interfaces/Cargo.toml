@@ -1,0 +1,20 @@
+[package]
+name = "interfaces"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+shared = { workspace = true }
+stellar-contract-utils = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+shared = { workspace = true, features = ["testutils"] }

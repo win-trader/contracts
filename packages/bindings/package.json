@@ -1,0 +1,21 @@
+{
+  "name": "@win-trader/bindings",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./vault": "./vault/dist/index.js",
+    "./position-manager": "./position-manager/dist/index.js",
+    "./config-manager": "./config-manager/dist/index.js",
+    "./oracle-router": "./oracle-router/dist/index.js",
+    "./oracle": "./oracle/dist/index.js",
+    "./mock-token": "./mock-token/dist/index.js"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^14.1.1",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 92332acee61a6b44a386c6d76130f0665fdd8a5708fbd5a60ebb5f15a631e567 # shrinks to size_mult = 2, is_long = false, price_dir = false
+cc 4b10d32787b6672721e8b8b99b753d32a5c6a4349fba7af4a2856ec332f4ce99 # shrinks to num_traders = 2
+cc 43b2aca1ccdd4b7422b3a127defe0eab54226aecf2f60a54c7a58e6f5b00f035 # shrinks to size_mult = 2, is_long = false
+cc d965abc5cc079059ccd838c5f6f51e27f324f770c410a7b2d99c3b1f2f2e4482 # shrinks to size_mult = 2, collateral_bps = 500, is_long = false, price_change_pct = 0
