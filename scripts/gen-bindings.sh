@@ -49,7 +49,7 @@ cat > "$BIND_OUT/package.json" <<'EOF'
     "./mock-token": "./mock-token/dist/index.js"
   },
   "files": ["vault/dist", "position-manager/dist", "config-manager/dist", "oracle-router/dist", "oracle/dist", "mock-token/dist"],
-  "publishConfig": { "registry": "https://npm.pkg.github.com" },
+  "publishConfig": { "access": "public" },
   "repository": { "type": "git", "url": "git+https://github.com/win-trader/contracts.git", "directory": "packages/bindings" },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.1.1",
