@@ -8,3 +8,6 @@ target/
 .DS_Store
 *.log
 deployments/local.json
+
+# High-volume generated integration/fuzz snapshots.
+test-suites/test_snapshots/
