@@ -35,18 +35,29 @@ export interface NetworkConfig {
 
 export type Addresses = Record<Network, NetworkConfig>;
 
-// Read the source addresses.json at runtime (not bundled into dist), so that
-// `make deploy` updates are picked up without rebuilding this package.
-//
 // __dirname resolves to:
 //   - packages/config/dist  when consumed as a built package (the normal case)
 //   - packages/config       when imported directly from source (e.g. via bun)
 const here = dirname(fileURLToPath(import.meta.url));
 
+// The current network. Deployed services set NETWORK; defaults to local for dev.
+const NETWORK: Network = (process.env.NETWORK as Network) || "local";
+
+function isSingleNetwork(x: unknown): x is NetworkConfig {
+  return (
+    typeof x === "object" && x !== null && "contracts" in x && "rpcUrl" in x
+  );
+}
+
+// A per-network file injected via ADDRESSES_JSON is the chosen network — kept
+// here so getNetworkConfig returns it regardless of the requested key.
+let injected: NetworkConfig | null = null;
+
 // Resolution order for the address/network registry:
-//   1. ADDRESSES_JSON env path — the deployment-provided registry (per network).
-//   2. the in-package addresses.json — local-dev fallback so the workspace runs
-//      without any env wiring.
+//   1. ADDRESSES_JSON env path — deployment-provided. Either a single-network
+//      file (deployments/<network>.json) or the combined record.
+//   2. the in-package addresses.json — local-dev / fallback (combined record),
+//      a generated artifact so `make deploy` updates are picked up at runtime.
 function loadAddresses(): Addresses {
   const candidates = [
     process.env.ADDRESSES_JSON,
@@ -54,21 +65,29 @@ function loadAddresses(): Addresses {
     resolve(here, "addresses.json"),
   ].filter((p): p is string => Boolean(p));
   for (const path of candidates) {
+    let data: unknown;
     try {
-      return JSON.parse(readFileSync(path, "utf8")) as Addresses;
+      data = JSON.parse(readFileSync(path, "utf8"));
     } catch {
-      // try next
+      continue;
     }
+    if (isSingleNetwork(data)) {
+      injected = data;
+      return { [NETWORK]: data } as Addresses;
+    }
+    return data as Addresses;
   }
   throw new Error(
-    `@win-trader/config: addresses.json not found. Looked in:\n  ${candidates.join("\n  ")}`,
+    `@win-trader/config: address registry not found. Looked in:\n  ${candidates.join("\n  ")}`,
   );
 }
 
 export const config: Addresses = loadAddresses();
 
 export function getNetworkConfig(network: Network): NetworkConfig {
-  return config[network];
+  // When ADDRESSES_JSON injected a single-network file, that file IS the
+  // selected network — return it regardless of the requested key.
+  return injected ?? config[network];
 }
 
 export * from "./constants.js";

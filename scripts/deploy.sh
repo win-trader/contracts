@@ -380,10 +380,14 @@ fi
 } >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
+# Refresh the per-network deployment artifact services inject via ADDRESSES_JSON.
+bash "$ROOT/scripts/split-deployments.sh" "$NETWORK_KEY"
+
 echo ""
 echo "=== Done ==="
 echo "  Network   : $NETWORK_KEY"
 echo "  Addresses → $ADDRESSES_FILE"
+echo "  Deployment → deployments/$NETWORK_KEY.json"
 echo "  Service env → $ENV_FILE"
 echo ""
 echo "Next: 'NETWORK_KEY=$NETWORK_KEY bash scripts/deploy-cex-oracles.sh' to wire CEX oracle publishers."

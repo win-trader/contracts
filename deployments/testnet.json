@@ -1,0 +1,43 @@
+{
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "tickers": [
+    "BTCUSD",
+    "ETHUSD",
+    "XLMUSD"
+  ],
+  "contracts": {
+    "vault": {
+      "address": "CAX5JF7U7WFQDSX7CNEV6DDAQ5J5Q655NLATEUPU5D5GWIWT7T6SGYVO",
+      "startLedger": 2627197
+    },
+    "positionManager": {
+      "address": "CBKWIM7PG2RYZAURKIJIIDN33U4HJ5AK5FTUMPVVWSM5AHVUKZS47TTJ",
+      "startLedger": 2627199
+    },
+    "configManager": {
+      "address": "CDDOA6JJWVH4Q7SXTL7P6S56VFCVSIUKNPTBBXQYVD27V3P3PWSKBNBP",
+      "startLedger": 2627189
+    },
+    "oracleRouter": {
+      "address": "CCA6SWSBBNDVQRWYGYP7T6644K5OR3L35O7YGYLODDT2R2ZV7HG4GKBX",
+      "startLedger": 2627191
+    },
+    "oracle": {
+      "address": "CAACOFUFNVWOMBQU7MDKUKB3IGDW4EJGUZTTHN2Q4IDIA7WVDYXE54DG",
+      "startLedger": 2627193
+    },
+    "binanceOracle": {
+      "address": "CBTVRC6X5Q6KJGAC7SOQHAKBQS4RS5MTOERWKPH5M5OF6FLGVCO6OOHC",
+      "startLedger": 2627236
+    },
+    "kucoinOracle": {
+      "address": "CCNNEIHURTEROE7T34V2E5BDEPOLRBGZEB3V3A5F6A563IQR2E6VA5RV",
+      "startLedger": 2627237
+    },
+    "mockToken": {
+      "address": "CBI2GEK27L4OCKBSKUF3XW3EZYO5WAI4NKYOWO5ZXSIBRUY5ELTDVLQA",
+      "startLedger": 2627195
+    }
+  }
+}

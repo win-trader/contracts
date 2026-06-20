@@ -1,0 +1,43 @@
+{
+  "rpcUrl": "https://soroban.stellar.org",
+  "networkPassphrase": "Public Global Stellar Network ; September 2015",
+  "tickers": [
+    "BTCUSD",
+    "ETHUSD",
+    "XLMUSD"
+  ],
+  "contracts": {
+    "vault": {
+      "address": "",
+      "startLedger": 0
+    },
+    "positionManager": {
+      "address": "",
+      "startLedger": 0
+    },
+    "configManager": {
+      "address": "",
+      "startLedger": 0
+    },
+    "oracleRouter": {
+      "address": "",
+      "startLedger": 0
+    },
+    "oracle": {
+      "address": "",
+      "startLedger": 0
+    },
+    "binanceOracle": {
+      "address": "",
+      "startLedger": 0
+    },
+    "kucoinOracle": {
+      "address": "",
+      "startLedger": 0
+    },
+    "mockToken": {
+      "address": "",
+      "startLedger": 0
+    }
+  }
+}

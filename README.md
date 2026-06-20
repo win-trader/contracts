@@ -63,6 +63,15 @@ are skipped, so re-running is safe.
 
 ## Addresses
 
-Deployed contract addresses live in `packages/config/addresses.json` per network.
-At runtime, consumers can override the source with the `ADDRESSES_JSON` env var
-(path to a JSON file); the in-package file is the local-dev fallback.
+`make deploy*` records contract addresses in two places:
+
+- `deployments/<network>.json` — the **canonical** per-network artifact that
+  off-chain services inject at runtime via the `ADDRESSES_JSON` env var (a path
+  to the file). A testnet deploy refreshes only `deployments/testnet.json`.
+- `packages/config/addresses.json` — the combined all-networks file shipped in
+  `@win-trader/config` as the local-dev fallback.
+
+`scripts/split-deployments.sh <network>` regenerates a network's file from
+`addresses.json`; the deploy scripts call it automatically. A service sets
+`NETWORK` + `ADDRESSES_JSON=…/deployments/<network>.json`; with neither set, the
+config loader falls back to the in-package combined file.

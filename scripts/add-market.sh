@@ -122,6 +122,9 @@ jq --arg net "$NETWORK_KEY" --arg sym "$SYMBOL" \
   "$ADDRESSES_FILE" > "$TMP"
 mv "$TMP" "$ADDRESSES_FILE"
 
+# Refresh the per-network deployment artifact services inject via ADDRESSES_JSON.
+bash "$ROOT/scripts/split-deployments.sh" "$NETWORK_KEY"
+
 echo ""
 echo "=== Done ==="
 echo "  $SYMBOL is now registered on the OracleRouter and PositionManager."

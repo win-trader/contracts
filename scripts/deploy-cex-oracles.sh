@@ -231,6 +231,9 @@ BINANCE_ORACLE_SECRET=$BINANCE_SECRET
 KUCOIN_ORACLE_SECRET=$KUCOIN_SECRET
 EOF
 
+# Refresh the per-network deployment artifact services inject via ADDRESSES_JSON.
+bash "$ROOT/scripts/split-deployments.sh" "$NETWORK_KEY"
+
 echo ""
 echo "=== Done ==="
 echo "  binance-oracle : $BINANCE_ID  (publisher $BINANCE_KEY_ADDR)"
