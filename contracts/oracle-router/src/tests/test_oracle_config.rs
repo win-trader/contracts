@@ -334,8 +334,8 @@ fn test_set_oracle_config_all_fields_zero_is_invalid() {
 // Validation — boundary values that SHOULD succeed
 // ---------------------------------------------------------------------------
 
-/// All three fields set to exactly 1 (the minimum positive value for each
-/// numeric type) must succeed.  This is the tightest valid configuration.
+/// The positive numeric fields accept exactly 1, while `min_required_sources`
+/// accepts the protocol floor. This is the tightest valid configuration.
 /// Verifies that the zero-value guard is exclusive (> 0 not >= 1).
 ///
 /// This test FAILS until `set_oracle_config` is implemented.
@@ -346,10 +346,10 @@ fn test_set_oracle_config_valid_boundary_values_succeed() {
 
     let (oracle, _cm, admin) = deploy_with_config_manager(&env);
     let config = OracleConfig {
-        max_deviation_bps: 1,   // minimum valid i128 positive
-        staleness_threshold: 1, // minimum valid u64 positive
-        cache_duration: 1,      // must be <= staleness_threshold
-        min_required_sources: 2, // minimum valid u32 positive
+        max_deviation_bps: 1,    // minimum valid i128 positive
+        staleness_threshold: 1,  // minimum valid u64 positive
+        cache_duration: 1,       // must be <= staleness_threshold
+        min_required_sources: 2, // quorum floor
     };
 
     // Must not panic. Minimum boundary values are valid.

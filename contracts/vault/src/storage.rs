@@ -11,9 +11,10 @@ pub enum VaultDataKey {
     ReservedUsdc,
     UnclaimedFees,
     NetGlobalTraderPnl,
-    /// Ledger timestamp of the most recent `update_net_pnl` push from PM.
-    /// LP withdrawals refuse to trust a `NetGlobalTraderPnl` older than
-    /// `PNL_SYNC_MAX_AGE_SECS` while positions are open.
+    /// Ledger timestamp of the most recent full-book PM PnL sync. Partial
+    /// per-market `update_net_pnl` pushes update the amount but not this
+    /// timestamp, so LP exits cannot pass on a freshly-updated single market
+    /// while another open market remains stale.
     LastPnlSyncTime,
     IsPaused,
     Version,

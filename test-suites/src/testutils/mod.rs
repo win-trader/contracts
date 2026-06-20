@@ -29,10 +29,9 @@ pub const TRADER_BALANCE: i128 = 100_000 * USDC_UNIT;
 /// Ledger timestamp
 pub const TEST_TIMESTAMP: u64 = 1_700_000_000;
 
-/// Two mock oracle sources driven in lockstep. The OracleRouter enforces a
-/// quorum floor of two sources, so the fixture registers a pair and moves
-/// both together: `set_price` fans out to both, keeping the median exact and
-/// the deviation zero.
+/// Two mock oracle sources driven in lockstep. The fixture uses a two-source
+/// quorum: `set_price` fans out to both, keeping the median exact and
+/// deviation zero.
 pub struct DualMock<'a> {
     pub a: MockOracleClient<'a>,
     pub b: MockOracleClient<'a>,

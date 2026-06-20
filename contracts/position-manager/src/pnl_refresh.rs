@@ -21,7 +21,7 @@ use crate::storage;
 pub fn refresh_market_unrealized_pnl(env: &Env, symbol: &Symbol, mark_price: i128) {
     let market = storage::get_market(env, symbol);
     let new_total = apply_market_pnl(env, symbol, &market, mark_price);
-    push_net_pnl(env, new_total);
+    push_net_pnl(env, new_total, false);
 }
 
 /// Reprice one market's unrealized PnL and fold the delta into the global
@@ -52,11 +52,17 @@ fn apply_market_pnl(env: &Env, symbol: &Symbol, market: &MarketInfo, mark_price:
 }
 
 /// Push the global unrealized total to the Vault's `NetGlobalTraderPnl`.
-fn push_net_pnl(env: &Env, total: i128) {
+/// Partial pushes update the amount only; full-book pushes also refresh the
+/// Vault timestamp used by LP exits.
+fn push_net_pnl(env: &Env, total: i128, full_sync: bool) {
     let vault_addr = storage::get_vault_address(env);
     let vault = VaultClient::new(env, &vault_addr);
     let contract_addr = env.current_contract_address();
-    vault.update_net_pnl(&contract_addr, &total);
+    if full_sync {
+        vault.update_net_pnl_full_sync(&contract_addr, &total);
+    } else {
+        vault.update_net_pnl(&contract_addr, &total);
+    }
 }
 
 /// Reprice every registered market's unrealized PnL against current oracle
@@ -64,12 +70,11 @@ fn push_net_pnl(env: &Env, total: i128) {
 /// design: it can only make the Vault's `NetGlobalTraderPnl` *more* accurate,
 /// so any caller — the keeper, or an LP about to withdraw — may invoke it.
 ///
-/// This is what makes the Vault's single `LastPnlSyncTime` honest across
-/// multiple markets. A per-market tick only reprices the one market it
-/// touches while bumping the global timestamp, so without a whole-book
-/// repricing the freshness gate could pass on a `net_pnl` that is stale for
-/// every market except the last one a keeper happened to checkpoint. After
-/// this call, every market carrying open interest has been repriced.
+/// This is what makes the Vault's `LastPnlSyncTime` honest across multiple
+/// markets. A per-market tick only reprices the one market it touches and
+/// deliberately does not bump the LP-exit freshness timestamp. After this
+/// call, every market carrying open interest has been repriced and the Vault
+/// full-sync timestamp is refreshed.
 ///
 /// Markets with zero open interest are skipped: they contribute zero and
 /// their cached PnL is already zero from the close that flattened them, so
@@ -92,6 +97,6 @@ pub fn sync_all_unrealized_pnl(env: &Env) {
         latest_total = Some(apply_market_pnl(env, &symbol, &market, mark));
     }
     if let Some(total) = latest_total {
-        push_net_pnl(env, total);
+        push_net_pnl(env, total, true);
     }
 }

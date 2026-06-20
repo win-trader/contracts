@@ -572,7 +572,7 @@ fn test_set_oracle_sources_deduplicates_primary_list() {
     let (oracle, _cm, admin) = deploy_with_config_manager(&env);
 
     // Max deviation set to the ceiling so the guard never trips during the
-    // dedup-only check. min_required_sources=1 keeps the quorum trivial.
+    // dedup-only check. The two distinct sources after dedup meet quorum 2.
     let config = crate::OracleConfig {
         max_deviation_bps: shared::constants::MAX_DEVIATION_BPS_CEILING,
         staleness_threshold: 60,
@@ -617,11 +617,11 @@ fn test_set_oracle_sources_deduplicates_primary_list() {
 }
 
 /// Registering only duplicate addresses `[oracle_a, oracle_a, oracle_a]` must
-/// dedup to the single distinct source `[oracle_a]`. Under the quorum floor
-/// (2), a single effective source cannot satisfy `min_required_sources`, so
-/// `get_price` returns InsufficientSources. This proves BOTH that dedup
-/// happens (otherwise three identical query results would meet the quorum and
-/// return a price) AND that a lone source can never set the median.
+/// dedup to the single distinct source `[oracle_a]`. When the admin config
+/// requires quorum 2, a single effective source cannot satisfy
+/// `min_required_sources`, so `get_price` returns InsufficientSources. This
+/// proves dedup happens; otherwise three identical query results would meet
+/// the configured quorum and return a price.
 #[test]
 fn test_set_oracle_sources_dedup_all_duplicate_list_fails_quorum() {
     let env = Env::default();
@@ -658,7 +658,7 @@ fn test_set_oracle_sources_dedup_all_duplicate_list_fails_quorum() {
         result.unwrap_err().unwrap(),
         soroban_sdk::Error::from_contract_error(OracleRouterError::InsufficientSources as u32),
         "a list of only-duplicate addresses dedups to one source and must fail the \
-         quorum floor with InsufficientSources (9), proving both dedup and quorum hold"
+         configured quorum with InsufficientSources (9), proving both dedup and quorum hold"
     );
 }
 

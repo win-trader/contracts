@@ -12,8 +12,9 @@ pub trait OracleRouter {
     // admin of its own; all role checks cross-call the linked ConfigManager.
 
     /// Return the validated median price for `symbol` (scaled by 1e7).
-    /// Returns a cached value if the last fetch is within `cache_duration`;
-    /// otherwise queries sources fresh and refreshes the cache.
+    /// Returns a cached value only while both the router cache duration and
+    /// the underlying source freshness window are still valid; otherwise
+    /// queries sources fresh and refreshes the cache.
     fn get_price(env: Env, symbol: Symbol) -> i128;
 
     /// Add or replace the flat SEP-40 oracle source list for `symbol`.

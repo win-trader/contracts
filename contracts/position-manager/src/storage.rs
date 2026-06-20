@@ -215,6 +215,15 @@ pub fn set_funding_pool(env: &Env, symbol: &Symbol, value: i128) {
         .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
 }
 
+pub fn bump_funding_pool_ttl(env: &Env, symbol: &Symbol) {
+    let key = StorageKey::FundingPool(symbol.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Instance storage: Version
 // ---------------------------------------------------------------------------

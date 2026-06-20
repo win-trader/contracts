@@ -333,12 +333,11 @@ impl VaultContract {
     }
 
     pub fn update_net_pnl(env: Env, caller: Address, pnl: i128) {
-        vault_logic::require_initialized(&env);
-        vault_logic::require_position_manager(&env, &caller);
-        vault_storage::set_net_global_trader_pnl(&env, pnl);
-        vault_storage::set_last_pnl_sync(&env, env.ledger().timestamp());
-        vault_events::UpdateNetPnl { pnl }.publish(&env);
-        shared::bump_instance_ttl(&env);
+        Self::store_net_pnl(&env, &caller, pnl, false);
+    }
+
+    pub fn update_net_pnl_full_sync(env: Env, caller: Address, pnl: i128) {
+        Self::store_net_pnl(&env, &caller, pnl, true);
     }
 
     /// Notify the vault that PositionManager has just transferred `amount`
@@ -548,6 +547,17 @@ impl VaultContract {
 }
 
 impl VaultContract {
+    fn store_net_pnl(env: &Env, caller: &Address, pnl: i128, full_sync: bool) {
+        vault_logic::require_initialized(env);
+        vault_logic::require_position_manager(env, caller);
+        vault_storage::set_net_global_trader_pnl(env, pnl);
+        if full_sync {
+            vault_storage::set_last_pnl_sync(env, env.ledger().timestamp());
+        }
+        vault_events::UpdateNetPnl { pnl }.publish(env);
+        shared::bump_instance_ttl(env);
+    }
+
     pub(crate) fn _migrate(env: &Env, data: &MigrationData) {
         vault_storage::save_version(env, data.version);
     }

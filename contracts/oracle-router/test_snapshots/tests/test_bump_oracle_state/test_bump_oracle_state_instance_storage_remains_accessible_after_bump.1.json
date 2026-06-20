@@ -638,6 +638,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "ConfigVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": "1"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Initialized"
                             }
                           ]

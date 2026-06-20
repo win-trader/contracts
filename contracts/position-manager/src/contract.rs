@@ -171,6 +171,8 @@ impl PositionManager for PositionManagerContract {
         storage::bump_position_ttl(&env, &user_address, &symbol);
         storage::bump_market_ttl(&env, &symbol);
         storage::bump_market_unrealized_pnl_ttl(&env, &symbol);
+        storage::bump_funding_pool_ttl(&env, &symbol);
+        shared::bump_instance_ttl(&env);
     }
 
     fn pause(env: Env, caller: Address) {

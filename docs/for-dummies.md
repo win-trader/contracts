@@ -62,7 +62,7 @@ Inside the Vault:
 - `total_assets` — the actual USDC balance. Everything else is a slice of this.
 - `reserved_usdc` — earmarked to back open Position size. Cannot be withdrawn by LPs.
 - `unclaimed_fees` — protocol revenue (dev + staker slice) awaiting admin claim. Cannot be withdrawn by LPs.
-- `net_global_trader_pnl` — the running mark-to-market of all open trader positions. Positive ⇒ traders are winning and the Vault expects to pay them out. Pushed in by PositionManager on every position / index change.
+- `net_global_trader_pnl` — the running mark-to-market of all open trader positions. Positive ⇒ traders are winning and the Vault expects to pay them out. PositionManager pushes amount updates on position / index changes; LP exits require a recent full-book sync across every open market.
 
 What LPs can actually withdraw at any moment — "**free liquidity**" — is:
 
@@ -251,7 +251,7 @@ In order of "fires first":
 6. **ADL triggers** (adl_pnl_bps = 90%, adl_utilization_bps = 95%) — last line of defence. Keepers force-close profitable positions to prevent insolvency. Never used in normal operation.
 7. **LP cooldown_duration** (5 min default) — LPs can't flash-withdraw right before a known oracle update.
 8. **min_position_lifetime** (60s default) — traders can't open-and-close in the same oracle window.
-9. **Oracle deviation gate** — `max_deviation_bps` ensures no single source can push the median far from consensus.
+9. **Oracle deviation gate** — `max_deviation_bps` limits how far registered sources can drift from the median when the market is configured with multiple oracle sources.
 10. **Upgrade timelock** (24h, immutable floor) — there is no way for the admin to push a hostile WASM and have it take effect before users can withdraw.
 11. **Pause** — emergency stop. Even paused, traders can close (`decrease_position`) and bad debt can still be liquidated.
 

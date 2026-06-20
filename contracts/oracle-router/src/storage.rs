@@ -4,14 +4,15 @@ use soroban_sdk::{contracttype, panic_with_error, vec, Address, Env, Symbol, Vec
 use crate::errors::OracleRouterError;
 use crate::types::OracleConfig;
 
-/// Cached aggregated median price for a symbol — produced by
-/// `fetch_and_validate_price` on a cache miss, consumed by the cache-hit
-/// branch on subsequent calls within `cache_duration` seconds.
+/// Cached aggregated median price for a symbol. `fetched_at` bounds router
+/// cache duration; `oldest_source_update` ensures the cached median is not
+/// served after any source response used to compute it has gone stale.
 #[contracttype]
 #[derive(Clone)]
 pub struct CachedPrice {
     pub price: i128,
-    pub last_update: u64,
+    pub fetched_at: u64,
+    pub oldest_source_update: u64,
 }
 
 #[contracttype]
@@ -22,10 +23,17 @@ pub enum StorageKey {
     ConfigManager,
     /// Global oracle configuration.
     OracleConfig,
+    /// Monotonic version bumped on every config update. Cache keys include
+    /// this value so config changes invalidate old medians without scanning
+    /// every symbol.
+    ConfigVersion,
     /// Per-symbol flat source list (no primary/secondary tiering).
     Sources(Symbol),
-    /// Per-symbol cached aggregated price.
+    /// Legacy per-symbol cached aggregated price key. Kept so upgraded
+    /// deployments do not try to decode old cache entries as V2 values.
     CachedPrice(Symbol),
+    /// Per-symbol cached aggregated price for the active config version.
+    CachedPriceV2(Symbol, u64),
     /// Current contract version — written by `_migrate` after a WASM upgrade.
     Version,
 }
@@ -87,6 +95,22 @@ pub fn save_oracle_config(env: &Env, config: &OracleConfig) {
         .set(&StorageKey::OracleConfig, config);
 }
 
+pub fn load_config_version(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::ConfigVersion)
+        .unwrap_or(0)
+}
+
+pub fn bump_config_version(env: &Env) {
+    let next = load_config_version(env)
+        .checked_add(1)
+        .unwrap_or_else(|| panic_with_error!(env, OracleRouterError::InvalidConfig));
+    env.storage()
+        .instance()
+        .set(&StorageKey::ConfigVersion, &next);
+}
+
 // ---------------------------------------------------------------------------
 // Oracle source helpers — single flat list per symbol.
 // ---------------------------------------------------------------------------
@@ -111,13 +135,15 @@ pub fn save_sources(env: &Env, symbol: &Symbol, sources: &Vec<Address>) {
 // ---------------------------------------------------------------------------
 
 pub fn load_cached_price(env: &Env, symbol: &Symbol) -> Option<CachedPrice> {
+    let version = load_config_version(env);
     env.storage()
         .persistent()
-        .get(&StorageKey::CachedPrice(symbol.clone()))
+        .get(&StorageKey::CachedPriceV2(symbol.clone(), version))
 }
 
 pub fn save_cached_price(env: &Env, symbol: &Symbol, entry: CachedPrice) {
-    let key = StorageKey::CachedPrice(symbol.clone());
+    let version = load_config_version(env);
+    let key = StorageKey::CachedPriceV2(symbol.clone(), version);
     env.storage().persistent().set(&key, &entry);
     env.storage()
         .persistent()
@@ -141,7 +167,7 @@ pub fn bump_symbol_ttl(env: &Env, symbol: &Symbol) {
             .persistent()
             .extend_ttl(&sources_key, SHARED_THRESHOLD, SHARED_BUMP);
     }
-    let cache_key = StorageKey::CachedPrice(symbol.clone());
+    let cache_key = StorageKey::CachedPriceV2(symbol.clone(), load_config_version(env));
     if env.storage().persistent().has(&cache_key) {
         env.storage()
             .persistent()
@@ -153,9 +179,13 @@ pub fn bump_symbol_ttl(env: &Env, symbol: &Symbol) {
 /// a feed disabled or rotated by an operator takes effect immediately rather
 /// than serving the previous median for up to `cache_duration` seconds.
 pub fn remove_cached_price(env: &Env, symbol: &Symbol) {
+    let version = load_config_version(env);
     env.storage()
         .persistent()
         .remove(&StorageKey::CachedPrice(symbol.clone()));
+    env.storage()
+        .persistent()
+        .remove(&StorageKey::CachedPriceV2(symbol.clone(), version));
 }
 
 // ---------------------------------------------------------------------------

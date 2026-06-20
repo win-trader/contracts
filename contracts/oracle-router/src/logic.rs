@@ -72,16 +72,18 @@ impl Validate for OracleConfig {
 }
 
 /// Query every source, returning the prices that pass freshness, sign, and
-/// future-timestamp checks. Try-variants ensure a broken source is skipped
-/// rather than aborting the whole call.
+/// future-timestamp checks plus the oldest source timestamp among those
+/// accepted prices. Try-variants ensure a broken source is skipped rather
+/// than aborting the whole call.
 pub fn query_sources(
     env: &Env,
     sources: &Vec<Address>,
     symbol: &Symbol,
     config: &OracleConfig,
     current_time: u64,
-) -> Vec<i128> {
+) -> (Vec<i128>, Option<u64>) {
     let mut valid_prices: Vec<i128> = Vec::new(env);
+    let mut oldest_source_update: Option<u64> = None;
     for source in sources.iter() {
         let client = OracleClient::new(env, &source);
         let price = match client.try_get_price(symbol) {
@@ -108,9 +110,13 @@ pub fn query_sources(
         if price > i128::MAX / BPS {
             continue;
         }
+        oldest_source_update = Some(match oldest_source_update {
+            Some(oldest) => oldest.min(last_update),
+            None => last_update,
+        });
         valid_prices.push_back(price);
     }
-    valid_prices
+    (valid_prices, oldest_source_update)
 }
 
 /// Full price fetch: cache hit short-circuit, otherwise query every source,
@@ -126,11 +132,15 @@ pub fn fetch_and_validate_price(env: &Env, symbol: Symbol) -> i128 {
     // halt pricing. No-op until the keys exist.
     storage::bump_symbol_ttl(env, &symbol);
 
-    // Cache hit — return immediately without querying sources. The validator
-    // guarantees `cache_duration <= staleness_threshold`, so a cached value
-    // never outlives its underlying source freshness window.
+    // Cache hit — return immediately only while both the router cache window
+    // and the underlying source freshness window remain valid.
     if let Some(entry) = storage::load_cached_price(env, &symbol) {
-        if current_time <= entry.last_update + config.cache_duration {
+        let cache_live = current_time <= entry.fetched_at.saturating_add(config.cache_duration);
+        let sources_live = current_time
+            <= entry
+                .oldest_source_update
+                .saturating_add(config.staleness_threshold);
+        if cache_live && sources_live {
             return entry.price;
         }
     }
@@ -140,7 +150,8 @@ pub fn fetch_and_validate_price(env: &Env, symbol: Symbol) -> i128 {
         panic_with_error!(env, OracleRouterError::NoPriceSources);
     }
 
-    let valid_prices = query_sources(env, &sources, &symbol, &config, current_time);
+    let (valid_prices, oldest_source_update) =
+        query_sources(env, &sources, &symbol, &config, current_time);
 
     // No valid responses at all → StalePrice (every source was stale, broken,
     // future-dated, or returned a non-positive price). This is distinct from
@@ -170,7 +181,11 @@ pub fn fetch_and_validate_price(env: &Env, symbol: Symbol) -> i128 {
     storage::save_cached_price(
         env,
         &symbol,
-        storage::CachedPrice { price: median, last_update: current_time },
+        storage::CachedPrice {
+            price: median,
+            fetched_at: current_time,
+            oldest_source_update: oldest_source_update.unwrap_or(current_time),
+        },
     );
     events::PriceFetch {
         symbol: symbol.clone(),

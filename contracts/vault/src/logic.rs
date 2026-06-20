@@ -1,16 +1,15 @@
 use soroban_sdk::{panic_with_error, token::TokenClient, Address, Env};
 
-use interfaces::ConfigManagerClient;
+use interfaces::{ConfigManagerClient, PositionManagerClient};
 use stellar_contract_utils::math::{mul_div_i128, Rounding};
 use stellar_tokens::{fungible::Base, vault::Vault};
 
 use crate::errors::VaultError;
 use crate::storage;
 
-/// Maximum age of the PM-synced `NetGlobalTraderPnl` accepted on the LP
-/// exit path. `free_liquidity`'s PnL deduction is only as fresh as the last
-/// `update_net_pnl` push; beyond this age, withdrawals refuse to trust it
-/// while positions are open.
+/// Maximum age of the PM full-book `NetGlobalTraderPnl` sync accepted on the
+/// LP exit path. While positions are open, the freshness timestamp must come
+/// from a full-book PM sync, not a single-market checkpoint.
 pub const PNL_SYNC_MAX_AGE_SECS: u64 = 900;
 
 // ---------------------------------------------------------------------------
@@ -116,15 +115,20 @@ pub fn propagate_lockup_on_transfer(
 }
 
 /// Panics with `StalePnlSync` when positions are open (`reserved_usdc > 0`)
-/// and the last `update_net_pnl` push is older than `PNL_SYNC_MAX_AGE_SECS`.
+/// and the last full-book PnL sync is older than `PNL_SYNC_MAX_AGE_SECS`.
 /// With nothing reserved there are no open positions, so the synced PnL is
 /// irrelevant and an idle protocol never blocks LP exits.
 pub fn require_fresh_pnl_sync(env: &Env) {
     if storage::get_reserved_usdc(env) == 0 {
         return;
     }
-    let last = storage::get_last_pnl_sync(env);
     let now = env.ledger().timestamp();
+    let mut last = storage::get_last_pnl_sync(env);
+    if now.saturating_sub(last) > PNL_SYNC_MAX_AGE_SECS {
+        let pm = storage::get_position_manager(env);
+        PositionManagerClient::new(env, &pm).sync_unrealized_pnl();
+        last = storage::get_last_pnl_sync(env);
+    }
     if now.saturating_sub(last) > PNL_SYNC_MAX_AGE_SECS {
         panic_with_error!(env, VaultError::StalePnlSync);
     }

@@ -207,10 +207,9 @@ ORACLE_ID=$(deploy oracle --config_manager "$CM_ID" --publisher "$ADMIN_ADDR")
 ORACLE_LEDGER=$(current_ledger)
 echo "  oracle (mock)  : $ORACLE_ID  (ledger $ORACLE_LEDGER)"
 
-# OracleRouter enforces a quorum floor of min_required_sources >= 2, so a
-# single feed can never price. Deploy a second admin-published oracle so the
-# local (no-CEX) stack has the two sources the router needs. Production
-# replaces these with mock+binance+kucoin via deploy-cex-oracles.sh.
+# OracleRouter requires a two-source quorum. Keep a second admin-published
+# oracle in local deploys so the initial config is valid. Production replaces
+# these with mock+binance+kucoin via deploy-cex-oracles.sh.
 ORACLE2_ID=$(deploy oracle --config_manager "$CM_ID" --publisher "$ADMIN_ADDR")
 ORACLE2_LEDGER=$(current_ledger)
 echo "  oracle 2 (mock): $ORACLE2_ID  (ledger $ORACLE2_LEDGER)"

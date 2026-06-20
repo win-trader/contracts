@@ -984,18 +984,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "LastPnlSyncTime"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u64": "0"
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "NetGlobalTraderPnl"
                             }
                           ]

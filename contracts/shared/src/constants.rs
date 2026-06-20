@@ -124,8 +124,8 @@ pub const DEFAULT_OPTIMAL_UTILIZATION_BPS: i128 = 8_000;
 /// Default base funding rate: 1% annualized (100 bps).
 pub const DEFAULT_BASE_FUNDING_RATE_BPS: i128 = 100;
 
-/// Default oracle quorum — at least 2 valid sources must agree within
-/// `max_deviation_bps` for OracleRouter to return a price.
+/// Default oracle quorum. Two sources preserves a real quorum and deviation
+/// check when multiple feeds are configured.
 pub const DEFAULT_MIN_REQUIRED_SOURCES: u32 = 2;
 /// Default upgrade timelock: 24h. ConfigManager admin can raise but not lower
 /// below `MIN_UPGRADE_TIMELOCK`.
@@ -154,9 +154,8 @@ pub const MAX_DEVIATION_BPS_CEILING: i128 = 10_000;
 /// the legacy API, or the flat source pool post-refactor). Bounds the O(n²)
 /// dedup cost.
 pub const MAX_ORACLE_SOURCES: u32 = 16;
-/// Minimum permissible `min_required_sources` — 2. A single-source median
-/// has no quorum and a structurally-zero deviation check (min == median ==
-/// max), so one compromised source would set the protocol price unchecked.
+/// Minimum permissible `min_required_sources`. A single-source median has no
+/// quorum and a structurally-zero deviation check.
 pub const MIN_REQUIRED_SOURCES_FLOOR: u32 = 2;
 
 /// Maximum permissible `funding_cut_bps` — 30%. Stops the admin from sending

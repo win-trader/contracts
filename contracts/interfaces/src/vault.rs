@@ -16,7 +16,13 @@ pub trait VaultInterface {
 
     fn release_liquidity(env: Env, caller: Address, amount: i128);
 
+    /// Partial PM sync after one market was repriced. Updates the liability
+    /// amount, but does not refresh the full-book timestamp used by LP exits.
     fn update_net_pnl(env: Env, caller: Address, pnl: i128);
+
+    /// Full PM sync after every open-interest market was repriced. LP exits
+    /// require this timestamp to be fresh while positions are open.
+    fn update_net_pnl_full_sync(env: Env, caller: Address, pnl: i128);
 
     /// Notify the vault that PM transferred `amount` USDC into the vault.
     /// `pre_balance` is the vault's USDC balance immediately BEFORE the

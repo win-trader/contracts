@@ -59,6 +59,7 @@ impl OracleRouter for OracleRouterContract {
         logic::require_oracle_admin(&env, &caller);
         config.validate(&env);
         storage::save_oracle_config(&env, &config);
+        storage::bump_config_version(&env);
         events::OracleConfigUpdate {
             staleness: config.staleness_threshold,
             deviation: config.max_deviation_bps,

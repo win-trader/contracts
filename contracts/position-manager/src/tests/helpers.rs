@@ -4,10 +4,10 @@
 
 use soroban_sdk::{vec, Address, Env, Symbol, Vec};
 
-/// Two mock-oracle price sources updated in lockstep. The oracle-router
-/// enforces a quorum floor of 2 sources, so every fixture registers a pair;
-/// tests keep the single `set_price` call they always had and both sources
-/// move together (the median stays exact and deviation stays zero).
+/// Two mock-oracle price sources updated in lockstep. Fixtures keep a pair so
+/// the router's two-source quorum is valid without changing call sites. Tests
+/// keep the single `set_price` call they always had and both sources move
+/// together.
 pub struct DualOracle<'a> {
     pub a: mock_oracle::MockOracleClient<'a>,
     pub b: mock_oracle::MockOracleClient<'a>,

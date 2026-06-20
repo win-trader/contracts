@@ -59,7 +59,96 @@ fn test_get_price_returns_cached_value_within_window() {
     );
 }
 
-/// After the cache expires (current_time > last_update + cache_duration),
+/// A cached median must not remain usable after the source timestamps that
+/// produced it have crossed `staleness_threshold`, even if the router's
+/// `cache_duration` window has not elapsed yet.
+#[test]
+fn test_get_price_cached_value_expires_when_sources_become_stale() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (oracle, mock, _admin) = deploy_with_price_feed(&env);
+    let eth = Symbol::new(&env, "ETH");
+
+    env.ledger().set_timestamp(41);
+    let price: i128 = 3_000_0000000;
+    mock.set_price(&eth, &price);
+
+    // At t=100 the source is 59s old, inside the 60s staleness threshold,
+    // so the router may cache it.
+    env.ledger().set_timestamp(100);
+    assert_eq!(oracle.get_price(&eth), price);
+
+    // At t=102 the router cache would still be inside its 10s duration from
+    // t=100, but the underlying source update is now 61s old and stale.
+    env.ledger().set_timestamp(102);
+    let result = oracle.try_get_price(&eth);
+    assert!(
+        result.is_err(),
+        "cache hit must be rejected once the source timestamp is stale"
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        soroban_sdk::Error::from_contract_error(OracleRouterError::StalePrice as u32),
+        "stale cached source data must force a refetch and return StalePrice"
+    );
+}
+
+/// Updating OracleConfig must invalidate cached medians immediately. Otherwise
+/// a stricter deviation threshold would not take effect until cache expiry.
+#[test]
+fn test_set_oracle_config_invalidates_cached_price_immediately() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (oracle, _cm, admin) = deploy_with_config_manager(&env);
+    let eth = Symbol::new(&env, "ETH");
+
+    let loose = OracleConfig {
+        max_deviation_bps: 10_000,
+        staleness_threshold: 60,
+        cache_duration: 10,
+        min_required_sources: 2,
+    };
+    oracle.set_oracle_config(&admin, &loose);
+
+    let oracle_low = deploy_mock_oracle(&env);
+    let oracle_high = deploy_mock_oracle(&env);
+    oracle_low.set_price(&eth, &1_000_0000000i128);
+    oracle_high.set_price(&eth, &2_000_0000000i128);
+    oracle.set_oracle_sources(
+        &admin,
+        &eth,
+        &vec![
+            &env,
+            oracle_low.address.clone(),
+            oracle_high.address.clone(),
+        ],
+    );
+
+    assert_eq!(oracle.get_price(&eth), 1_500_0000000i128);
+
+    let strict = OracleConfig {
+        max_deviation_bps: 100,
+        staleness_threshold: 60,
+        cache_duration: 10,
+        min_required_sources: 2,
+    };
+    oracle.set_oracle_config(&admin, &strict);
+
+    let result = oracle.try_get_price(&eth);
+    assert!(
+        result.is_err(),
+        "config update must bypass the old cached median immediately"
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        soroban_sdk::Error::from_contract_error(OracleRouterError::PriceDeviationTooHigh as u32),
+        "strict deviation config must be applied without waiting for cache expiry"
+    );
+}
+
+/// After the cache expires (current_time > fetched_at + cache_duration),
 /// `get_price` must re-fetch from sources and surface the new price.
 #[test]
 fn test_get_price_refetches_after_time_advance() {
@@ -939,7 +1028,7 @@ fn test_get_price_zero_price_from_source_is_filtered_out() {
 
     // Zero price — must be filtered, not included in valid_prices.
     zero_oracle.set_price(&eth, &0i128);
-    // Two valid positive prices remain after filtering (quorum floor = 2).
+    // Two valid positive prices remain after filtering (configured quorum = 2).
     let valid_price: i128 = 2_000_0000000; // 2 000.0000000
     valid_a.set_price(&eth, &valid_price);
     valid_b.set_price(&eth, &valid_price);
@@ -1157,7 +1246,7 @@ fn test_get_price_mix_of_zero_and_valid_prices_uses_valid_only() {
     valid_b.set_price(&eth, &valid_price);
 
     // Register in order: zero, negative, valid, valid — verifies filtering is
-    // not order-dependent and two valid sources survive (quorum floor = 2).
+    // not order-dependent and two valid sources survive (configured quorum = 2).
     let primary = vec![
         &env,
         zero_oracle.address.clone(),
@@ -1288,7 +1377,7 @@ fn test_get_price_broken_source_is_skipped_if_other_sources_valid() {
     let oracle_a = deploy_mock_oracle(&env);
 
     // oracle_b, oracle_c: valid prices at current timestamp → fresh. Two valid
-    // sources are needed to meet the quorum floor after the broken one is skipped.
+    // sources are needed to meet the configured quorum after the broken one is skipped.
     let oracle_b = deploy_mock_oracle(&env);
     let oracle_c = deploy_mock_oracle(&env);
     let valid_price: i128 = 1_000_0000000; // 1000.0000000 (7-decimal scaled)

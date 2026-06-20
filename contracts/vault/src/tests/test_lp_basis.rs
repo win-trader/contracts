@@ -294,12 +294,12 @@ fn test_withdraw_with_stale_pnl_sync_panics_while_reserved() {
     deposit_usdc(&fix, &lp, 1_000 * ONE_USDC);
     fix.vault_client
         .reserve_liquidity(&fix.position_manager, &(100 * ONE_USDC));
-    fix.vault_client.update_net_pnl(&fix.position_manager, &0);
+    fix.vault_client
+        .update_net_pnl_full_sync(&fix.position_manager, &0);
 
     // Just inside the freshness window: allowed.
     set_ts(&fix, 1_000 + crate::logic::PNL_SYNC_MAX_AGE_SECS);
-    fix.vault_client
-        .withdraw(&(10 * ONE_USDC), &lp, &lp, &lp);
+    fix.vault_client.withdraw(&(10 * ONE_USDC), &lp, &lp, &lp);
 
     // Beyond the window: the synced PnL can no longer be trusted.
     set_ts(&fix, 1_001 + crate::logic::PNL_SYNC_MAX_AGE_SECS);
@@ -308,10 +308,40 @@ fn test_withdraw_with_stale_pnl_sync_panics_while_reserved() {
         .try_withdraw(&(10 * ONE_USDC), &lp, &lp, &lp);
     assert!(stale.is_err(), "stale PnL sync must block withdraw");
 
-    // A fresh sync unblocks the exit.
-    fix.vault_client.update_net_pnl(&fix.position_manager, &0);
+    // A fresh full-book sync unblocks the exit.
     fix.vault_client
-        .withdraw(&(10 * ONE_USDC), &lp, &lp, &lp);
+        .update_net_pnl_full_sync(&fix.position_manager, &0);
+    fix.vault_client.withdraw(&(10 * ONE_USDC), &lp, &lp, &lp);
+}
+
+#[test]
+fn test_partial_pnl_update_does_not_refresh_lp_exit_freshness() {
+    let fix = setup();
+    let lp = Address::generate(&fix.env);
+
+    set_ts(&fix, 1_000);
+    deposit_usdc(&fix, &lp, 1_000 * ONE_USDC);
+    fix.vault_client
+        .reserve_liquidity(&fix.position_manager, &(100 * ONE_USDC));
+    fix.vault_client
+        .update_net_pnl_full_sync(&fix.position_manager, &0);
+
+    set_ts(&fix, 1_001 + crate::logic::PNL_SYNC_MAX_AGE_SECS);
+
+    // A partial, single-market update changes the amount but must not make
+    // the whole-book freshness gate pass.
+    fix.vault_client.update_net_pnl(&fix.position_manager, &0);
+    let stale = fix
+        .vault_client
+        .try_withdraw(&(10 * ONE_USDC), &lp, &lp, &lp);
+    assert!(
+        stale.is_err(),
+        "partial PnL update must not refresh LP-exit freshness"
+    );
+
+    fix.vault_client
+        .update_net_pnl_full_sync(&fix.position_manager, &0);
+    fix.vault_client.withdraw(&(10 * ONE_USDC), &lp, &lp, &lp);
 }
 
 #[test]
@@ -324,8 +354,7 @@ fn test_withdraw_with_stale_sync_but_nothing_reserved_succeeds() {
 
     // No reserved liquidity → no open positions → freshness is irrelevant.
     set_ts(&fix, 1_000_000);
-    fix.vault_client
-        .withdraw(&(500 * ONE_USDC), &lp, &lp, &lp);
+    fix.vault_client.withdraw(&(500 * ONE_USDC), &lp, &lp, &lp);
 }
 
 // ===========================================================================

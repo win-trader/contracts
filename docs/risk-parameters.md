@@ -188,7 +188,7 @@ A disabled market rejects `increase_position` calls (`MarketDisabled`) but still
 
 Set via `OracleRouter.set_oracle_config(caller, OracleConfig { ... })`. All fields rejected as one `InvalidConfig = 8` on validation failure.
 
-**Unlike the ConfigManager structs below, `OracleRouter::initialize` does NOT seed any OracleConfig.** Admin must call `set_oracle_config(...)` immediately after deploy, otherwise the first `get_price` call panics with `NotInitialized`. `shared::constants::DEFAULT_MIN_REQUIRED_SOURCES = 2` exists but is not currently applied by any initializer; it's a suggested default for deploy scripts.
+**Unlike the ConfigManager structs below, `OracleRouter::initialize` does NOT seed any OracleConfig.** Admin must call `set_oracle_config(...)` immediately after deploy, otherwise the first `get_price` call panics with `NotInitialized`. `shared::constants::DEFAULT_MIN_REQUIRED_SOURCES = 2` exists but is not currently applied by any initializer; it's a suggested deploy-script default.
 
 ### `max_deviation_bps`
 - Default: deployment-time choice (no constant).
@@ -204,13 +204,13 @@ Set via `OracleRouter.set_oracle_config(caller, OracleConfig { ... })`. All fiel
 
 ### `cache_duration`
 - Default: deployment-time choice.
-- Validation: `> 0` AND `<= staleness_threshold` (otherwise a cached price could outlive its underlying source freshness).
+- Validation: `> 0` AND `<= staleness_threshold`.
 - Type: `u64` (seconds)
-- Meaning: TTL on the router's median cache. Longer = fewer cross-contract calls per keeper tick; shorter = fresher prices.
+- Meaning: TTL on the router's median cache. A cache hit is valid only while both `now <= fetched_at + cache_duration` and `now <= oldest_source_update + staleness_threshold`; source freshness can expire the cache before `cache_duration`.
 
 ### `min_required_sources`
 - Default: none (deploy-time choice). Suggested constant `DEFAULT_MIN_REQUIRED_SOURCES = 2` — not applied automatically.
-- Validation: `>= MIN_REQUIRED_SOURCES_FLOOR = 1` AND `<= MAX_ORACLE_SOURCES = 16`.
+- Validation: `>= MIN_REQUIRED_SOURCES_FLOOR = 2` AND `<= MAX_ORACLE_SOURCES = 16`.
 - Type: `u32`
 - Meaning: minimum number of source responses that must clear all filters (positive, fresh, not future-dated) before a median is published. Falling below triggers `InsufficientSources`.
 
@@ -227,7 +227,7 @@ Set via `OracleRouter.set_oracle_sources(caller, symbol, sources: Vec<Address>)`
   - `valid_count >= 1` (else `StalePrice`).
   - `valid_count >= min_required_sources` (else `InsufficientSources`).
   - one-sided deviation `<= max_deviation_bps` (else `PriceDeviationTooHigh`).
-- The lower median of valid prices is cached and returned.
+- The median of valid prices is cached and returned. Odd source counts use the middle sorted value; even source counts use the average of the two middle values.
 - `set_oracle_sources` is callable by ADMIN (via the ConfigManager cross-call).
 
 ---
@@ -247,7 +247,7 @@ Set via `ConfigManager.set_upgrade_timelock(caller, seconds)`. Applies to all fo
 
 Roles are granted by `ConfigManager.grant_role(caller, role, account)` (ADMIN-only).
 
-- `Vault.pause(caller)` (PAUSER) — blocks `deposit`, `mint`, `withdraw`, `redeem`. `pay_profit`, `reserve_liquidity`, `release_liquidity`, `accrue_fees`, `claim_fees`, `record_absorbed_collateral`, and `update_net_pnl` are NOT pause-gated — closes must keep working even when LP deposits/withdraws are halted.
+- `Vault.pause(caller)` (PAUSER) — blocks `deposit`, `mint`, `withdraw`, `redeem`. `pay_profit`, `reserve_liquidity`, `release_liquidity`, `accrue_fees`, `claim_fees`, `record_absorbed_collateral`, `update_net_pnl`, and `update_net_pnl_full_sync` are NOT pause-gated — closes and PnL syncs must keep working even when LP deposits/withdraws are halted.
 - `Vault.unpause(caller)` (PAUSER) — resumes vault.
 - `PositionManager.pause(caller)` (PAUSER) — blocks `increase_position`, `update_indices`, `set_tp_sl`. Idempotent; preserves the original `last_pause_time` so re-pause cannot widen the fee-accrual gap.
 - `PositionManager.unpause(caller)` (PAUSER) — resumes. The next index update clamps `effective_start = max(last_index_update, last_unpause_time)` so borrow/funding fees do not retroactively accrue across the pause.
@@ -316,7 +316,7 @@ All constants in `shared/src/lib.rs` (path: `contracts/shared/src/constants.rs`)
 - `MIN_LEVERAGE = 2`
 - `MAX_DEVIATION_BPS_CEILING = 10_000` (100%)
 - `MAX_ORACLE_SOURCES = 16`
-- `MIN_REQUIRED_SOURCES_FLOOR = 1`
+- `MIN_REQUIRED_SOURCES_FLOOR = 2`
 - `MAX_FUNDING_CUT_BPS = 3_000` (30%)
 - `MIN_ADL_PNL_BPS = 5_000` (50%)
 - `MAX_SLOPE2_BPS = 20_000` (200%)

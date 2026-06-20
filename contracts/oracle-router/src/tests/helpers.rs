@@ -83,7 +83,7 @@ pub fn deploy_with_config_manager(
 
 /// Returns a canonical valid OracleConfig suitable for use across all tests
 /// that require a non-zero configuration. `min_required_sources` is at the
-/// quorum floor (2) so a single source can never set the median.
+/// protocol quorum floor of 2.
 pub fn valid_oracle_config() -> OracleConfig {
     OracleConfig {
         max_deviation_bps: 100,
@@ -144,10 +144,8 @@ pub fn deploy_mock_oracle(env: &Env) -> MockOracleClient<'_> {
 }
 
 /// Two mock oracle sources driven in lockstep. The quorum floor requires at
-/// least two valid sources, so the single-source `get_price` tests register a
-/// pair and move both together: `set_price` fans out to both, keeping the
-/// median exact and the deviation zero. The pair models "one logical feed"
-/// for tests that don't care about source disagreement.
+/// least two valid sources, so tests that model one logical feed register a
+/// pair and move both together.
 #[cfg(test)]
 pub struct DualMock<'a> {
     pub a: MockOracleClient<'a>,

@@ -10,11 +10,10 @@ pub struct OracleConfig {
     /// Maximum age of an external SEP-40 price feed before it is rejected
     /// as stale (in seconds).
     pub staleness_threshold: u64,
-    /// How long a cached aggregated price remains valid (in seconds). A
-    /// `get_price` call within this window of the last fetch returns the
-    /// cached value without re-querying sources. Must be > 0 and
-    /// <= `staleness_threshold` (otherwise the cache could outlive a fresh
-    /// source price and serve stale data).
+    /// How long a cached aggregated price remains valid after the router
+    /// fetch (in seconds). A cache hit also requires every source timestamp
+    /// used for the cached median to remain within `staleness_threshold`.
+    /// Must be > 0 and <= `staleness_threshold`.
     pub cache_duration: u64,
     /// Minimum number of source responses that must agree within
     /// `max_deviation_bps` for OracleRouter to return a price. Floored at

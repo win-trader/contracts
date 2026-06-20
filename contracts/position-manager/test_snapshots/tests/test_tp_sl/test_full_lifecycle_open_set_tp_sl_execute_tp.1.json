@@ -2498,10 +2498,13 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "CachedPrice"
+                  "symbol": "CachedPriceV2"
                 },
                 {
                   "symbol": "BTC"
+                },
+                {
+                  "u64": "1"
                 }
               ]
             },
@@ -2518,10 +2521,13 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "CachedPrice"
+                      "symbol": "CachedPriceV2"
                     },
                     {
                       "symbol": "BTC"
+                    },
+                    {
+                      "u64": "1"
                     }
                   ]
                 },
@@ -2530,7 +2536,15 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "last_update"
+                        "symbol": "fetched_at"
+                      },
+                      "val": {
+                        "u64": "1700000071"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "oldest_source_update"
                       },
                       "val": {
                         "u64": "1700000071"
@@ -2690,6 +2704,18 @@
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ConfigVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": "1"
                         }
                       },
                       {
@@ -3309,18 +3335,6 @@
                         },
                         "val": {
                           "bool": false
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "LastPnlSyncTime"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u64": "1700000071"
                         }
                       },
                       {

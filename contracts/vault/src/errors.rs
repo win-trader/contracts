@@ -29,8 +29,8 @@ pub enum VaultError {
     /// `upgrade` rejected — `new_wasm_hash` does not match the proposed
     /// `PendingUpgrade.wasm_hash`.
     UpgradeHashMismatch = 16,
-    /// `withdraw`/`redeem` rejected — positions are open and the PM-synced
-    /// `NetGlobalTraderPnl` is older than `PNL_SYNC_MAX_AGE_SECS`, so
+    /// `withdraw`/`redeem` rejected — positions are open and the PM full-book
+    /// `NetGlobalTraderPnl` sync is older than `PNL_SYNC_MAX_AGE_SECS`, so
     /// `free_liquidity` cannot be trusted to cover open trader profits.
     StalePnlSync = 17,
 }
