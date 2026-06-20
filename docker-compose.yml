@@ -1,0 +1,23 @@
+services:
+  stellar:
+    image: stellar/quickstart:testing
+    container_name: stellar-local
+    command: --local --enable-soroban-rpc
+    ports:
+      - "8000:8000"
+    # Healthy = friendbot can answer for a real address. getLatestLedger
+    # alone fires too early (Core produces genesis fast, but Horizon and
+    # friendbot lag). Probing friendbot itself is end-to-end.
+    #
+    # Accept HTTP 200 (account funded) OR 400 (account already exists) —
+    # both prove friendbot reached Horizon and validated the address.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 'http://localhost:8000/friendbot?addr=GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7')
+          [ "$$code" = "200" ] || [ "$$code" = "400" ]
+      interval: 5s
+      timeout: 6s
+      retries: 60
+      start_period: 30s
