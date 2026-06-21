@@ -92,4 +92,50 @@ export function getNetworkConfig(network: Network): NetworkConfig {
   return injected ?? config[network];
 }
 
+/** The network env a binding client needs (`@win-trader/protocol-clients`). */
+export interface NetworkEnv {
+  rpcUrl: string;
+  networkPassphrase: string;
+}
+
+export interface ResolvedNetwork {
+  network: Network;
+  config: NetworkConfig;
+  env: NetworkEnv;
+}
+
+export interface ResolveNetworkOptions {
+  /** Override the network instead of reading `process.env.NETWORK`. */
+  network?: Network;
+  /** Contract keys whose address must be non-empty; throws if any is missing. */
+  require?: (keyof NetworkContracts)[];
+}
+
+/**
+ * One-stop network bootstrap for backend services: resolve the network (from
+ * `process.env.NETWORK`, defaulting to `local`), load its config, validate that
+ * the required contract addresses are populated, and hand back a ready
+ * `NetworkEnv`. Replaces the resolve→validate→build dance each service used to
+ * hand-roll with its own (inconsistent) `NETWORK` default.
+ */
+export function resolveNetwork(opts: ResolveNetworkOptions = {}): ResolvedNetwork {
+  const network = opts.network ?? ((process.env.NETWORK as Network) || "local");
+  const networkConfig = getNetworkConfig(network);
+
+  for (const key of opts.require ?? []) {
+    if (!networkConfig.contracts[key]?.address) {
+      throw new Error(
+        `@win-trader/config: contract "${String(key)}" has no address for network "${network}". ` +
+          `Run a deploy to populate addresses.json (or ADDRESSES_JSON).`,
+      );
+    }
+  }
+
+  return {
+    network,
+    config: networkConfig,
+    env: { rpcUrl: networkConfig.rpcUrl, networkPassphrase: networkConfig.networkPassphrase },
+  };
+}
+
 export * from "./constants.js";
