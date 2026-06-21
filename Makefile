@@ -7,7 +7,7 @@ PASSPHRASE    ?= Standalone Network ; February 2017
 SOURCE        ?= admin
 DEPLOY_CONTRACTS = config-manager oracle-router vault position-manager
 
-.PHONY: build optimize bind test clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet upgrade-local upgrade-testnet grant-keepers add-market cex-oracles local
+.PHONY: build optimize bind test clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-local upgrade-testnet grant-keepers add-market cex-oracles cex-oracles-testnet local
 
 build:
 	cargo build --target wasm32v1-none --release \
@@ -96,6 +96,13 @@ add-market:
 # win-trader/oracles repo and run against these instances.
 cex-oracles:
 	bash scripts/deploy-cex-oracles.sh
+
+cex-oracles-testnet:
+	NETWORK_KEY=testnet bash scripts/deploy-cex-oracles.sh
+
+deploy-testnet-full: provision-keys-testnet deploy-testnet cex-oracles-testnet
+	@echo ""
+	@echo "Testnet on-chain environment ready. Runtime artifact: deployments/testnet.json"
 
 # Full local bootstrap (on-chain only): network -> identities -> core
 # contracts -> CEX oracle instances. The off-chain stack (indexer, keeper,

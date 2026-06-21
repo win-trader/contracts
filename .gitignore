@@ -8,6 +8,7 @@ target/
 .DS_Store
 *.log
 deployments/local.json
+packages/config/addresses.json.bak.*
 
 # High-volume generated integration/fuzz snapshots.
 test-suites/test_snapshots/

@@ -46,12 +46,9 @@ Local network + deploy:
 
 - `make up` / `make down` / `make reset` — local Stellar network
 - `make deploy` / `make deploy-testnet` / `make deploy-mainnet` — deploy and record addresses
+- `make cex-oracles-testnet` — deploy and wire Binance/KuCoin oracle contracts on testnet
+- `make deploy-testnet-full` — provision testnet keys, deploy core contracts, then deploy/wire CEX oracles
 - `make upgrade-local` / `make upgrade-testnet`, `make grant-keepers`, `make add-market`
-
-> The `Makefile` still contains service targets from before the split
-> (`indexer`, `keeper`, `api`, `frontend`, `server`, `db-*`, `backend-*`, `sim`)
-> that reference packages now living in the sibling repos. Those are stale and
-> pending removal — use the contract, bindings, and deploy targets above.
 
 ## Publishing
 
@@ -75,3 +72,22 @@ are skipped, so re-running is safe.
 `addresses.json`; the deploy scripts call it automatically. A service sets
 `NETWORK` + `ADDRESSES_JSON=…/deployments/<network>.json`; with neither set, the
 config loader falls back to the in-package combined file.
+
+## Testnet deployment handoff
+
+Run the on-chain testnet deploy from this repo:
+
+```bash
+make deploy-testnet-full
+```
+
+That produces:
+
+- `deployments/testnet.json` — copy this to the VPS beside each Docker stack
+  as `deployments/testnet.json`.
+- `.env.testnet` — contains generated service secrets. Copy only the values the
+  service needs into the sibling repo `.env.testnet` files:
+  `KEEPER_SECRET` for `offchain`, and `BINANCE_ORACLE_SECRET` /
+  `KUCOIN_ORACLE_SECRET` for `oracles`.
+
+Do not commit `.env.testnet`.

@@ -17,6 +17,8 @@ export interface NetworkContracts {
   configManager: ContractInfo;
   oracleRouter: ContractInfo;
   oracle: ContractInfo;
+  /** Secondary admin-published oracle used before live CEX sources are wired. */
+  oracle2?: ContractInfo;
   /** Per-source oracle instances populated by scripts/deploy-cex-oracles.sh. */
   binanceOracle: ContractInfo;
   kucoinOracle: ContractInfo;

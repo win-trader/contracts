@@ -25,17 +25,25 @@ case "$NETWORK_KEY" in
   local)
     RPC_URL="${RPC_URL:-http://localhost:8000/soroban/rpc}"
     NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Standalone Network ; February 2017}"
+    FRIENDBOT="${FRIENDBOT:-http://localhost:8000/friendbot}"
+    HORIZON="${HORIZON:-http://localhost:8000}"
     ;;
   testnet)
     RPC_URL="${RPC_URL:-https://soroban-testnet.stellar.org}"
     NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
+    FRIENDBOT="${FRIENDBOT:-https://friendbot.stellar.org}"
+    HORIZON="${HORIZON:-https://horizon-testnet.stellar.org}"
     ;;
   mainnet)
     RPC_URL="${RPC_URL:-https://soroban.stellar.org}"
     NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}"
+    FRIENDBOT=""
+    HORIZON="${HORIZON:-https://horizon.stellar.org}"
     ;;
   *)
     : "${RPC_URL:?required for unknown NETWORK_KEY}" "${NETWORK_PASSPHRASE:?required}"
+    FRIENDBOT="${FRIENDBOT:-}"
+    HORIZON="${HORIZON:-}"
     ;;
 esac
 
@@ -75,22 +83,28 @@ deploy() {
   local name=$1
   shift
   # Trailing args are constructor arguments, forwarded after `--`.
-  local wasm="$WASM_DIR/$(echo "$name" | tr '-' '_').wasm"
+  local wasm="$WASM_DIR/$(echo "$name" | tr '-' '_').optimized.wasm"
   echo "Deploying $name..." >&2
+  local contract_id
   if [[ $# -gt 0 ]]; then
-    stellar contract deploy \
+    contract_id=$(stellar contract deploy \
       --wasm "$wasm" \
       --source admin \
       --rpc-url "$RPC_URL" \
       --network-passphrase "$NETWORK_PASSPHRASE" \
-      -- "$@"
+      -- "$@")
   else
-    stellar contract deploy \
+    contract_id=$(stellar contract deploy \
       --wasm "$wasm" \
       --source admin \
       --rpc-url "$RPC_URL" \
-      --network-passphrase "$NETWORK_PASSPHRASE"
+      --network-passphrase "$NETWORK_PASSPHRASE")
   fi
+  if [[ -z "$contract_id" ]]; then
+    echo "❌ Deploy for $name returned an empty contract id" >&2
+    exit 1
+  fi
+  echo "$contract_id"
 }
 
 # ---------- Pull required base addresses ----------
@@ -106,50 +120,55 @@ fi
 
 # ---------- Build (only oracle wasm needed) ----------
 echo ""
-echo "=== Building oracle wasm ==="
+echo "=== Building + optimizing oracle wasm ==="
 (cd "$ROOT" && cargo build --target wasm32v1-none --release -p oracle)
+stellar contract optimize --wasm "$WASM_DIR/oracle.wasm"
 
-# ---------- Generate / load per-source keypairs ----------
-ensure_key() {
+# ---------- Load per-source keypairs ----------
+require_identity() {
   local name=$1
-  if ! stellar keys address "$name" &>/dev/null; then
-    echo "Creating '$name' identity..."
-    stellar keys generate "$name"
+  if ! stellar keys address "$name" >/dev/null 2>&1; then
+    echo "❌ Identity '$name' not found. Run: NETWORK_KEY=$NETWORK_KEY bash scripts/provision-keys.sh"
+    exit 1
   fi
   stellar keys address "$name"
 }
 
-BINANCE_KEY_ADDR=$(ensure_key binance-oracle)
-KUCOIN_KEY_ADDR=$(ensure_key kucoin-oracle)
+BINANCE_KEY_ADDR=$(require_identity binance-oracle)
+KUCOIN_KEY_ADDR=$(require_identity kucoin-oracle)
 
 # Friendbot returns 200 on first fund and 400 on subsequent ("already funded").
-# We must treat the 400-with-existing-account case as success — but we cannot
-# treat a curl failure as success, otherwise the account never lands on-chain
-# and the publisher dies later with "Account not found". Verify against the
-# RPC after each attempt and retry until visible.
+# Verify against Horizon after each attempt so a curl failure cannot silently
+# leave the publisher account unusable.
 account_exists() {
   local addr=$1
-  # Horizon at :8000 returns 200 if the account is funded and visible,
-  # 4xx otherwise. We use this rather than the Soroban RPC because the
-  # local quickstart container already exposes Horizon here.
+  [[ -z "$HORIZON" ]] && return 1
   local code
-  code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8000/accounts/${addr}")
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$HORIZON/accounts/${addr}") || code="000"
   [[ "$code" == "200" ]]
 }
 
 fund_account() {
   local addr=$1
   local label=$2
+  if [[ -z "$FRIENDBOT" ]]; then
+    echo "  $label ($addr) — skipped (no friendbot for $NETWORK_KEY)"
+    return 0
+  fi
+  if account_exists "$addr"; then
+    echo "  $label ($addr) — already funded"
+    return 0
+  fi
   for attempt in $(seq 1 30); do
-    curl -sf "http://localhost:8000/friendbot?addr=${addr}" >/dev/null 2>&1 || true
+    curl -sf "$FRIENDBOT?addr=${addr}" >/dev/null 2>&1 || true
     if account_exists "$addr"; then
       echo "  $label funded ($addr)"
       return 0
     fi
-    sleep 1
+    sleep 2
   done
-  echo "❌ Failed to fund $label ($addr) after 30s"
-  echo "   Re-run manually: curl 'http://localhost:8000/friendbot?addr=$addr'"
+  echo "❌ Failed to fund $label ($addr) after ~60s"
+  echo "   Re-run manually: curl '$FRIENDBOT?addr=$addr'"
   exit 1
 }
 
@@ -239,4 +258,5 @@ echo "=== Done ==="
 echo "  binance-oracle : $BINANCE_ID  (publisher $BINANCE_KEY_ADDR)"
 echo "  kucoin-oracle  : $KUCOIN_ID  (publisher $KUCOIN_KEY_ADDR)"
 echo ""
-echo "Run 'make oracles-cex' to start both publisher loops."
+echo "Next: copy deployments/$NETWORK_KEY.json plus publisher secrets to the oracles repo/VPS and run:"
+echo "  docker compose --env-file .env.$NETWORK_KEY -f compose.oracles.yml up -d --build"

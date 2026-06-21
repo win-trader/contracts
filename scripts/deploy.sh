@@ -167,6 +167,10 @@ deploy() {
       --rpc-url "$RPC_URL" \
       --network-passphrase "$NETWORK_PASSPHRASE")
   fi
+  if [[ -z "$contract_id" ]]; then
+    echo "❌ Deploy for $name returned an empty contract id" >&2
+    exit 1
+  fi
   # Post-deploy WASM hash verification. Confirm the on-chain bytecode matches
   # the file we built — catches a registry/proxy-injection where the deployed
   # code differs from what we sha256'd.
@@ -218,6 +222,13 @@ MOCK_TOKEN_ID=$(deploy mock-token)
 MOCK_TOKEN_LEDGER=$(current_ledger)
 echo "  mock-token     : $MOCK_TOKEN_ID  (ledger $MOCK_TOKEN_LEDGER)"
 
+echo "  mock-token.initialize(admin, 7, USDC, USDC)"
+invoke --id "$MOCK_TOKEN_ID" -- initialize \
+  --admin "$ADMIN_ADDR" \
+  --decimals 7 \
+  --name "USDC" \
+  --symbol "USDC"
+
 # PositionManager is deployed BEFORE the Vault: the Vault binds its trusted
 # PositionManager atomically in its own constructor, so PM must already exist.
 # PM's constructor omits the Vault; the reference cycle is closed by the
@@ -234,18 +245,9 @@ echo "  vault          : $VAULT_ID  (ledger $VAULT_LEDGER)"
 echo ""
 echo "=== Wiring contracts ==="
 
-# Every protocol contract initialized via its constructor, atomically at
-# deploy (the --constructor args above) — there is no separate initialize
-# step and therefore no window for a third party to front-run init. Two
-# post-deploy wiring calls remain: the mock token's own initialize, and
-# closing the Vault↔PositionManager reference cycle via set_vault.
-
-echo "  mock-token.initialize(admin, 7, USDC, USDC)"
-invoke --id "$MOCK_TOKEN_ID" -- initialize \
-  --admin "$ADMIN_ADDR" \
-  --decimals 7 \
-  --name "USDC" \
-  --symbol "USDC"
+# Every protocol contract initializes via its constructor, atomically at
+# deploy (the --constructor args above). The remaining post-deploy wiring call
+# closes the Vault↔PositionManager reference cycle via set_vault.
 
 echo "  position-manager.set_vault(admin, vault)"
 invoke --id "$PM_ID" -- set_vault \
