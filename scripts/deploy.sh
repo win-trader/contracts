@@ -254,6 +254,12 @@ invoke --id "$PM_ID" -- set_vault \
   --caller "$ADMIN_ADDR" \
   --vault_address "$VAULT_ID"
 
+echo "  mock-token.configure_protocol(admin, vault, position-manager)"
+invoke --id "$MOCK_TOKEN_ID" -- configure_protocol \
+  --admin "$ADMIN_ADDR" \
+  --vault "$VAULT_ID" \
+  --position_manager "$PM_ID"
+
 # ---------- Grant roles ----------
 echo ""
 echo "=== Granting roles ==="
