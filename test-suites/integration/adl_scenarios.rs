@@ -38,7 +38,6 @@ fn test_adl_triggers_via_pnl_ratio() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             // 50% — equal to MIN_ADL_PNL_BPS. ConfigManager refuses values below this.
             adl_pnl_bps: 5_000,
             // Keep util threshold high so the test isolates the pnl-route trigger.
@@ -46,12 +45,12 @@ fn test_adl_triggers_via_pnl_ratio() {
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&f.admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&f.admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     // Sizing math: pnl_ratio = combined_pnl / total_assets > 50%, AND the
@@ -120,18 +119,17 @@ fn test_adl_triggers_via_utilization() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,          // keep PnL threshold high
             adl_utilization_bps: 3_000,   // low: 30% utilization triggers ADL
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&f.admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&f.admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     // Open enough positions to exceed 30% utilization
@@ -168,18 +166,17 @@ fn test_adl_payout_zero_when_health_negative() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 3_000,
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&f.admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&f.admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     let trader = f.create_funded_trader(50_000 * USDC_UNIT);
@@ -209,18 +206,17 @@ fn test_adl_reduces_oi() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 3_000,
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&f.admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&f.admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     let trader_a = f.create_funded_trader(50_000 * USDC_UNIT);
@@ -268,18 +264,17 @@ fn test_adl_cascade_multiple_positions() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 2_100, // low: 21% — chosen so third ADL at ~200k/1M ≈ 20% fails
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&f.admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&f.admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     let trader_a = f.create_funded_trader(30_000 * USDC_UNIT);
@@ -334,18 +329,17 @@ fn test_adl_short_position() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 3_000,
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&f.admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&f.admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     let trader = f.create_funded_trader(50_000 * USDC_UNIT);

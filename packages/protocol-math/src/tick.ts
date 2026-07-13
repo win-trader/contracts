@@ -7,17 +7,14 @@
 // matches what an immediate on-chain refresh would produce (modulo the
 // inevitable skew between `now` here and ledger time on-chain).
 
-import { BPS } from "./constants.js";
 import {
   calcUnrealizedPnl,
-  calcBorrowFee,
-  calcFundingFee,
+  calcFeeFromDebt,
   calcHealth,
   calcUtilizationBps,
   calcBorrowRate,
-  calcFundingRate,
-  accumulateBorrowIndex,
-  accumulateFundingIndex,
+  calcSkewRate,
+  accumulateFeeIndex,
   isTpTriggered,
   isSlTriggered,
 } from "./pure.js";
@@ -31,7 +28,7 @@ import type {
 
 export class MarketTick {
   constructor(
-    /** Market state with `acc_borrow_index` and `acc_funding_index` projected to tick time. */
+    /** Market state with all carrying-fee indices projected to tick time. */
     public readonly market: MarketState,
     public readonly mark_price: bigint,
   ) {}
@@ -51,7 +48,8 @@ export class MarketTick {
     const time_delta = now > effective_start ? now - effective_start : 0n;
 
     let acc_borrow_index = market.acc_borrow_index;
-    let acc_funding_index = market.acc_funding_index;
+    let acc_long_skew_index = market.acc_long_skew_index;
+    let acc_short_skew_index = market.acc_short_skew_index;
 
     if (time_delta > 0n) {
       const util_bps = calcUtilizationBps(vault.reserved_usdc, vault.total_assets);
@@ -62,20 +60,26 @@ export class MarketTick {
         rate_config.slope2_bps,
         rate_config.optimal_utilization_bps,
       );
-      acc_borrow_index = accumulateBorrowIndex(acc_borrow_index, borrow_rate, time_delta);
+      acc_borrow_index = accumulateFeeIndex(acc_borrow_index, borrow_rate, time_delta);
 
-      const funding_rate = calcFundingRate(
+      const skew_rate = calcSkewRate(
         market.long_open_interest,
         market.short_open_interest,
-        rate_config.base_funding_rate_bps,
+        util_bps,
+        rate_config.max_skew_rate_bps,
       );
-      acc_funding_index = accumulateFundingIndex(acc_funding_index, funding_rate, time_delta);
+      if (market.long_open_interest > market.short_open_interest) {
+        acc_long_skew_index = accumulateFeeIndex(acc_long_skew_index, skew_rate, time_delta);
+      } else if (market.short_open_interest > market.long_open_interest) {
+        acc_short_skew_index = accumulateFeeIndex(acc_short_skew_index, skew_rate, time_delta);
+      }
     }
 
     const projected: MarketState = {
       ...market,
       acc_borrow_index,
-      acc_funding_index,
+      acc_long_skew_index,
+      acc_short_skew_index,
       last_index_update: now,
     };
     return new MarketTick(projected, mark_price);
@@ -83,59 +87,35 @@ export class MarketTick {
 
   /**
    * Mirrors `MarketTick::evaluate` in `contracts/position-manager/src/tick.rs`.
-   * `funding_cut_bps` defaults to 0n; callers without access to the protocol
-   * config still get correct raw fields and a zero-sum-scaled
-   * `effective_funding`, but `funding_protocol_cut` and `effective_health`
-   * will under-cut a positive-funding receiver.
+   * Uses additive exposure and fee-debt baselines, matching on-chain rounding.
    */
-  evaluate(pos: PositionState, slice?: Slice, funding_cut_bps: bigint = 0n): PositionEvaluation {
+  evaluate(pos: PositionState, slice?: Slice): PositionEvaluation {
     const size = slice?.size ?? pos.size;
     const collateral = slice?.collateral ?? pos.collateral;
+    const base_exposure = slice?.base_exposure ?? pos.base_exposure;
+    const borrow_fee_debt = slice?.borrow_fee_debt ?? pos.borrow_fee_debt;
+    const skew_fee_debt = slice?.skew_fee_debt ?? pos.skew_fee_debt;
 
-    const pnl = calcUnrealizedPnl(size, pos.entry_price, this.mark_price, pos.is_long);
-    const borrow_fee = calcBorrowFee(
+    const pnl = calcUnrealizedPnl(size, base_exposure, this.mark_price, pos.is_long);
+    const borrow_fee = calcFeeFromDebt(
       size,
-      pos.entry_borrow_index,
       this.market.acc_borrow_index,
+      borrow_fee_debt,
     );
-    const funding_fee = calcFundingFee(
+    const skew_index = pos.is_long
+      ? this.market.acc_long_skew_index
+      : this.market.acc_short_skew_index;
+    const skew_fee = calcFeeFromDebt(
       size,
-      pos.entry_funding_index,
-      this.market.acc_funding_index,
-      pos.is_long,
+      skew_index,
+      skew_fee_debt,
     );
-
-    // Zero-sum cap: receivers (funding_fee > 0) are scaled by
-    // payer_oi / receiver_oi so total received never exceeds total paid.
-    let zero_sum_funding = funding_fee;
-    if (funding_fee > 0n) {
-      const payer_oi = pos.is_long
-        ? this.market.short_open_interest
-        : this.market.long_open_interest;
-      const receiver_oi = pos.is_long
-        ? this.market.long_open_interest
-        : this.market.short_open_interest;
-      if (receiver_oi <= 0n) {
-        zero_sum_funding = 0n;
-      } else if (payer_oi < receiver_oi) {
-        zero_sum_funding = (funding_fee * payer_oi) / receiver_oi;
-      }
-    }
-
-    const funding_protocol_cut =
-      zero_sum_funding > 0n ? (zero_sum_funding * funding_cut_bps) / BPS : 0n;
-    const effective_funding = zero_sum_funding - funding_protocol_cut;
-
-    const health = calcHealth(collateral, pnl, borrow_fee, funding_fee);
-    const effective_health = calcHealth(collateral, pnl, borrow_fee, effective_funding);
+    const effective_health = calcHealth(collateral, pnl, borrow_fee, skew_fee);
 
     return {
       pnl,
       borrow_fee,
-      funding_fee,
-      effective_funding,
-      funding_protocol_cut,
-      health,
+      skew_fee,
       effective_health,
     };
   }

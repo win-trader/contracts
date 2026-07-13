@@ -134,21 +134,20 @@ fn setup_full<'a>() -> TestFixture<'a> {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -474,7 +473,13 @@ fn test_full_close_long_profit_trader_receives_funds() {
 
     // Trader should have received collateral + PnL back
     // PnL = 10,000 USDC * (55,000 - 50,000) / 50,000 = 1,000 USDC
-    let expected_pnl = math::calc_unrealized_pnl(DEFAULT_SIZE, BTC_PRICE, profit_price, true);
+    let expected_pnl = math::calc_unrealized_pnl(
+        &f.env,
+        DEFAULT_SIZE,
+        math::calc_base_exposure(&f.env, DEFAULT_SIZE, BTC_PRICE),
+        profit_price,
+        true,
+    );
     assert!(
         expected_pnl > 0,
         "PnL should be positive for profitable long"
@@ -488,7 +493,7 @@ fn test_full_close_long_profit_trader_receives_funds() {
         received
     );
     // The received amount should be approximately collateral + pnl - fees
-    // We allow some tolerance for borrow/funding fees
+    // We allow some tolerance for carrying fees.
     assert!(
         received >= DEFAULT_COLLATERAL + expected_pnl - (100 * USDC_UNIT),
         "Trader must receive close to collateral + PnL. Received: {}, Expected min: {}",
@@ -635,7 +640,13 @@ fn test_full_close_long_loss_trader_receives_reduced_collateral() {
 
     // With exactly -1000 PnL and 1000 collateral, health ~= 0.
     // Trader should receive very little or nothing.
-    let pnl = math::calc_unrealized_pnl(DEFAULT_SIZE, BTC_PRICE, loss_price, true);
+    let pnl = math::calc_unrealized_pnl(
+        &f.env,
+        DEFAULT_SIZE,
+        math::calc_base_exposure(&f.env, DEFAULT_SIZE, BTC_PRICE),
+        loss_price,
+        true,
+    );
     assert!(pnl < 0, "PnL must be negative for losing long");
 
     // At 10x leverage with 10% drop, the loss roughly equals collateral
@@ -975,7 +986,13 @@ fn test_short_position_profit_on_price_decrease() {
 
     let balance_after_close = f.usdc_client.balance(&f.trader);
 
-    let pnl = math::calc_unrealized_pnl(DEFAULT_SIZE, ETH_PRICE, drop_price, false);
+    let pnl = math::calc_unrealized_pnl(
+        &f.env,
+        DEFAULT_SIZE,
+        math::calc_base_exposure(&f.env, DEFAULT_SIZE, ETH_PRICE),
+        drop_price,
+        false,
+    );
     assert!(pnl > 0, "Short PnL must be positive when price drops");
 
     let received = balance_after_close - balance_after_open;
@@ -1024,7 +1041,13 @@ fn test_short_position_loss_on_price_increase() {
     let received = balance_after_close - balance_after_open;
 
     // Trader should receive collateral minus loss
-    let pnl = math::calc_unrealized_pnl(DEFAULT_SIZE, ETH_PRICE, rise_price, false);
+    let pnl = math::calc_unrealized_pnl(
+        &f.env,
+        DEFAULT_SIZE,
+        math::calc_base_exposure(&f.env, DEFAULT_SIZE, ETH_PRICE),
+        rise_price,
+        false,
+    );
     assert!(pnl < 0, "Short PnL must be negative when price rises");
 
     assert!(
@@ -1262,7 +1285,7 @@ fn user_full_close_refunds_escrow() {
     // With price unchanged the position payout is ~DEFAULT_COLLATERAL.
     // The escrow refund is an ADDITIONAL TP_SL_FEE on top.
     // So received >= DEFAULT_COLLATERAL + TP_SL_FEE (allowing for tiny
-    // borrow/funding fees that may shrink the payout).
+    // carrying fees that may shrink the payout).
     assert!(
         received >= DEFAULT_COLLATERAL + TP_SL_FEE - 1_000_000,
         "Full close must refund escrow on top of payout. Got: {}, expected ~{}",

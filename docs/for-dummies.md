@@ -42,12 +42,12 @@ Every action in the protocol is taken by one of these. Knowing who calls what ma
 
 ### Keeper *(KEEPER role, granted by Admin)*
 - A whitelisted bot network. Does the work that *must* keep happening but doesn't pay an on-trade bounty:
-  - `update_indices(symbol)` — advances the borrow + funding accumulators (so fees actually accrue).
+  - `update_indices(symbol)` — advances borrow and dominant-side skew accumulators.
   - `deleverage_position(trader, symbol)` — ADL, the emergency forced-close when the Vault would otherwise become insolvent. Keeper-gated because picking the target requires off-chain reasoning across all open positions.
 - Distinct from oracle publishers (`ORACLE` role), so the price-publishing surface can be rotated independently.
 
 ### Admin / Pauser / Upgrader *(ConfigManager roles)*
-- **Admin**: tunes risk parameters (FeeSplits, ProtocolLimits, BorrowRateConfig, FeeConfig), grants other roles, claims accrued protocol fees.
+- **Admin**: tunes risk parameters (FeeSplits, ProtocolLimits, CarryingFeeConfig, FeeConfig), grants other roles, claims accrued protocol fees.
 - **Pauser**: hits the emergency stop on Vault or PositionManager. Can also veto a pending upgrade.
 - **Upgrader**: proposes and executes WASM upgrades. Subject to a 24h timelock.
 
@@ -98,10 +98,8 @@ This compensates LPs for the *opportunity cost* of capital that's been earmarked
 
 Sliced 90/10 LP/protocol at Close time.
 
-### Stream 3 — Funding cut
-When longs and shorts are unbalanced, the heavier side pays the lighter side a funding rate proportional to the imbalance. This is a peer-to-peer transfer — it does *not* take from the Vault.
-
-The protocol takes a **funding cut** (5% default, cap 30%) of the positive funding payments traders would otherwise receive. That cut is split 90/10 LP/protocol like everything else. Negative funding pays the receiving side in full — no protocol cut.
+### Stream 3 — Skew carrying fee
+When one direction dominates, positions on that side pay LPs an additional fee for as long as the imbalance persists. It is not charged at open. The annualized rate grows quadratically with OI concentration and linearly with Vault utilization, up to 50% APR by default. Balanced markets pay zero. The minority side receives no credit, so the model cannot create an unbacked trader receivable. Collected skew fees stay entirely with LPs.
 
 ### Stream 4 — Net trader PnL absorbed
 The big one. When a position closes underwater (health < 0 or below threshold on liquidation), the trader's collateral is absorbed into the Vault. When a position closes profitable, the Vault pays them. **In aggregate, over time, the LPs are the house.** Traders' losses *are* LP yield. Traders' wins reduce it.
@@ -122,13 +120,12 @@ So in the liquidation case, both the open-fee revenue and the leftover TP/SL esc
 ## 5. Where the *trader* yield comes from (and what it costs)
 
 Traders make money when:
-- The mark price moves in their favour AND the move exceeds open fee + accumulated borrow fee + any net funding paid.
-- They sit on the heavier side when funding flips — they pocket the funding payments from the other side (minus the protocol cut on positive receipts).
+- The mark price moves in their favour enough to exceed open and accumulated carrying fees.
 
 Traders pay:
 - **Open fee** — every Increase. 0.1% of notional.
 - **Borrow fee** — continuous, scales with utilization. The fee builds quietly on the `acc_borrow_index` and is settled at Close.
-- **Funding fee** — paid when on the heavier side, received when on the lighter side. Settled at Close.
+- **Skew carrying fee** — continuously paid only while the position is on the dominant side; settled at Close and routed to LPs.
 - **TP/SL execution-fee escrow** — flat 0.5 USDC by default, charged the first time TP or SL is set. Refunded on full user close, paid to Executor on TP/SL trigger, forfeited on liquidation.
 - **Liquidation bounty** (only if liquidated) — 1% of collateral by default, paid out of the trader's seized collateral before LP/protocol see anything.
 
@@ -163,25 +160,25 @@ Two things to know:
        trader=Bob, symbol="BTC", size=50_000 USDC, collateral=5_000 USDC,
        is_long=true, take_profit=0, stop_loss=0, acceptable_price=...
    )
-   → PM refreshes the BTC market's borrow + funding indices.
+   → PM refreshes the BTC market's borrow + side-specific skew indices.
    → PM checks leverage (10x here, OK if max_leverage >= 10).
    → PM checks utilization cap (85% default).
    → PM pulls 5_000 USDC collateral + 50 USDC open fee from Bob.
    → PM forwards 50 USDC to the Vault (45 USDC to LP slice, 5 USDC to unclaimed_fees).
    → Vault reserves 50_000 USDC.
-   → Position is saved with entry_price = current mark, entry indices = current indices.
+   → Position stores additive base exposure plus borrow/skew fee-debt baselines.
 3. Time passes. Indices grow → Bob's borrow fee accrues silently.
 4. Bob calls PositionManager.decrease_position(Bob, "BTC", 50_000, acceptable_price=...)
    → Must be >= 60s after the last increase.
-   → PM evaluates: pnl = size * (mark - entry) / entry, borrow_fee = (idx_now - idx_entry) * size,
-     funding_fee accounted similarly; effective_health = collateral + pnl - borrow_fee + funding.
+   → PM evaluates PnL from additive base exposure and subtracts borrow + skew fees:
+     effective_health = collateral + pnl - borrow_fee - skew_fee.
    → If effective_health > collateral, Vault pays the excess to Bob. Otherwise PM
      returns Bob's share and absorbs the rest into the Vault.
-   → Borrow fee + funding cut are sliced 90/10 LP/protocol.
+   → Borrow fees are sliced 90/10 LP/protocol; collected skew fees stay 100% with LPs.
    → Vault releases the 50_000 USDC reservation.
 ```
 
-The borrow fee never has to iterate over Bob's position — the global `acc_borrow_index` tracks the integral of the rate over time, and Bob's `entry_borrow_index` is the snapshot taken when he opened. Subtraction gives him exactly what he owes.
+Fee accrual never iterates over all positions. Global indices integrate rates over time, while each position stores fee debt. Increasing a position adds debt at the current index, preserving fees already accrued on the older slice.
 
 ### 6.3 Trader: TP/SL with permissionless execution
 
@@ -204,7 +201,7 @@ If the same scenario instead happens with stop_loss triggering at 55_000, Bob st
 ```
 1. Bob is long BTC at 60_000 with 5_000 collateral, 50_000 size (10×). BTC dumps to 54_000.
 2. Bob's PnL = 50_000 * (54_000 - 60_000) / 60_000 = -5_000 USDC.
-3. Plus accumulated borrow fee and any funding owed. effective_health goes negative.
+3. Plus accumulated borrow and skew carrying fees. effective_health goes negative.
 4. Once effective_health < collateral * liquidation_threshold_bps / 10_000 (default 2%, i.e. < 100 USDC),
    Carol's bot is allowed to call:
    PositionManager.liquidate_position(Carol, Bob, "BTC").
@@ -286,8 +283,8 @@ Keeper has been calling `update_indices` every minute. Utilization is 50_000/1_1
 Now the next oracle tick sees `mark >= take_profit`. Carol's bot fires `execute_order`:
 
 - Bob's `pnl = 50_000 × (66_000 − 60_000) / 60_000 = 5_000 USDC` of profit.
-- Borrow fee ≈ 0.025 USDC (longer rate accrual at slowly rising util); funding ≈ 0 (assume flat OI).
-- `effective_health = collateral + pnl − borrow_fee + funding = 5_000 + 5_000 − 0.025 + 0 = 9_999.975 USDC`.
+- Borrow fee ≈ 0.025 USDC; skew fee is zero if OI is balanced.
+- `effective_health = collateral + pnl − borrow_fee − skew_fee = 5_000 + 5_000 − 0.025 − 0 = 9_999.975 USDC`.
 - Settlement: PM returns Bob's 5_000 collateral; Vault tops up the additional 4_999.975 USDC profit. Bob's net = `+4_999.975` on a 5_000 stake. Good day.
 - Carol gets the 0.5 USDC escrow (Bob's prepaid TP/SL fee).
 - The 0.025 USDC borrow fee is `reslice_revenue`'d 90/10 → 0.0025 USDC to `unclaimed_fees`, the rest stays in `total_assets` as LP yield.
@@ -319,7 +316,7 @@ At t=20 min BTC is at 54_000:
 
 - **"What's the difference between Keeper and Executor?"** Keeper is a *role* — a whitelist run by Admin. They handle `update_indices` and `deleverage_position`. Executor is *anyone* — they handle `liquidate_position` and `execute_order` and get paid per call. Different incentive models, different permission models.
 
-- **"Why are there two kinds of fees?"** Revenue fees (open fee, borrow fee, funding cut) are split lp/dev/staker per FeeSplits — they fund the protocol over time. Execution bounties (liquidation bounty, TP/SL escrow) pay the per-call cost of someone watching the chain and submitting a tx the moment a condition triggers. Different jobs, different payers, different routing.
+- **"Why are there different fee routes?"** Open and borrow fees use FeeSplits. Skew fees stay with LPs because they compensate directional risk. Execution bounties pay the person submitting a permissionless close.
 
 - **"What is `safe_basis`?"** A denominator used for utilization and ADL ratios: `total_assets - unclaimed_fees`. Excludes pending fees (which would distort the cap) and excludes net PnL (which would make oracle wicks bias the cap). Always ≤ total_assets.
 
@@ -336,16 +333,15 @@ At t=20 min BTC is at 54_000:
 - **Vault** — the single USDC pool that backs everything. Issues `sLP` shares.
 - **PositionManager** — the trading engine. Tracks every Position, every Market, every index.
 - **OracleRouter** — median of multiple SEP-40 sources, with a deviation gate and a cache.
-- **ConfigManager** — the governance / role store; the source of truth for FeeSplits, ProtocolLimits, BorrowRateConfig, FeeConfig.
+- **ConfigManager** — the governance / role store; the source of truth for FeeSplits, ProtocolLimits, CarryingFeeConfig, FeeConfig.
 - **sLP** — the ERC-4626 share token. Auto-compounds.
-- **Position** — one trader's exposure on one Market: size, collateral, entry price, entry indices, direction.
-- **Market** — the global state for one symbol: long/short OI, average prices, accumulators.
+- **Position** — one trader's exposure on one Market: size, collateral, additive base exposure, fee debts, direction.
+- **Market** — one symbol's long/short OI, additive exposures, and carrying-fee accumulators.
 - **MarketTick** — a frozen snapshot of a Market at a moment in time, used to evaluate Positions consistently.
 - **Reservation** — USDC earmarked in the Vault behind open size. Not withdrawable by LPs.
 - **Open fee** — fee on Increase. Revenue.
 - **Borrow fee** — continuous fee on open size, utilization-driven. Revenue.
-- **Funding fee** — peer-to-peer transfer between longs and shorts. Protocol takes a cut of *positive* receipts.
-- **Funding cut** — the protocol's slice of positive funding. Revenue.
+- **Skew carrying fee** — time-based dominant-side surcharge paid to LPs; no minority-side credit.
 - **Liquidation bounty** — payout to the Executor on Liquidation. Funded from absorbed collateral. Has priority over the revenue split.
 - **TP/SL execution-fee escrow** — flat USDC the trader pre-pays when setting TP or SL. Goes to refund / Executor / Vault depending on Close kind.
 - **Revenue split** — `FeeSplits { lp_bps, dev_bps, staker_bps }`. Applies to every revenue dollar. Default 90/10/0.

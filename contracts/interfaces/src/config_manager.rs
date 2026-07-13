@@ -1,8 +1,8 @@
-use shared::{BorrowRateConfig, FeeConfig, FeeSplits, ProtocolLimits};
+use shared::{CarryingFeeConfig, FeeConfig, FeeSplits, ProtocolLimits};
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol};
 
 /// ConfigManager contract interface.
-/// Manages protocol roles, fee splits, limits, and borrow rate configuration.
+/// Manages protocol roles, fee splits, limits, and carrying-fee configuration.
 #[contractclient(name = "ConfigManagerClient")]
 pub trait ConfigManager {
     // Initialization is the contract `__constructor(admin_address)` — atomic
@@ -42,11 +42,11 @@ pub trait ConfigManager {
     /// Extends the Soroban TTL of critical config variables to prevent archival.
     fn bump_config_state(env: Env);
 
-    /// Update borrow rate and funding rate configuration. Callable only by DEFAULT_ADMIN_ROLE.
-    fn update_borrow_rate_config(env: Env, caller: Address, config: BorrowRateConfig);
+    /// Update borrow and skew carrying-fee configuration. Admin only.
+    fn update_carrying_fee_config(env: Env, caller: Address, config: CarryingFeeConfig);
 
-    /// Returns the current borrow rate configuration.
-    fn get_borrow_rate_config(env: Env) -> BorrowRateConfig;
+    /// Returns the current carrying-fee configuration.
+    fn get_carrying_fee_config(env: Env) -> CarryingFeeConfig;
 
     /// Propose `new_admin` as the next admin. Stored as PendingAdmin until
     /// `new_admin` calls `accept_admin`. Callable only by current admin.

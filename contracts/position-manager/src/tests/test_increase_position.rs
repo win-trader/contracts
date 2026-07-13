@@ -117,21 +117,20 @@ fn setup_full<'a>() -> TestFixture<'a> {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -534,10 +533,8 @@ fn test_open_position_transfers_collateral_from_trader() {
 }
 
 #[test]
-fn test_open_position_entry_borrow_and_funding_indices() {
-    // Scenario: A new position must snapshot the current market borrow and
-    // funding indices at the time of opening. For a fresh market (no prior
-    // update_indices), these start at zero.
+fn test_open_position_initializes_fee_debts_at_current_indices() {
+    // New slices record debt baselines at the current carrying-fee indices.
     let f = setup_full();
     let symbol = symbol_short!("BTC");
 
@@ -555,15 +552,16 @@ fn test_open_position_entry_borrow_and_funding_indices() {
     let pos = f.pm_client.get_position(&f.trader, &symbol);
     let market = f.pm_client.get_market(&symbol);
 
-    // do_update_indices runs before position creation, so entry indices
-    // match the market's accumulated indices (non-zero if time has elapsed)
+    // Fee debt is the position notional valued at the current index.
     assert_eq!(
-        pos.entry_borrow_index, market.acc_borrow_index,
-        "Entry borrow index must equal market's current acc_borrow_index"
+        pos.borrow_fee_debt,
+        math::calc_fee_debt(&f.env, pos.size, market.acc_borrow_index),
+        "Borrow fee debt must be initialized at the current index"
     );
     assert_eq!(
-        pos.entry_funding_index, market.acc_funding_index,
-        "Entry funding index must equal market's current acc_funding_index"
+        pos.skew_fee_debt,
+        math::calc_fee_debt(&f.env, pos.size, market.acc_long_skew_index),
+        "Skew fee debt must be initialized at the current side index"
     );
 }
 
@@ -620,9 +618,9 @@ fn test_increase_existing_long_adds_size_and_collateral() {
 }
 
 #[test]
-fn test_increase_existing_position_averages_entry_price() {
-    // Scenario: Trader opens at price A, then increases at price B. The entry
-    // price must be the volume-weighted average of the two.
+fn test_increase_existing_position_derives_display_entry_from_exposure() {
+    // Trader opens at price A, then increases at price B. The display entry
+    // is derived from the sum of both exposure slices.
     let f = setup_full();
     let symbol = symbol_short!("BTC");
 
@@ -654,11 +652,16 @@ fn test_increase_existing_position_averages_entry_price() {
 
     let pos = f.pm_client.get_position(&f.trader, &symbol);
 
-    // Expected weighted average: (50000*10000 + 60000*10000) / 20000 = 55000
-    let expected_avg_price = math::update_global_avg_price(BTC_PRICE, size1, new_price, size2);
+    // Exposure accounting derives the harmonic entry price.
+    let expected_avg_price = math::derive_entry_price(
+        &f.env,
+        size1 + size2,
+        math::calc_base_exposure(&f.env, size1, BTC_PRICE)
+            + math::calc_base_exposure(&f.env, size2, new_price),
+    );
     assert_eq!(
         pos.entry_price, expected_avg_price,
-        "Entry price must be weighted average after increase"
+        "display entry must be derived from additive exposure"
     );
 }
 
@@ -1141,9 +1144,9 @@ fn test_open_position_with_both_zero_reverts() {
 }
 
 #[test]
-fn test_global_avg_price_weighted_correctly_after_multiple_traders() {
-    // Scenario: Two traders open longs at different prices. The global
-    // long avg price must be the volume-weighted average.
+fn test_global_display_price_derived_after_multiple_traders() {
+    // Two traders open longs at different prices. The global display price
+    // must be derived from aggregate exposure.
     let f = setup_full();
     let symbol = symbol_short!("BTC");
 
@@ -1193,8 +1196,12 @@ fn test_global_avg_price_weighted_correctly_after_multiple_traders() {
 
     let market = f.pm_client.get_market(&symbol);
 
-    // Weighted avg: (50000 * 10000 + 60000 * 20000) / 30000
-    let expected = math::update_global_avg_price(BTC_PRICE, size1, new_price, size2);
+    let expected = math::derive_entry_price(
+        &f.env,
+        size1 + size2,
+        math::calc_base_exposure(&f.env, size1, BTC_PRICE)
+            + math::calc_base_exposure(&f.env, size2, new_price),
+    );
     assert_eq!(
         market.global_long_avg_price, expected,
         "Global avg price must be volume-weighted across all traders"

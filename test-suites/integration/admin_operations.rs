@@ -188,7 +188,6 @@ fn test_admin_transfer_and_new_admin_operates() {
                 cooldown_duration: 30,
                 min_position_lifetime: 30,
                 max_utilization_ratio: 9_000,
-                funding_cut_bps: 500,
                 adl_pnl_bps: 9_000,
                 adl_utilization_bps: 9_500,
                 liquidation_threshold_bps: 200,
@@ -208,18 +207,17 @@ fn test_admin_transfer_and_new_admin_operates() {
             cooldown_duration: 30,
             min_position_lifetime: 30,
             max_utilization_ratio: 9_000,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&new_admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&new_admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     let limits = f.config_manager.get_protocol_limits();
@@ -257,18 +255,17 @@ fn test_updated_utilization_cap_allows_larger_positions() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 9_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(&f.admin, &config_manager::BorrowRateConfig {
+    f.config_manager.update_carrying_fee_config(&f.admin, &config_manager::CarryingFeeConfig {
         base_borrow_rate_bps: 100,
         slope1_bps: 500,
         slope2_bps: 5_000,
         optimal_utilization_bps: 8_000,
-        base_funding_rate_bps: 100,
+        max_skew_rate_bps: 100,
     });
 
     // Now a 90% utilization position should work (was blocked at 85%)

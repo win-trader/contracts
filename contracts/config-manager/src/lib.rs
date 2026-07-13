@@ -14,4 +14,4 @@ mod tests;
 pub use contract::ConfigManagerContract;
 pub use errors::ConfigManagerError;
 pub use interfaces::{ConfigManager, ConfigManagerClient, MigrationData};
-pub use types::{BorrowRateConfig, FeeSplits, ProtocolLimits};
+pub use types::{CarryingFeeConfig, FeeSplits, ProtocolLimits};

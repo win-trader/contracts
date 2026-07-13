@@ -213,7 +213,7 @@ single flow is covered by several `it`s, we list each.
   - Rust: `contracts/position-manager/src/tests/test_adl.rs` covers ADL
     eligibility + target selection.
   - Live-stack: `packages/simulation/scenarios/imbalanced-oi.ts` drives
-    funding/PnL to ADL conditions.
+    carrying fees/PnL to ADL conditions.
 - **Manual**: rare; relies on extreme conditions. If conditions are met,
   expect a trade event with `event_type = adl` for one of the most-
   profitable counter-side traders.
@@ -252,7 +252,7 @@ single flow is covered by several `it`s, we list each.
     - `"shows 'No open positions' when the trader has none"`
     - `"renders a position row when the trader has one"`
 - **Manual**: with a position open, `/portfolio` shows the row with PnL,
-  borrow fee, funding fee, and health all moving forward over time.
+  borrow fee, skew fee, and health all moving forward over time.
 
 ### R3. Leaderboard
 - **Automated**:

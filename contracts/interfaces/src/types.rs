@@ -30,12 +30,14 @@ pub struct Position {
     pub collateral: i128,
     /// Notional size of the position in USDC.
     pub size: i128,
-    /// Oracle price at the time the position was opened (scaled by 1e7).
+    /// Additive base quantity at `EXPOSURE_PRECISION`; authoritative for PnL.
+    pub base_exposure: i128,
+    /// Display-only harmonic entry price derived from size/base exposure.
     pub entry_price: i128,
-    /// Global borrow accumulator index at position open (for lazy fee calc).
-    pub entry_borrow_index: i128,
-    /// Global funding accumulator index at position open (for lazy fee calc).
-    pub entry_funding_index: i128,
+    /// Baseline for `size * acc_borrow_index / INDEX_PRECISION`.
+    pub borrow_fee_debt: i128,
+    /// Baseline for `size * side_skew_index / INDEX_PRECISION`.
+    pub skew_fee_debt: i128,
     /// True for a long position, false for a short.
     pub is_long: bool,
     /// Block timestamp when the position was last increased (anti-front-running lock).
@@ -52,18 +54,24 @@ pub struct Position {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct MarketInfo {
-    /// Volume-weighted average entry price of all active long positions.
+    /// Display-only harmonic entry price derived from long exposure.
     pub global_long_avg_price: i128,
-    /// Volume-weighted average entry price of all active short positions.
+    /// Display-only harmonic entry price derived from short exposure.
     pub global_short_avg_price: i128,
     /// Total notional size of all open long positions.
     pub long_open_interest: i128,
     /// Total notional size of all open short positions.
     pub short_open_interest: i128,
+    /// Sum of long-position base exposure at `EXPOSURE_PRECISION`.
+    pub long_base_exposure: i128,
+    /// Sum of short-position base exposure at `EXPOSURE_PRECISION`.
+    pub short_base_exposure: i128,
     /// Cumulative borrow fee index (grows monotonically with time).
     pub acc_borrow_index: i128,
-    /// Cumulative funding rate index (signed; positive = longs pay shorts).
-    pub acc_funding_index: i128,
+    /// Dominant-long skew carrying-fee index.
+    pub acc_long_skew_index: i128,
+    /// Dominant-short skew carrying-fee index.
+    pub acc_short_skew_index: i128,
     /// Timestamp of the last keeper index update.
     pub last_index_update: u64,
 }

@@ -112,21 +112,20 @@ impl<'a> Fixture<'a> {
                 cooldown_duration: 60,
                 min_position_lifetime: 60,
                 max_utilization_ratio: 8_500,
-                funding_cut_bps: 500,
                 adl_pnl_bps: 9_000,
                 adl_utilization_bps: 9_500,
                 liquidation_threshold_bps: 200,
             },
         );
 
-        config_manager.update_borrow_rate_config(
+        config_manager.update_carrying_fee_config(
             &admin,
-            &config_manager::BorrowRateConfig {
+            &config_manager::CarryingFeeConfig {
                 base_borrow_rate_bps: 100,
                 slope1_bps: 500,
                 slope2_bps: 5_000,
                 optimal_utilization_bps: 8_000,
-                base_funding_rate_bps: 100,
+                max_skew_rate_bps: 5_000,
             },
         );
 
@@ -170,7 +169,8 @@ impl<'a> Fixture<'a> {
         oracle_router.set_oracle_sources(
             &admin,
             &symbol_short!("BTC"),
-            &vec![env, oracle_id.clone(), oracle_id_b.clone()]);
+            &vec![env, oracle_id.clone(), oracle_id_b.clone()],
+        );
 
         // 4. PositionManager — bind ConfigManager + OracleRouter at construction.
         //    Registered before the Vault so the Vault can bind this PM address
@@ -298,13 +298,15 @@ impl<'a> Fixture<'a> {
         size_delta: &i128,
         acceptable_price: &i128,
     ) {
-        self.position_manager.decrease_position(trader, symbol, size_delta, acceptable_price);
+        self.position_manager
+            .decrease_position(trader, symbol, size_delta, acceptable_price);
         invariants::assert_protocol_invariants(self.env, self, "decrease_position");
     }
 
     /// Force-close an undercollateralized position (KEEPER).
     pub fn liquidate(&self, caller: &Address, trader: &Address, symbol: &Symbol) {
-        self.position_manager.liquidate_position(caller, trader, symbol);
+        self.position_manager
+            .liquidate_position(caller, trader, symbol);
         invariants::assert_protocol_invariants(self.env, self, "liquidate");
     }
 
@@ -316,11 +318,12 @@ impl<'a> Fixture<'a> {
 
     /// Auto-deleverage (KEEPER).
     pub fn deleverage_position(&self, caller: &Address, trader: &Address, symbol: &Symbol) {
-        self.position_manager.deleverage_position(caller, trader, symbol);
+        self.position_manager
+            .deleverage_position(caller, trader, symbol);
         invariants::assert_protocol_invariants(self.env, self, "deleverage_position");
     }
 
-    /// Sync borrow/funding accumulators (KEEPER).
+    /// Sync borrow and dominant-side skew accumulators (KEEPER).
     pub fn update_indices(&self, caller: &Address, symbol: &Symbol) {
         self.position_manager.update_indices(caller, symbol);
         invariants::assert_protocol_invariants(self.env, self, "update_indices");
@@ -334,13 +337,15 @@ impl<'a> Fixture<'a> {
         take_profit: &i128,
         stop_loss: &i128,
     ) {
-        self.position_manager.set_tp_sl(trader, symbol, take_profit, stop_loss);
+        self.position_manager
+            .set_tp_sl(trader, symbol, take_profit, stop_loss);
         invariants::assert_protocol_invariants(self.env, self, "set_tp_sl");
     }
 
     /// Set per-market max leverage (ADMIN).
     pub fn set_max_leverage(&self, caller: &Address, symbol: &Symbol, max_leverage: &i128) {
-        self.position_manager.set_max_leverage(caller, symbol, max_leverage);
+        self.position_manager
+            .set_max_leverage(caller, symbol, max_leverage);
         invariants::assert_protocol_invariants(self.env, self, "set_max_leverage");
     }
 

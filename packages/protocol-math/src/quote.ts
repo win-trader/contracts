@@ -1,19 +1,19 @@
 // IncreaseQuote — staged-order twin of PositionEvaluation.
 //
 // Derived values for a hypothetical Increase against a MarketTick: the
-// trader's open fee, daily borrow / funding accruals at the current rates,
+// trader's open fee, daily borrow / skew accruals at the current rates,
 // the liquidation price for the brand-new Position (no fees accrued yet),
 // the acceptable-price slippage cap, and the vault-side liquidity headroom.
 //
 // All arithmetic mirrors the contract's pre-trade snapshot (open-fee bps,
-// kink borrow rate, base-funding × OI-imbalance, safe_basis-based util,
+// kink borrow rate, utilization-weighted quadratic skew, safe_basis-based util,
 // liquidation_threshold-aware liq price) so the UI preview matches what the
 // contract would charge if the tx fired right now.
 
 import { BPS, SECONDS_PER_YEAR } from "./constants.js";
-import { calcBorrowRate, calcFundingRate, calcUtilizationBps } from "./pure.js";
+import { calcBorrowRate, calcSkewRate, calcUtilizationBps } from "./pure.js";
 import type { MarketTick } from "./tick.js";
-import type { BorrowRateConfig } from "./types.js";
+import type { CarryingFeeConfig } from "./types.js";
 
 const SECONDS_PER_DAY = 86_400n;
 
@@ -42,7 +42,7 @@ export interface IncreaseQuoteInput {
     max_utilization_ratio_bps: bigint;
     liquidation_threshold_bps: bigint;
   };
-  rate_config: BorrowRateConfig;
+  rate_config: CarryingFeeConfig;
 }
 
 export interface IncreaseQuote {
@@ -50,8 +50,8 @@ export interface IncreaseQuote {
   open_fee: bigint;
   /** Daily borrow accrual on the new size at the pre-trade kink rate. */
   daily_borrow: bigint;
-  /** Daily funding from the trader's perspective. `+` ⇒ receives, `−` ⇒ pays. */
-  daily_funding: bigint;
+  /** Daily surcharge if this position would be on the post-trade dominant side. */
+  daily_skew: bigint;
   /** Liquidation price at t=0 (no fees accrued). Honors
    *  `liquidation_threshold_bps`. `null` when inputs are degenerate
    *  (collateral or size zero, mark unavailable). */
@@ -70,7 +70,7 @@ export interface IncreaseQuote {
  * Liquidation price for a freshly-opened position before any fees accrue.
  * Inverts the on-chain liquidation gate
  *   `effective_health < collateral * liquidation_threshold_bps / BPS`
- * under the assumption that borrow_fee and funding are still zero, so
+ * under the assumption that borrow and skew fees are still zero, so
  *   collateral + pnl == collateral * liquidation_threshold_bps / BPS
  * ⇒ pnl == -(BPS - liquidation_threshold_bps) * collateral / BPS  (`-loss_buffer`)
  *   pnl_long  = size * (liq - mark) / mark  ⇒ liq = mark - mark * loss_buffer / size
@@ -80,7 +80,7 @@ export interface IncreaseQuote {
  *
  * For an existing position with accrued indices, use
  * {@link liquidationPriceForPosition} in `eval.ts` instead — that variant
- * accounts for the position's current borrow_fee and effective_funding.
+ * accounts for the position's current borrow and skew fees.
  */
 export function liquidationPriceAtOpen(
   mark: bigint,
@@ -120,14 +120,21 @@ export function evaluateIncrease(input: IncreaseQuoteInput): IncreaseQuote {
   const daily_borrow =
     size > 0n ? (size * borrow_rate * SECONDS_PER_DAY) / (BPS * SECONDS_PER_YEAR) : 0n;
 
-  const funding_rate = calcFundingRate(
-    tick.market.long_open_interest,
-    tick.market.short_open_interest,
-    rate_config.base_funding_rate_bps,
+  // Opening itself is not charged. This projects the next day's carrying cost
+  // using post-trade OI, which is the state future checkpoints observe.
+  const post_long_oi = tick.market.long_open_interest + (is_long ? size : 0n);
+  const post_short_oi = tick.market.short_open_interest + (is_long ? 0n : size);
+  const skew_rate = calcSkewRate(
+    post_long_oi,
+    post_short_oi,
+    util_bps,
+    rate_config.max_skew_rate_bps,
   );
-  const trader_rate = is_long ? -funding_rate : funding_rate;
-  const daily_funding =
-    size > 0n ? (size * trader_rate * SECONDS_PER_DAY) / (BPS * SECONDS_PER_YEAR) : 0n;
+  const is_dominant = is_long ? post_long_oi > post_short_oi : post_short_oi > post_long_oi;
+  const daily_skew =
+    size > 0n && is_dominant
+      ? (size * skew_rate * SECONDS_PER_DAY) / (BPS * SECONDS_PER_YEAR)
+      : 0n;
 
   const liquidation_price = liquidationPriceAtOpen(
     mark,
@@ -153,7 +160,7 @@ export function evaluateIncrease(input: IncreaseQuoteInput): IncreaseQuote {
   return {
     open_fee,
     daily_borrow,
-    daily_funding,
+    daily_skew,
     liquidation_price,
     acceptable_price,
     liquidity_headroom,

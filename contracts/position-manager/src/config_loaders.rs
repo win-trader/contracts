@@ -6,7 +6,7 @@
 use soroban_sdk::{Address, Env};
 
 use interfaces::{ConfigManagerClient, VaultClient};
-use shared::{BorrowRateConfig, FeeConfig, FeeSplits, ProtocolLimits};
+use shared::{CarryingFeeConfig, FeeConfig, FeeSplits, ProtocolLimits};
 
 use crate::storage;
 
@@ -34,10 +34,10 @@ pub fn fee_config(env: &Env) -> FeeConfig {
     config_client(env).get_fee_config()
 }
 
-/// Borrow + funding rate curve.
+/// Borrow curve and dominant-side skew carrying-fee ceiling.
 #[allow(dead_code)]
-pub fn borrow_rate(env: &Env) -> BorrowRateConfig {
-    config_client(env).get_borrow_rate_config()
+pub fn carrying_fees(env: &Env) -> CarryingFeeConfig {
+    config_client(env).get_carrying_fee_config()
 }
 
 // ---------------------------------------------------------------------------

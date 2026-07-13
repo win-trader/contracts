@@ -8,14 +8,16 @@ pub struct IncreasePosition {
     pub symbol: Symbol,
     pub size_delta: i128,
     pub collateral: i128,
+    /// Display-only price derived from additive exposure.
     pub entry_price: i128,
+    pub base_exposure: i128,
     pub is_long: bool,
     pub tp: i128,
     pub sl: i128,
     pub new_total_size: i128,
     pub new_total_collateral: i128,
-    pub entry_borrow_index: i128,
-    pub entry_funding_index: i128,
+    pub borrow_fee_debt: i128,
+    pub skew_fee_debt: i128,
     pub last_increased_time: u64,
 }
 
@@ -28,7 +30,7 @@ pub struct DecreasePosition {
     pub size_delta: i128,
     pub pnl: i128,
     pub borrow_fee: i128,
-    pub funding_fee: i128,
+    pub skew_fee: i128,
     pub mark_price: i128,
     pub is_full_close: bool,
     /// Absolute position size after this decrease.
@@ -47,7 +49,7 @@ pub struct Liquidate {
     pub collateral: i128,
     pub pnl: i128,
     pub borrow_fee: i128,
-    pub funding_fee: i128,
+    pub skew_fee: i128,
     pub mark_price: i128,
     pub executor: Address,
 }
@@ -82,7 +84,9 @@ pub struct UpdateIndices {
     #[topic]
     pub symbol: Symbol,
     pub acc_borrow_index: i128,
-    pub acc_funding_index: i128,
+    pub acc_long_skew_index: i128,
+    pub acc_short_skew_index: i128,
+    pub skew_rate_bps: i128,
     pub timestamp: u64,
 }
 

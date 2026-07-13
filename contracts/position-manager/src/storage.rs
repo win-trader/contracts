@@ -29,9 +29,6 @@ pub enum StorageKey {
     TotalUnrealizedPnl,
     // Per-market cached unrealized PnL (persistent storage)
     MarketUnrealizedPnl(Symbol),
-    // Per-market funding pool: payer-side accruals in, receiver draws out
-    // (persistent storage)
-    FundingPool(Symbol),
     // Timestamp of the last unpause (for fee clamping during pause periods)
     LastUnpauseTime,
     // Timestamp of the most recent pause window's start. Set by `pause()`
@@ -142,9 +139,7 @@ pub fn get_paused(env: &Env) -> bool {
 }
 
 pub fn set_paused(env: &Env, paused: bool) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::IsPaused, &paused);
+    env.storage().instance().set(&StorageKey::IsPaused, &paused);
 }
 
 // ---------------------------------------------------------------------------
@@ -193,35 +188,11 @@ pub fn get_market_unrealized_pnl(env: &Env, symbol: &Symbol) -> i128 {
 pub fn set_market_unrealized_pnl(env: &Env, symbol: &Symbol, value: i128) {
     let key = StorageKey::MarketUnrealizedPnl(symbol.clone());
     env.storage().persistent().set(&key, &value);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
-}
-
-// ---------------------------------------------------------------------------
-// Persistent storage: FundingPool
-// ---------------------------------------------------------------------------
-
-pub fn get_funding_pool(env: &Env, symbol: &Symbol) -> i128 {
-    let key = StorageKey::FundingPool(symbol.clone());
-    env.storage().persistent().get(&key).unwrap_or(0i128)
-}
-
-pub fn set_funding_pool(env: &Env, symbol: &Symbol, value: i128) {
-    let key = StorageKey::FundingPool(symbol.clone());
-    env.storage().persistent().set(&key, &value);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
-}
-
-pub fn bump_funding_pool_ttl(env: &Env, symbol: &Symbol) {
-    let key = StorageKey::FundingPool(symbol.clone());
-    if env.storage().persistent().has(&key) {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
-    }
+    env.storage().persistent().extend_ttl(
+        &key,
+        shared::constants::SHARED_THRESHOLD,
+        shared::constants::SHARED_BUMP,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -229,9 +200,7 @@ pub fn bump_funding_pool_ttl(env: &Env, symbol: &Symbol) {
 // ---------------------------------------------------------------------------
 
 pub fn save_version(env: &Env, version: u32) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::Version, &version);
+    env.storage().instance().set(&StorageKey::Version, &version);
 }
 
 // ---------------------------------------------------------------------------
@@ -252,9 +221,11 @@ pub fn set_position(env: &Env, trader: &Address, symbol: &Symbol, position: &Pos
         symbol: symbol.clone(),
     });
     env.storage().persistent().set(&key, position);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
+    env.storage().persistent().extend_ttl(
+        &key,
+        shared::constants::SHARED_THRESHOLD,
+        shared::constants::SHARED_BUMP,
+    );
 }
 
 pub fn bump_position_ttl(env: &Env, trader: &Address, symbol: &Symbol) {
@@ -262,9 +233,11 @@ pub fn bump_position_ttl(env: &Env, trader: &Address, symbol: &Symbol) {
         trader: trader.clone(),
         symbol: symbol.clone(),
     });
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
+    env.storage().persistent().extend_ttl(
+        &key,
+        shared::constants::SHARED_THRESHOLD,
+        shared::constants::SHARED_BUMP,
+    );
 }
 
 pub fn delete_position(env: &Env, trader: &Address, symbol: &Symbol) {
@@ -286,8 +259,11 @@ pub fn get_market(env: &Env, symbol: &Symbol) -> MarketInfo {
         global_short_avg_price: 0,
         long_open_interest: 0,
         short_open_interest: 0,
+        long_base_exposure: 0,
+        short_base_exposure: 0,
         acc_borrow_index: shared::constants::INDEX_PRECISION,
-        acc_funding_index: shared::constants::INDEX_PRECISION,
+        acc_long_skew_index: shared::constants::INDEX_PRECISION,
+        acc_short_skew_index: shared::constants::INDEX_PRECISION,
         last_index_update: env.ledger().timestamp(),
     })
 }
@@ -295,9 +271,11 @@ pub fn get_market(env: &Env, symbol: &Symbol) -> MarketInfo {
 pub fn set_market(env: &Env, symbol: &Symbol, market: &MarketInfo) {
     let key = StorageKey::Market(symbol.clone());
     env.storage().persistent().set(&key, market);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
+    env.storage().persistent().extend_ttl(
+        &key,
+        shared::constants::SHARED_THRESHOLD,
+        shared::constants::SHARED_BUMP,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -375,9 +353,11 @@ pub fn set_max_leverage(env: &Env, symbol: &Symbol, value: i128) {
 
 pub fn bump_market_ttl(env: &Env, symbol: &Symbol) {
     let key = StorageKey::Market(symbol.clone());
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, shared::constants::SHARED_THRESHOLD, shared::constants::SHARED_BUMP);
+    env.storage().persistent().extend_ttl(
+        &key,
+        shared::constants::SHARED_THRESHOLD,
+        shared::constants::SHARED_BUMP,
+    );
 }
 
 /// Extend the TTL of the `MarketUnrealizedPnl(symbol)` persistent slot.
@@ -389,13 +369,11 @@ pub fn bump_market_ttl(env: &Env, symbol: &Symbol) {
 pub fn bump_market_unrealized_pnl_ttl(env: &Env, symbol: &Symbol) {
     let key = StorageKey::MarketUnrealizedPnl(symbol.clone());
     if env.storage().persistent().has(&key) {
-        env.storage()
-            .persistent()
-            .extend_ttl(
-                &key,
-                shared::constants::SHARED_THRESHOLD,
-                shared::constants::SHARED_BUMP,
-            );
+        env.storage().persistent().extend_ttl(
+            &key,
+            shared::constants::SHARED_THRESHOLD,
+            shared::constants::SHARED_BUMP,
+        );
     }
 }
 

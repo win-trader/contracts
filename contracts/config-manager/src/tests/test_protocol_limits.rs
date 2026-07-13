@@ -25,7 +25,6 @@ fn test_update_protocol_limits_zero_min_collateral_errors() {
         cooldown_duration: 60,
         min_position_lifetime: 60,
         max_utilization_ratio: 8_500,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,
@@ -52,7 +51,6 @@ fn test_update_protocol_limits_negative_min_collateral_errors() {
         cooldown_duration: 60,
         min_position_lifetime: 60,
         max_utilization_ratio: 8_500,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,
@@ -79,7 +77,6 @@ fn test_update_protocol_limits_zero_max_utilization_errors() {
         cooldown_duration: 60,
         min_position_lifetime: 60,
         max_utilization_ratio: 0,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,
@@ -106,7 +103,6 @@ fn test_update_protocol_limits_max_utilization_above_10000_errors() {
         cooldown_duration: 60,
         min_position_lifetime: 60,
         max_utilization_ratio: 10_001,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,
@@ -150,7 +146,6 @@ fn test_update_protocol_limits_max_utilization_exactly_10000_succeeds() {
         cooldown_duration: 0,
         min_position_lifetime: 0,
         max_utilization_ratio: 10_000,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,
@@ -175,7 +170,6 @@ fn test_update_protocol_limits_min_collateral_of_one_succeeds() {
         cooldown_duration: 0,
         min_position_lifetime: 0,
         max_utilization_ratio: 8_500,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,
@@ -200,7 +194,6 @@ fn test_update_protocol_limits_i128_min_collateral_errors() {
         cooldown_duration: 60,
         min_position_lifetime: 60,
         max_utilization_ratio: 8_500,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,
@@ -215,69 +208,6 @@ fn test_update_protocol_limits_i128_min_collateral_errors() {
     );
 }
 
-/// funding_cut_bps = 10_000 (100%) must be rejected.
-#[test]
-fn test_update_protocol_limits_funding_cut_at_10000_errors() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = deploy_initialized(&env);
-
-    let limits = ProtocolLimits {
-        min_collateral: 100,
-        cooldown_duration: 60,
-        min_position_lifetime: 60,
-        max_utilization_ratio: 8_500,
-        funding_cut_bps: 10_000,
-        adl_pnl_bps: 9_000,
-        adl_utilization_bps: 9_500,
-        liquidation_threshold_bps: 200,
-    };
-
-    let result = client.try_update_protocol_limits(&admin, &limits);
-    assert!(result.is_err(), "funding_cut_bps = 10_000 must return an error");
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        soroban_sdk::Error::from_contract_error(ConfigManagerError::InvalidFundingCut as u32),
-        "error code must be InvalidFundingCut (32)"
-    );
-}
-
-/// funding_cut_bps = 0 is valid (no protocol cut).
-#[test]
-fn test_update_protocol_limits_funding_cut_zero_succeeds() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = deploy_initialized(&env);
-
-    let limits = ProtocolLimits {
-        min_collateral: 100,
-        cooldown_duration: 60,
-        min_position_lifetime: 60,
-        max_utilization_ratio: 8_500,
-        funding_cut_bps: 0,
-        adl_pnl_bps: 9_000,
-        adl_utilization_bps: 9_500,
-        liquidation_threshold_bps: 200,
-    };
-
-    let result = client.try_update_protocol_limits(&admin, &limits);
-    assert!(result.is_ok(), "funding_cut_bps = 0 must succeed");
-}
-
-/// valid limits round-trip includes funding_cut_bps.
-#[test]
-fn test_update_protocol_limits_stores_funding_cut_bps() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin) = deploy_initialized(&env);
-
-    let limits = valid_limits();
-    client.update_protocol_limits(&admin, &limits);
-
-    let stored = client.get_protocol_limits();
-    assert_eq!(stored.funding_cut_bps, 500, "stored funding_cut_bps must match input");
-}
-
 /// Adversarial: negative max_utilization_ratio must be rejected.
 #[test]
 fn test_update_protocol_limits_negative_max_utilization_errors() {
@@ -290,7 +220,6 @@ fn test_update_protocol_limits_negative_max_utilization_errors() {
         cooldown_duration: 60,
         min_position_lifetime: 60,
         max_utilization_ratio: -1,
-        funding_cut_bps: 500,
         adl_pnl_bps: 9_000,
         adl_utilization_bps: 9_500,
         liquidation_threshold_bps: 200,

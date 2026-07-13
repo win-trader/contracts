@@ -9,24 +9,23 @@
 
 #![cfg(test)]
 
-use soroban_sdk::Env;
 use shared::constants::{
-    BPS, DEFAULT_BASE_BORROW_RATE_BPS, DEFAULT_BASE_FUNDING_RATE_BPS,
-    DEFAULT_OPTIMAL_UTILIZATION_BPS, DEFAULT_SLOPE1_BPS, MAX_LIQUIDATION_BOUNTY_BPS,
-    MAX_OPEN_FEE_BPS, MAX_TP_SL_EXECUTION_FEE,
+    BPS, DEFAULT_BASE_BORROW_RATE_BPS, DEFAULT_MAX_SKEW_RATE_BPS, DEFAULT_OPTIMAL_UTILIZATION_BPS,
+    DEFAULT_SLOPE1_BPS, MAX_LIQUIDATION_BOUNTY_BPS, MAX_OPEN_FEE_BPS, MAX_TP_SL_EXECUTION_FEE,
 };
+use soroban_sdk::Env;
 
-use crate::{BorrowRateConfig, ConfigManagerError};
+use crate::{CarryingFeeConfig, ConfigManagerError};
 
 use super::helpers::{deploy_initialized, valid_fee_config, valid_limits};
 
-fn valid_rate_config() -> BorrowRateConfig {
-    BorrowRateConfig {
+fn valid_rate_config() -> CarryingFeeConfig {
+    CarryingFeeConfig {
         base_borrow_rate_bps: DEFAULT_BASE_BORROW_RATE_BPS,
         slope1_bps: DEFAULT_SLOPE1_BPS,
         slope2_bps: 5_000,
         optimal_utilization_bps: DEFAULT_OPTIMAL_UTILIZATION_BPS,
-        base_funding_rate_bps: DEFAULT_BASE_FUNDING_RATE_BPS,
+        max_skew_rate_bps: DEFAULT_MAX_SKEW_RATE_BPS,
     }
 }
 
@@ -95,7 +94,7 @@ fn test_update_protocol_limits_min_position_lifetime_above_one_day_errors() {
 }
 
 // ---------------------------------------------------------------------------
-// BorrowRateConfig — InvalidBorrowRateNegative (40)
+// CarryingFeeConfig — InvalidBorrowRateNegative (40)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -107,7 +106,7 @@ fn test_update_borrow_rate_negative_base_rate_errors_invalid_borrow_rate_negativ
     let mut cfg = valid_rate_config();
     cfg.base_borrow_rate_bps = -1;
 
-    let result = client.try_update_borrow_rate_config(&admin, &cfg);
+    let result = client.try_update_carrying_fee_config(&admin, &cfg);
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().unwrap(),
@@ -119,27 +118,27 @@ fn test_update_borrow_rate_negative_base_rate_errors_invalid_borrow_rate_negativ
 }
 
 #[test]
-fn test_update_borrow_rate_negative_funding_rate_errors_invalid_borrow_rate_negative() {
+fn test_update_carrying_fee_negative_skew_rate_errors_invalid_borrow_rate_negative() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin) = deploy_initialized(&env);
 
     let mut cfg = valid_rate_config();
-    cfg.base_funding_rate_bps = -1;
+    cfg.max_skew_rate_bps = -1;
 
-    let result = client.try_update_borrow_rate_config(&admin, &cfg);
+    let result = client.try_update_carrying_fee_config(&admin, &cfg);
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().unwrap(),
         soroban_sdk::Error::from_contract_error(
             ConfigManagerError::InvalidBorrowRateNegative as u32
         ),
-        "negative base_funding_rate_bps must fire InvalidBorrowRateNegative (40)"
+        "negative max_skew_rate_bps must fire InvalidBorrowRateNegative (40)"
     );
 }
 
 // ---------------------------------------------------------------------------
-// BorrowRateConfig — InvalidOptimalUtilization (41)
+// CarryingFeeConfig — InvalidOptimalUtilization (41)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -151,7 +150,7 @@ fn test_update_borrow_rate_optimal_utilization_zero_errors_invalid_optimal_utili
     let mut cfg = valid_rate_config();
     cfg.optimal_utilization_bps = 0;
 
-    let result = client.try_update_borrow_rate_config(&admin, &cfg);
+    let result = client.try_update_carrying_fee_config(&admin, &cfg);
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().unwrap(),
@@ -171,7 +170,7 @@ fn test_update_borrow_rate_optimal_utilization_above_bps_errors_invalid_optimal_
     let mut cfg = valid_rate_config();
     cfg.optimal_utilization_bps = BPS + 1;
 
-    let result = client.try_update_borrow_rate_config(&admin, &cfg);
+    let result = client.try_update_carrying_fee_config(&admin, &cfg);
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().unwrap(),
@@ -183,7 +182,7 @@ fn test_update_borrow_rate_optimal_utilization_above_bps_errors_invalid_optimal_
 }
 
 // ---------------------------------------------------------------------------
-// BorrowRateConfig — InvalidSlopeOrdering (42)
+// CarryingFeeConfig — InvalidSlopeOrdering (42)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -196,7 +195,7 @@ fn test_update_borrow_rate_slope2_below_slope1_errors_invalid_slope_ordering() {
     cfg.slope1_bps = 1_000;
     cfg.slope2_bps = 999;
 
-    let result = client.try_update_borrow_rate_config(&admin, &cfg);
+    let result = client.try_update_carrying_fee_config(&admin, &cfg);
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().unwrap(),
@@ -268,9 +267,7 @@ fn test_set_fee_config_tp_sl_fee_negative_errors_invalid_tp_sl_execution_fee() {
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().unwrap(),
-        soroban_sdk::Error::from_contract_error(
-            ConfigManagerError::InvalidTpSlExecutionFee as u32,
-        ),
+        soroban_sdk::Error::from_contract_error(ConfigManagerError::InvalidTpSlExecutionFee as u32,),
         "negative tp_sl_execution_fee must fire InvalidTpSlExecutionFee (46)",
     );
 }
@@ -288,9 +285,7 @@ fn test_set_fee_config_tp_sl_fee_above_ceiling_errors_invalid_tp_sl_execution_fe
     assert!(result.is_err());
     assert_eq!(
         result.unwrap_err().unwrap(),
-        soroban_sdk::Error::from_contract_error(
-            ConfigManagerError::InvalidTpSlExecutionFee as u32,
-        ),
+        soroban_sdk::Error::from_contract_error(ConfigManagerError::InvalidTpSlExecutionFee as u32,),
         "tp_sl_execution_fee > MAX_TP_SL_EXECUTION_FEE must fire InvalidTpSlExecutionFee (46)",
     );
 }

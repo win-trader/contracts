@@ -1,13 +1,12 @@
-//! Funding and fee mechanics integration tests.
+//! Carrying-fee mechanics integration tests.
 //!
-//! Tests borrow fee accumulation, funding rate behavior, fee distribution,
+//! Tests borrow and dominant-side skew accumulation, fee distribution,
 //! and protocol fee claiming.
 
 use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
 use test_suites::testutils::{Fixture, TEST_TIMESTAMP, USDC_UNIT};
 
-const INDEX_PRECISION: i128 = 100_000_000_000_000; // 1e14 — must match position_manager::math
-
+const INDEX_PRECISION: i128 = 100_000_000_000_000;
 const MIN_POSITION_LIFETIME: u64 = 60;
 
 // ---------------------------------------------------------------------------
@@ -44,10 +43,7 @@ fn test_borrow_fee_increases_over_time() {
 
     // Fee should be small but non-zero for 1 day at reasonable utilization
     let fee_paid = collateral - returned;
-    assert!(
-        fee_paid > 0,
-        "Borrow fee must be positive after 24h"
-    );
+    assert!(fee_paid > 0, "Borrow fee must be positive after 24h");
 }
 
 // ---------------------------------------------------------------------------
@@ -70,8 +66,12 @@ fn test_higher_utilization_higher_borrow_rate() {
     f_a.set_btc_price(50_000);
     f_a.position_manager
         .update_indices(&f_a.keeper, &symbol_short!("BTC"));
-    f_a.position_manager
-        .decrease_position(&f_a.trader, &symbol_short!("BTC"), &small_size, &0_i128);
+    f_a.position_manager.decrease_position(
+        &f_a.trader,
+        &symbol_short!("BTC"),
+        &small_size,
+        &0_i128,
+    );
 
     let fee_low = collateral - (f_a.usdc.balance(&f_a.trader) - bal_a_open);
 
@@ -90,8 +90,12 @@ fn test_higher_utilization_higher_borrow_rate() {
     f_b.set_btc_price(50_000);
     f_b.position_manager
         .update_indices(&f_b.keeper, &symbol_short!("BTC"));
-    f_b.position_manager
-        .decrease_position(&f_b.trader, &symbol_short!("BTC"), &large_size, &0_i128);
+    f_b.position_manager.decrease_position(
+        &f_b.trader,
+        &symbol_short!("BTC"),
+        &large_size,
+        &0_i128,
+    );
 
     let returned_b = f_b.usdc.balance(&f_b.trader) - bal_b_open;
     let fee_high = large_collateral - returned_b;
@@ -109,11 +113,11 @@ fn test_higher_utilization_higher_borrow_rate() {
 }
 
 // ---------------------------------------------------------------------------
-// Funding rate: longs pay shorts when long OI > short OI
+// Dominant longs pay the skew surcharge; shorts receive no credit.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_funding_rate_longs_pay_shorts() {
+fn test_long_dominant_skew_fee_goes_to_lps() {
     let env = Env::default();
     let f = Fixture::deploy(&env);
 
@@ -130,23 +134,34 @@ fn test_funding_rate_longs_pay_shorts() {
     f.update_indices(&f.keeper, &symbol_short!("BTC"));
 
     let market = f.position_manager.get_market(&symbol_short!("BTC"));
-    // Funding index should be above baseline (longs pay)
+    // Only the long skew index advances.
     assert!(
-        market.acc_funding_index > INDEX_PRECISION,
-        "Funding index must be above INDEX_PRECISION when long OI > short OI"
+        market.acc_long_skew_index > INDEX_PRECISION,
+        "long skew index must advance when long OI dominates"
     );
+    assert_eq!(market.acc_short_skew_index, INDEX_PRECISION);
 
-    // Close both at same price — long should pay more fees, short receives funding benefit
+    // Close both flat. The long pays borrow + skew; the short pays borrow only.
     let long_bal_before = f.usdc.balance(&long_trader);
     let short_bal_before = f.usdc.balance(&short_trader);
 
-    f.decrease_position(&long_trader, &symbol_short!("BTC"), &(30_000 * USDC_UNIT), &0_i128);
-    f.decrease_position(&short_trader, &symbol_short!("BTC"), &(10_000 * USDC_UNIT), &0_i128);
+    f.decrease_position(
+        &long_trader,
+        &symbol_short!("BTC"),
+        &(30_000 * USDC_UNIT),
+        &0_i128,
+    );
+    f.decrease_position(
+        &short_trader,
+        &symbol_short!("BTC"),
+        &(10_000 * USDC_UNIT),
+        &0_i128,
+    );
 
     let long_returned = f.usdc.balance(&long_trader) - long_bal_before;
     let short_returned = f.usdc.balance(&short_trader) - short_bal_before;
 
-    // Long should get less than collateral (pays borrow + funding)
+    // Long should get less than collateral (pays both carrying fees).
     assert!(
         long_returned < 3_000 * USDC_UNIT,
         "Long must pay fees: returned={}",
@@ -170,11 +185,11 @@ fn test_funding_rate_longs_pay_shorts() {
 }
 
 // ---------------------------------------------------------------------------
-// Funding rate: shorts pay longs when short OI > long OI
+// Dominant shorts pay the skew surcharge; longs receive no credit.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_funding_rate_shorts_pay_longs() {
+fn test_short_dominant_skew_fee_advances_only_short_index() {
     let env = Env::default();
     let f = Fixture::deploy(&env);
 
@@ -190,19 +205,16 @@ fn test_funding_rate_shorts_pay_longs() {
     f.update_indices(&f.keeper, &symbol_short!("BTC"));
 
     let market = f.position_manager.get_market(&symbol_short!("BTC"));
-    // Funding index should be below baseline (shorts pay)
-    assert!(
-        market.acc_funding_index < INDEX_PRECISION,
-        "Funding index must be below INDEX_PRECISION when short OI > long OI"
-    );
+    assert_eq!(market.acc_long_skew_index, INDEX_PRECISION);
+    assert!(market.acc_short_skew_index > INDEX_PRECISION);
 }
 
 // ---------------------------------------------------------------------------
-// Balanced OI → zero funding
+// Balanced OI produces no skew surcharge.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_balanced_oi_zero_funding() {
+fn test_balanced_oi_zero_skew_fee() {
     let env = Env::default();
     let f = Fixture::deploy(&env);
 
@@ -218,11 +230,8 @@ fn test_balanced_oi_zero_funding() {
     f.update_indices(&f.keeper, &symbol_short!("BTC"));
 
     let market = f.position_manager.get_market(&symbol_short!("BTC"));
-    // Funding rate should be zero when OI is balanced — index stays at baseline
-    assert_eq!(
-        market.acc_funding_index, INDEX_PRECISION,
-        "Balanced OI must produce zero funding delta"
-    );
+    assert_eq!(market.acc_long_skew_index, INDEX_PRECISION);
+    assert_eq!(market.acc_short_skew_index, INDEX_PRECISION);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +260,11 @@ fn test_fee_claiming_by_admin() {
 
     let admin_balance_after = f.usdc.balance(&f.admin);
     let claimed = admin_balance_after - admin_balance_before;
-    assert!(claimed > 0, "Admin must receive claimed fees: claimed={}", claimed);
+    assert!(
+        claimed > 0,
+        "Admin must receive claimed fees: claimed={}",
+        claimed
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +354,12 @@ fn test_multiple_index_updates_compound() {
     f.set_btc_price(50_000);
 
     let balance_before = f.usdc.balance(&f.trader);
-    f.decrease_position(&f.trader, &symbol_short!("BTC"), &(20_000 * USDC_UNIT), &0_i128);
+    f.decrease_position(
+        &f.trader,
+        &symbol_short!("BTC"),
+        &(20_000 * USDC_UNIT),
+        &0_i128,
+    );
 
     let returned = f.usdc.balance(&f.trader) - balance_before;
     assert!(

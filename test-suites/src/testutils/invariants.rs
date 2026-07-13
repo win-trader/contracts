@@ -104,7 +104,9 @@ pub fn assert_protocol_invariants(env: &Env, f: &Fixture, ctx: &str) {
         expected_free,
         "[{ctx}] free_liquidity drift: got {}, expected max(0, total_assets {} - reserved {}) = {}",
         f.vault.free_liquidity(),
-        total, reserved, expected_free,
+        total,
+        reserved,
+        expected_free,
     );
 
     // -----------------------------------------------------------------------
@@ -153,7 +155,9 @@ pub fn assert_protocol_invariants(env: &Env, f: &Fixture, ctx: &str) {
         safe_basis_expected,
         "[{ctx}] total_assets_excl_pnl drift: got {}, expected max(0, raw {} - unclaimed {}) = {}",
         f.vault.total_assets_excl_pnl(),
-        raw_custody, unclaimed, safe_basis_expected,
+        raw_custody,
+        unclaimed,
+        safe_basis_expected,
     );
 }
 
@@ -166,10 +170,7 @@ pub fn assert_protocol_invariants(env: &Env, f: &Fixture, ctx: &str) {
 /// are currently open. Closed positions silently contribute 0 (their storage
 /// read panics with `PositionNotFound` — we catch that case here so the test
 /// can carry stale pairs without rebuilding the list every step).
-pub fn assert_position_summation(
-    f: &Fixture,
-    expected_open: &[(Address, Symbol)],
-) {
+pub fn assert_position_summation(f: &Fixture, expected_open: &[(Address, Symbol)]) {
     let mut size_sum: i128 = 0;
     for (trader, symbol) in expected_open {
         // `get_position` panics on missing; soroban tests can't catch panics

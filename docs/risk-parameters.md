@@ -10,7 +10,7 @@ This doc is the single-source reference for **what the parameter means**, **what
 - Time values are unix seconds.
 - USDC token amounts (collateral, size, fees, escrows) use the underlying token's decimals. At the current deployment USDC has 7 decimals, so `1 USDC = 10_000_000` raw. Constants below are raw; the "(N USDC)" gloss assumes the 7-decimal deployment.
 - Oracle prices are scaled by `PRECISION = 10_000_000` (1e7). `PRECISION` is conceptually the price scale, not the token scale — they happen to coincide numerically on this 7-decimal deployment, but the contracts treat them as independent.
-- Index accumulators (`acc_borrow_index`, `acc_funding_index`) are stored at `INDEX_PRECISION = 1e14`.
+- Carrying-fee accumulators (`acc_borrow_index`, `acc_long_skew_index`, `acc_short_skew_index`) use `INDEX_PRECISION = 1e14`. Base exposure uses `EXPOSURE_PRECISION = 1e18`.
 
 Errors are quoted as `ContractError::Variant = NN` so you can map an on-chain revert directly back to the rule that fired.
 
@@ -20,7 +20,7 @@ Errors are quoted as `ContractError::Variant = NN` so you can map an on-chain re
 
 Set via `ConfigManager.update_fee_splits(caller, FeeSplits { lp_bps, dev_bps, staker_bps })`.
 
-These three bps determine how every **revenue dollar** is partitioned: Open fee, the borrow-fee component, the Funding cut, and any TP/SL execution-fee escrow forfeited on Liquidation. (Execution bounties — Liquidation bounty + TP/SL escrow payout to the Executor — are a separate track; see § 2.)
+These three bps partition open fees, borrow fees, and TP/SL escrow forfeited on liquidation. The skew carrying fee is excluded: it belongs entirely to LPs as compensation for directional exposure. Execution bounties are a separate track; see § 2.
 
 ### `lp_bps`
 - Default: `9_000` (90%)
@@ -90,12 +90,6 @@ Set via `ConfigManager.update_protocol_limits(caller, ProtocolLimits { ... })`.
 - Type: `i128` (bps)
 - Meaning: caps `reserved_usdc / safe_basis` post-Increase. Lower = more LP buffer, less notional capacity.
 
-### `funding_cut_bps`
-- Default: `500` (5%)
-- Validation cap: `MAX_FUNDING_CUT_BPS = 3_000` (30%) (`InvalidFundingCut = 32`).
-- Type: `u32`
-- Meaning: protocol's cut of *positive* funding fees the trader would otherwise receive. Negative funding flows entirely to the receiving side.
-
 ### `adl_pnl_bps`
 - Default: `9_000` (90%)
 - Validation: `>= MIN_ADL_PNL_BPS = 5_000` (50%) AND `<= 10_000` (`InvalidAdlPnl = 33`).
@@ -128,9 +122,9 @@ Set via `ConfigManager.update_protocol_limits(caller, ProtocolLimits { ... })`.
 
 ---
 
-## 4. BorrowRateConfig — borrow & funding curve
+## 4. CarryingFeeConfig — borrow and skew carrying curves
 
-Set via `ConfigManager.update_borrow_rate_config(caller, BorrowRateConfig { ... })`. All rate fields are annualized basis points.
+Set via `ConfigManager.update_carrying_fee_config(caller, CarryingFeeConfig { ... })`. All rate fields are annualized basis points.
 
 ### `base_borrow_rate_bps`
 - Default: `100` (1% APR)
@@ -156,11 +150,11 @@ Set via `ConfigManager.update_borrow_rate_config(caller, BorrowRateConfig { ... 
 - Type: `i128`
 - Meaning: the kink point of the borrow curve.
 
-### `base_funding_rate_bps`
-- Default: `100` (1% APR)
-- Validation: `>= 0` (`InvalidBorrowRateNegative = 40`).
+### `max_skew_rate_bps`
+- Default: `5_000` (50% APR)
+- Validation: `>= 0` and `<= MAX_SKEW_RATE_BPS = 20_000` (200%) (`InvalidBorrowRateNegative = 40`, `InvalidMaxSkewRate = 48`).
 - Type: `i128`
-- Meaning: funding rate scalar applied to OI imbalance — `rate = base_funding_rate * (long_oi - short_oi) / (long_oi + short_oi)`. Positive ⇒ longs pay shorts. Negative funding flows entirely to the receiving side.
+- Meaning: maximum dominant-side surcharge at 100% one-sided OI and 100% utilization. The actual annualized rate is `max_skew_rate * (abs(long_oi-short_oi)/(long_oi+short_oi))² * utilization`. Only the dominant side pays; the minority side receives nothing.
 
 ---
 
@@ -250,7 +244,7 @@ Roles are granted by `ConfigManager.grant_role(caller, role, account)` (ADMIN-on
 - `Vault.pause(caller)` (PAUSER) — blocks `deposit`, `mint`, `withdraw`, `redeem`. `pay_profit`, `reserve_liquidity`, `release_liquidity`, `accrue_fees`, `claim_fees`, `record_absorbed_collateral`, `update_net_pnl`, and `update_net_pnl_full_sync` are NOT pause-gated — closes and PnL syncs must keep working even when LP deposits/withdraws are halted.
 - `Vault.unpause(caller)` (PAUSER) — resumes vault.
 - `PositionManager.pause(caller)` (PAUSER) — blocks `increase_position`, `update_indices`, `set_tp_sl`. Idempotent; preserves the original `last_pause_time` so re-pause cannot widen the fee-accrual gap.
-- `PositionManager.unpause(caller)` (PAUSER) — resumes. The next index update clamps `effective_start = max(last_index_update, last_unpause_time)` so borrow/funding fees do not retroactively accrue across the pause.
+- `PositionManager.unpause(caller)` (PAUSER) — resumes. The next index update clamps `effective_start = max(last_index_update, last_unpause_time)` so carrying fees do not retroactively accrue across the pause.
 - `decrease_position` / `liquidate_position` / `deleverage_position` / `execute_order` deliberately bypass the pause — traders must always be able to reduce risk and bad debt must always be addressable.
 - `ConfigManager.propose_admin` / `accept_admin` — two-step admin transfer (current proposes, new accepts) preventing irrecoverable bricking from a typo.
 - Per-contract `_migrate` (UPGRADER) — replace WASM and run the migration hook after the timelock elapses.
@@ -302,11 +296,10 @@ All constants in `shared/src/lib.rs` (path: `contracts/shared/src/constants.rs`)
 - `DEFAULT_COOLDOWN_DURATION = 300` (5 min)
 - `DEFAULT_MIN_POSITION_LIFETIME = 60` (60 s)
 - `DEFAULT_MAX_UTILIZATION_RATIO = 8_500` (85%)
-- `DEFAULT_FUNDING_CUT_BPS = 500` (5%)
 - `DEFAULT_ADL_PNL_BPS = 9_000` (90%)
 - `DEFAULT_ADL_UTILIZATION_BPS = 9_500` (95%)
 - `DEFAULT_LIQUIDATION_THRESHOLD_BPS = 200` (2%)
-- `DEFAULT_BASE_BORROW_RATE_BPS = 100`, `DEFAULT_SLOPE1_BPS = 500`, `DEFAULT_SLOPE2_BPS = 5_000`, `DEFAULT_OPTIMAL_UTILIZATION_BPS = 8_000`, `DEFAULT_BASE_FUNDING_RATE_BPS = 100`
+- `DEFAULT_BASE_BORROW_RATE_BPS = 100`, `DEFAULT_SLOPE1_BPS = 500`, `DEFAULT_SLOPE2_BPS = 5_000`, `DEFAULT_OPTIMAL_UTILIZATION_BPS = 8_000`, `DEFAULT_MAX_SKEW_RATE_BPS = 5_000`
 - `DEFAULT_UPGRADE_TIMELOCK = 86_400` (24h)
 - `DEFAULT_MIN_REQUIRED_SOURCES = 2` — defined but currently unused; OracleConfig is not seeded by `OracleRouter::initialize`
 
@@ -317,7 +310,7 @@ All constants in `shared/src/lib.rs` (path: `contracts/shared/src/constants.rs`)
 - `MAX_DEVIATION_BPS_CEILING = 10_000` (100%)
 - `MAX_ORACLE_SOURCES = 16`
 - `MIN_REQUIRED_SOURCES_FLOOR = 2`
-- `MAX_FUNDING_CUT_BPS = 3_000` (30%)
+- `MAX_SKEW_RATE_BPS = 20_000` (200% APR)
 - `MIN_ADL_PNL_BPS = 5_000` (50%)
 - `MAX_SLOPE2_BPS = 20_000` (200%)
 - `MAX_OPEN_FEE_BPS = 100` (1%)

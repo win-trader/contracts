@@ -56,8 +56,8 @@ name = "edge_cases"
 path = "integration/edge_cases.rs"
 
 [[test]]
-name = "funding_and_fees"
-path = "integration/funding_and_fees.rs"
+name = "carrying_fees"
+path = "integration/carrying_fees.rs"
 
 [[test]]
 name = "tp_sl_lifecycle"

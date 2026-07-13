@@ -10,7 +10,7 @@ use crate::{
         load_admin, require_admin_with_auth, revoke_role_internal, rotate_admin,
     },
     storage,
-    types::{roles, BorrowRateConfig, FeeConfig, FeeSplits, ProtocolLimits},
+    types::{roles, CarryingFeeConfig, FeeConfig, FeeSplits, ProtocolLimits},
     validate::Validate,
 };
 
@@ -74,7 +74,6 @@ impl ConfigManagerContract {
             cooldown_duration: shared::constants::DEFAULT_COOLDOWN_DURATION,
             min_position_lifetime: shared::constants::DEFAULT_MIN_POSITION_LIFETIME,
             max_utilization_ratio: shared::constants::DEFAULT_MAX_UTILIZATION_RATIO,
-            funding_cut_bps: shared::constants::DEFAULT_FUNDING_CUT_BPS,
             adl_pnl_bps: shared::constants::DEFAULT_ADL_PNL_BPS,
             adl_utilization_bps: shared::constants::DEFAULT_ADL_UTILIZATION_BPS,
             liquidation_threshold_bps: shared::constants::DEFAULT_LIQUIDATION_THRESHOLD_BPS,
@@ -82,15 +81,15 @@ impl ConfigManagerContract {
         protocol_limits.validate(&env);
         storage::save_protocol_limits(&env, &protocol_limits);
 
-        let borrow_rate_config = BorrowRateConfig {
+        let carrying_fee_config = CarryingFeeConfig {
             base_borrow_rate_bps: shared::constants::DEFAULT_BASE_BORROW_RATE_BPS,
             slope1_bps: shared::constants::DEFAULT_SLOPE1_BPS,
             slope2_bps: shared::constants::DEFAULT_SLOPE2_BPS,
             optimal_utilization_bps: shared::constants::DEFAULT_OPTIMAL_UTILIZATION_BPS,
-            base_funding_rate_bps: shared::constants::DEFAULT_BASE_FUNDING_RATE_BPS,
+            max_skew_rate_bps: shared::constants::DEFAULT_MAX_SKEW_RATE_BPS,
         };
-        borrow_rate_config.validate(&env);
-        storage::save_borrow_rate_config(&env, &borrow_rate_config);
+        carrying_fee_config.validate(&env);
+        storage::save_carrying_fee_config(&env, &carrying_fee_config);
 
         // Emit the seeded defaults so off-chain indexers populate
         // `protocol_config` from ledger 0 — without these, the keeper's
@@ -112,18 +111,17 @@ impl ConfigManagerContract {
             cooldown_duration: protocol_limits.cooldown_duration,
             min_position_lifetime: protocol_limits.min_position_lifetime,
             max_utilization_ratio: protocol_limits.max_utilization_ratio,
-            funding_cut_bps: protocol_limits.funding_cut_bps,
             adl_pnl_bps: protocol_limits.adl_pnl_bps,
             adl_utilization_bps: protocol_limits.adl_utilization_bps,
             liquidation_threshold_bps: protocol_limits.liquidation_threshold_bps,
         }
         .publish(&env);
-        events::BorrowRateUpdate {
-            base_borrow_rate_bps: borrow_rate_config.base_borrow_rate_bps,
-            slope1_bps: borrow_rate_config.slope1_bps,
-            slope2_bps: borrow_rate_config.slope2_bps,
-            optimal_utilization_bps: borrow_rate_config.optimal_utilization_bps,
-            base_funding_rate_bps: borrow_rate_config.base_funding_rate_bps,
+        events::CarryingFeeUpdate {
+            base_borrow_rate_bps: carrying_fee_config.base_borrow_rate_bps,
+            slope1_bps: carrying_fee_config.slope1_bps,
+            slope2_bps: carrying_fee_config.slope2_bps,
+            optimal_utilization_bps: carrying_fee_config.optimal_utilization_bps,
+            max_skew_rate_bps: carrying_fee_config.max_skew_rate_bps,
         }
         .publish(&env);
 
@@ -199,7 +197,6 @@ impl ConfigManager for ConfigManagerContract {
             cooldown_duration: limits.cooldown_duration,
             min_position_lifetime: limits.min_position_lifetime,
             max_utilization_ratio: limits.max_utilization_ratio,
-            funding_cut_bps: limits.funding_cut_bps,
             adl_pnl_bps: limits.adl_pnl_bps,
             adl_utilization_bps: limits.adl_utilization_bps,
             liquidation_threshold_bps: limits.liquidation_threshold_bps,
@@ -237,23 +234,23 @@ impl ConfigManager for ConfigManagerContract {
         bump_instance_ttl(&env);
     }
 
-    fn update_borrow_rate_config(env: Env, caller: Address, config: BorrowRateConfig) {
+    fn update_carrying_fee_config(env: Env, caller: Address, config: CarryingFeeConfig) {
         require_admin_with_auth(&env, &caller);
         config.validate(&env);
-        storage::save_borrow_rate_config(&env, &config);
-        events::BorrowRateUpdate {
+        storage::save_carrying_fee_config(&env, &config);
+        events::CarryingFeeUpdate {
             base_borrow_rate_bps: config.base_borrow_rate_bps,
             slope1_bps: config.slope1_bps,
             slope2_bps: config.slope2_bps,
             optimal_utilization_bps: config.optimal_utilization_bps,
-            base_funding_rate_bps: config.base_funding_rate_bps,
+            max_skew_rate_bps: config.max_skew_rate_bps,
         }
         .publish(&env);
         bump_instance_ttl(&env);
     }
 
-    fn get_borrow_rate_config(env: Env) -> BorrowRateConfig {
-        storage::load_borrow_rate_config(&env)
+    fn get_carrying_fee_config(env: Env) -> CarryingFeeConfig {
+        storage::load_carrying_fee_config(&env)
     }
 
     fn set_upgrade_timelock(env: Env, caller: Address, seconds: u64) {

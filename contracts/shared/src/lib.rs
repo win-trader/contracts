@@ -70,19 +70,19 @@ pub struct ProtocolLimits {
     pub cooldown_duration: u64,
     pub min_position_lifetime: u64,
     pub max_utilization_ratio: i128,
-    pub funding_cut_bps: u32,
     pub adl_pnl_bps: u32,
     pub adl_utilization_bps: u32,
     pub liquidation_threshold_bps: u32,
 }
 
-/// Borrow rate kink curve and funding rate parameters (all in basis points).
+/// Time-based carrying-fee parameters (all rates in annualized basis points).
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct BorrowRateConfig {
+pub struct CarryingFeeConfig {
     pub base_borrow_rate_bps: i128,
     pub slope1_bps: i128,
     pub slope2_bps: i128,
     pub optimal_utilization_bps: i128,
-    pub base_funding_rate_bps: i128,
+    /// Maximum skew surcharge at 100% concentration and 100% utilization.
+    pub max_skew_rate_bps: i128,
 }

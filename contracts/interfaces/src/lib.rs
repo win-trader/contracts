@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 pub mod config_manager;
 pub mod events;
@@ -23,4 +24,4 @@ pub use types::{MarketInfo, MigrationData, OracleConfig, PendingUpgrade, Positio
 pub use upgrade::{TimelockedUpgradeable, UpgradeFailure};
 
 // Re-export shared types that appear in trait signatures
-pub use shared::{BorrowRateConfig, FeeConfig, FeeSplits, ProtocolLimits};
+pub use shared::{CarryingFeeConfig, FeeConfig, FeeSplits, ProtocolLimits};
