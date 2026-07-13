@@ -145,9 +145,10 @@ fn sample_position() -> Position {
     Position {
         collateral: 1_000_0000000,
         size: 10_000_0000000,
+        base_exposure: 2_000_000_000_000_000_000,
         entry_price: 50_000_0000000,
-        entry_borrow_index: 1_0000000,
-        entry_funding_index: 0,
+        borrow_fee_debt: 1_0000000,
+        skew_fee_debt: 0,
         is_long: true,
         last_increased_time: 1_700_000_000,
         take_profit: 0,
@@ -182,8 +183,8 @@ fn test_set_and_get_position() {
         assert_eq!(loaded.collateral, pos.collateral);
         assert_eq!(loaded.size, pos.size);
         assert_eq!(loaded.entry_price, pos.entry_price);
-        assert_eq!(loaded.entry_borrow_index, pos.entry_borrow_index);
-        assert_eq!(loaded.entry_funding_index, pos.entry_funding_index);
+        assert_eq!(loaded.borrow_fee_debt, pos.borrow_fee_debt);
+        assert_eq!(loaded.skew_fee_debt, pos.skew_fee_debt);
         assert_eq!(loaded.is_long, pos.is_long);
         assert_eq!(loaded.last_increased_time, pos.last_increased_time);
         assert_eq!(loaded.execution_fee_escrow, pos.execution_fee_escrow);
@@ -323,7 +324,8 @@ fn test_get_market_returns_default_when_missing() {
         assert_eq!(market.long_open_interest, 0);
         assert_eq!(market.short_open_interest, 0);
         assert_eq!(market.acc_borrow_index, shared::constants::INDEX_PRECISION);
-        assert_eq!(market.acc_funding_index, shared::constants::INDEX_PRECISION);
+        assert_eq!(market.acc_long_skew_index, shared::constants::INDEX_PRECISION);
+        assert_eq!(market.acc_short_skew_index, shared::constants::INDEX_PRECISION);
         assert_eq!(market.last_index_update, env.ledger().timestamp());
     });
 }
@@ -337,8 +339,11 @@ fn test_set_and_get_market() {
             global_short_avg_price: 49_500_0000000,
             long_open_interest: 1_000_000_0000000,
             short_open_interest: 800_000_0000000,
+            long_base_exposure: 20_000_000_000_000_000,
+            short_base_exposure: 16_000_000_000_000_000,
             acc_borrow_index: 1_0100000,
-            acc_funding_index: -50000,
+            acc_long_skew_index: -50000,
+            acc_short_skew_index: 50_000,
             last_index_update: 1_700_000_000,
         };
 
@@ -349,8 +354,11 @@ fn test_set_and_get_market() {
         assert_eq!(loaded.global_short_avg_price, info.global_short_avg_price);
         assert_eq!(loaded.long_open_interest, info.long_open_interest);
         assert_eq!(loaded.short_open_interest, info.short_open_interest);
+        assert_eq!(loaded.long_base_exposure, info.long_base_exposure);
+        assert_eq!(loaded.short_base_exposure, info.short_base_exposure);
         assert_eq!(loaded.acc_borrow_index, info.acc_borrow_index);
-        assert_eq!(loaded.acc_funding_index, info.acc_funding_index);
+        assert_eq!(loaded.acc_long_skew_index, info.acc_long_skew_index);
+        assert_eq!(loaded.acc_short_skew_index, info.acc_short_skew_index);
         assert_eq!(loaded.last_index_update, info.last_index_update);
     });
 }
@@ -364,12 +372,16 @@ fn test_markets_isolated_per_symbol() {
         let btc_market = MarketInfo {
             global_long_avg_price: 50_000, global_short_avg_price: 0,
             long_open_interest: 100, short_open_interest: 0,
-            acc_borrow_index: 1, acc_funding_index: 0, last_index_update: 0,
+            long_base_exposure: 2, short_base_exposure: 0,
+            acc_borrow_index: 1, acc_long_skew_index: 0, acc_short_skew_index: 0,
+            last_index_update: 0,
         };
         let eth_market = MarketInfo {
             global_long_avg_price: 3_000, global_short_avg_price: 0,
             long_open_interest: 200, short_open_interest: 0,
-            acc_borrow_index: 2, acc_funding_index: 0, last_index_update: 0,
+            long_base_exposure: 3, short_base_exposure: 0,
+            acc_borrow_index: 2, acc_long_skew_index: 0, acc_short_skew_index: 0,
+            last_index_update: 0,
         };
 
         storage::set_market(env, &btc, &btc_market);
@@ -391,7 +403,8 @@ fn test_position_with_extreme_values() {
         let symbol = symbol_short!("BTC");
         let extreme = Position {
             collateral: i128::MAX, size: i128::MIN, entry_price: 0,
-            entry_borrow_index: i128::MAX, entry_funding_index: i128::MIN,
+            base_exposure: i128::MAX,
+            borrow_fee_debt: i128::MAX, skew_fee_debt: i128::MIN,
             is_long: false, last_increased_time: u64::MAX,
             take_profit: 0, stop_loss: 0,
             execution_fee_escrow: i128::MAX,
@@ -403,8 +416,8 @@ fn test_position_with_extreme_values() {
         assert_eq!(loaded.collateral, i128::MAX);
         assert_eq!(loaded.size, i128::MIN);
         assert_eq!(loaded.entry_price, 0);
-        assert_eq!(loaded.entry_borrow_index, i128::MAX);
-        assert_eq!(loaded.entry_funding_index, i128::MIN);
+        assert_eq!(loaded.borrow_fee_debt, i128::MAX);
+        assert_eq!(loaded.skew_fee_debt, i128::MIN);
         assert_eq!(loaded.is_long, false);
         assert_eq!(loaded.last_increased_time, u64::MAX);
         assert_eq!(loaded.execution_fee_escrow, i128::MAX);
@@ -412,18 +425,20 @@ fn test_position_with_extreme_values() {
 }
 
 #[test]
-fn test_market_with_negative_funding_index() {
+fn test_market_round_trips_extreme_skew_indices() {
     with_contract(|env, _| {
         let symbol = symbol_short!("BTC");
         let info = MarketInfo {
             global_long_avg_price: 0, global_short_avg_price: 0,
             long_open_interest: 0, short_open_interest: 0,
-            acc_borrow_index: 0, acc_funding_index: i128::MIN,
+            long_base_exposure: 0, short_base_exposure: 0,
+            acc_borrow_index: 0, acc_long_skew_index: i128::MIN,
+            acc_short_skew_index: i128::MAX,
             last_index_update: 0,
         };
 
         storage::set_market(env, &symbol, &info);
-        assert_eq!(storage::get_market(env, &symbol).acc_funding_index, i128::MIN);
+        assert_eq!(storage::get_market(env, &symbol).acc_long_skew_index, i128::MIN);
     });
 }
 
@@ -454,7 +469,9 @@ fn test_market_overwrite() {
         let mut info = MarketInfo {
             global_long_avg_price: 1, global_short_avg_price: 2,
             long_open_interest: 3, short_open_interest: 4,
-            acc_borrow_index: 5, acc_funding_index: 6, last_index_update: 7,
+            long_base_exposure: 8, short_base_exposure: 9,
+            acc_borrow_index: 5, acc_long_skew_index: 6, acc_short_skew_index: 7,
+            last_index_update: 10,
         };
         storage::set_market(env, &symbol, &info);
         info.long_open_interest = 999;

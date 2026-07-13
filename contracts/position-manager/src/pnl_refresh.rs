@@ -30,10 +30,11 @@ pub fn refresh_market_unrealized_pnl(env: &Env, symbol: &Symbol, mark_price: i12
 /// registry don't re-read it. Returns the new global total.
 fn apply_market_pnl(env: &Env, symbol: &Symbol, market: &MarketInfo, mark_price: i128) -> i128 {
     let new_market_pnl = math::calc_market_unrealized_pnl(
+        env,
         market.long_open_interest,
-        market.global_long_avg_price,
+        market.long_base_exposure,
         market.short_open_interest,
-        market.global_short_avg_price,
+        market.short_base_exposure,
         mark_price,
     );
 

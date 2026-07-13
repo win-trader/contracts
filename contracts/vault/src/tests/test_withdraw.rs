@@ -62,21 +62,20 @@ fn setup() -> TestFixture {
             cooldown_duration: 0,
             min_position_lifetime: 0,
             max_utilization_ratio: 10_000,
-            funding_cut_bps: 0,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 

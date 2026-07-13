@@ -12,7 +12,7 @@
 //   - Requires initialized + NOT paused
 //   - Reverts PositionNotFound (error 6) if no position exists
 //   - Fetches mark price from oracle
-//   - Calculates health: collateral + unrealized_pnl - borrow_fee + funding_fee
+//   - Calculates health: collateral + unrealized_pnl - borrow_fee + skew_fee
 //   - If health >= 0 => reverts HealthFactorOk (error 9)
 //   - If health < 0 => liquidate:
 //       Seize collateral, settle loss via vault, delete position,
@@ -128,21 +128,20 @@ fn setup_full<'a>() -> TestFixture<'a> {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -273,8 +272,7 @@ fn advance_time_and_set_price(f: &TestFixture, new_ts: u64, new_price: i128) {
     f.oracle_client.set_price(&symbol_short!("BTC"), &new_price);
 }
 
-/// Seed the market with non-zero borrow index to simulate accumulated fees.
-/// Must be called BEFORE opening a position so the position snapshots the index.
+/// Seed a non-zero borrow index. Opening then records the matching fee debt.
 fn _seed_market_borrow_index(f: &TestFixture, borrow_index: i128) {
     let symbol = symbol_short!("BTC");
     f.env.as_contract(&f.pm_addr, || {
@@ -347,8 +345,8 @@ fn test_liquidate_long_position_price_drops_significantly() {
     //
     // Price drops to $44,000:
     //   unrealized_pnl = 10,000 * (44,000 - 50,000) / 50,000 = -1,200 USDC
-    //   health = 1,000 + (-1,200) - borrow_fee + funding_fee
-    //   With fresh indices (borrow_fee ~ 0, funding_fee ~ 0):
+    //   health = 1,000 + (-1,200) - borrow_fee + skew_fee
+    //   With fresh indices (borrow_fee ~ 0, skew_fee ~ 0):
     //   health = 1,000 - 1,200 = -200 (underwater)
     //
     // Expected: position deleted, OI decreased, total_reserved decreased.
@@ -521,7 +519,7 @@ fn test_liquidate_borrow_fees_push_position_underwater() {
     // Open long at $50,000, size=10,000, collateral=1,000.
     // If borrow_fee > 1,000 and pnl ~ 0, health = 1,000 - borrow_fee < 0.
     //
-    // borrow_fee = (current_borrow_index - entry_borrow_index) * size / INDEX_PRECISION
+    // borrow_fee = (current_borrow_index - borrow_fee_debt) * size / INDEX_PRECISION
     // We need borrow_fee > 1_000 * USDC_UNIT = 1_000_000_000
     // So (delta_index) * 10_000_000_000 / 1e14 > 1_000_000_000
     // delta_index > 1_000_000_000 * 1e14 / 10_000_000_000 = 10_000_000_000_000
@@ -536,7 +534,7 @@ fn test_liquidate_borrow_fees_push_position_underwater() {
 
     // Now manually bump the market's borrow index to simulate large accumulated fees.
     // Set last_index_update to current time so do_update_indices is a no-op.
-    // The position's entry_borrow_index was snapshotted at open time.
+    // The position's borrow_fee_debt was snapshotted at open time.
     // We need (new_index - entry_index) * size / INDEX_PRECISION > collateral
     let large_borrow_index: i128 = 15_000_000_000_000; // enough to make fee > collateral
     f.env.as_contract(&f.pm_addr, || {

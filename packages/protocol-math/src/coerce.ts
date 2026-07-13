@@ -3,10 +3,10 @@
 // responses, and frontend hooks all need. Inputs are structural — any object
 // with the right column names (drizzle row, API response, fixture literal)
 // works. Outputs are the bigint shapes that the rest of protocol-math
-// consumes (MarketState, PositionState, VaultLiquidity, BorrowRateConfig).
+// consumes (MarketState, PositionState, VaultLiquidity, CarryingFeeConfig).
 
 import type {
-  BorrowRateConfig,
+  CarryingFeeConfig,
   MarketState,
   PositionState,
   VaultLiquidity,
@@ -21,7 +21,8 @@ export function toBigInt(value: Stringy): bigint {
 
 export interface MarketRowShape {
   acc_borrow_index: Stringy;
-  acc_funding_index: Stringy;
+  acc_long_skew_index: Stringy;
+  acc_short_skew_index: Stringy;
   last_index_update: Stringy;
   long_open_interest: Stringy;
   short_open_interest: Stringy;
@@ -30,7 +31,8 @@ export interface MarketRowShape {
 export function toMarketState(row: MarketRowShape): MarketState {
   return {
     acc_borrow_index: toBigInt(row.acc_borrow_index),
-    acc_funding_index: toBigInt(row.acc_funding_index),
+    acc_long_skew_index: toBigInt(row.acc_long_skew_index),
+    acc_short_skew_index: toBigInt(row.acc_short_skew_index),
     last_index_update: toBigInt(row.last_index_update),
     long_open_interest: toBigInt(row.long_open_interest),
     short_open_interest: toBigInt(row.short_open_interest),
@@ -42,8 +44,9 @@ export interface PositionRowShape {
   size: Stringy;
   collateral: Stringy;
   entry_price: Stringy;
-  entry_borrow_index: Stringy;
-  entry_funding_index: Stringy;
+  base_exposure: Stringy;
+  borrow_fee_debt: Stringy;
+  skew_fee_debt: Stringy;
 }
 
 export function toPositionState(row: PositionRowShape): PositionState {
@@ -52,8 +55,9 @@ export function toPositionState(row: PositionRowShape): PositionState {
     size: toBigInt(row.size),
     collateral: toBigInt(row.collateral),
     entry_price: toBigInt(row.entry_price),
-    entry_borrow_index: toBigInt(row.entry_borrow_index),
-    entry_funding_index: toBigInt(row.entry_funding_index),
+    base_exposure: toBigInt(row.base_exposure),
+    borrow_fee_debt: toBigInt(row.borrow_fee_debt),
+    skew_fee_debt: toBigInt(row.skew_fee_debt),
   };
 }
 
@@ -69,22 +73,22 @@ export function toVaultLiquidity(row: VaultRowShape | undefined): VaultLiquidity
   };
 }
 
-export interface BorrowRateRowShape {
+export interface CarryingFeeRowShape {
   base_borrow_rate_bps: Stringy;
   slope1_bps: Stringy;
   slope2_bps: Stringy;
   optimal_utilization_bps: Stringy;
-  base_funding_rate_bps: Stringy;
+  max_skew_rate_bps: Stringy;
 }
 
-export function toBorrowRateConfig(
-  row: BorrowRateRowShape | undefined,
-): BorrowRateConfig {
+export function toCarryingFeeConfig(
+  row: CarryingFeeRowShape | undefined,
+): CarryingFeeConfig {
   return {
     base_borrow_rate_bps: toBigInt(row?.base_borrow_rate_bps),
     slope1_bps: toBigInt(row?.slope1_bps),
     slope2_bps: toBigInt(row?.slope2_bps),
     optimal_utilization_bps: toBigInt(row?.optimal_utilization_bps),
-    base_funding_rate_bps: toBigInt(row?.base_funding_rate_bps),
+    max_skew_rate_bps: toBigInt(row?.max_skew_rate_bps),
   };
 }

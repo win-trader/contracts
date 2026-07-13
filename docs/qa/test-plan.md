@@ -66,7 +66,7 @@ cost and flakiness budget.
   - Five narrative scenarios run against an actual deployed local stack
     (postgres + indexer + api + on-chain contracts):
     - `normal-usage` — happy-path open/close/withdraw across users
-    - `imbalanced-oi` — heavy one-sided OI to drive funding rates
+    - `imbalanced-oi` — heavy one-sided OI to drive skew carrying rates
     - `extreme-volatility` — large oracle moves, TP/SL triggers
     - `mass-liquidation` — many positions liquidated in one ledger
     - `deposit-withdraw` — happy-path LP lifecycle (deposit → asserts

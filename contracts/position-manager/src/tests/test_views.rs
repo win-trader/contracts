@@ -76,21 +76,20 @@ fn setup_full<'a>() -> TestFixture<'a> {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -294,7 +293,7 @@ fn test_get_market_returns_defaults_for_unknown_symbol() {
     assert_eq!(market.long_open_interest, 0);
     assert_eq!(market.short_open_interest, 0);
     assert_eq!(market.acc_borrow_index, shared::constants::INDEX_PRECISION);
-    assert_eq!(market.acc_funding_index, shared::constants::INDEX_PRECISION);
+    assert_eq!(market.acc_long_skew_index, shared::constants::INDEX_PRECISION);
 }
 
 #[test]

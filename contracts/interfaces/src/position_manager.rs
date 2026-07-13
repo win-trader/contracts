@@ -59,7 +59,7 @@ pub trait PositionManager {
     /// barrier, and the caller earns the liquidation bounty.
     fn liquidate_position(env: Env, caller: Address, trader: Address, symbol: Symbol);
 
-    /// Sync global borrow and funding accumulators. KEEPER only. Works
+    /// Sync global borrow and dominant-side skew accumulators. KEEPER only. Works
     /// during pause (accrual clamps at the pause boundary).
     fn update_indices(env: Env, caller: Address, symbol: Symbol);
 

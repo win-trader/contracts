@@ -120,21 +120,20 @@ fn setup_adl<'a>() -> TestFixture<'a> {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -261,21 +260,20 @@ fn setup_no_adl<'a>() -> TestFixture<'a> {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -746,7 +744,7 @@ fn adl_refunds_escrow_to_trader() {
         .deleverage_position(&f.keeper, &f.trader, &symbol);
     // Re-arm utilization so trader2's ADL trigger still fires after the
     // first close released reservations. Keep the ledger timestamp fixed so
-    // the two closes accrue identical borrow/funding fees — the asymmetry
+    // the two closes accrue identical carrying fees — the asymmetry
     // under test is the escrow refund only.
     force_reserved(&f, 96_000 * USDC_UNIT);
     f.pm_client

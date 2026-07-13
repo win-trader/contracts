@@ -39,8 +39,8 @@ pub enum ConfigManagerError {
     InvalidMinCollateral = 30,
     /// `max_utilization_ratio` is out of (0, BPS] range.
     InvalidMaxUtilization = 31,
-    /// `funding_cut_bps` exceeds `MAX_FUNDING_CUT_BPS`.
-    InvalidFundingCut = 32,
+    /// Reserved to keep subsequent error discriminants stable.
+    ReservedProtocolLimit32 = 32,
     /// `adl_pnl_bps` is below `MIN_ADL_PNL_BPS` or above BPS.
     InvalidAdlPnl = 33,
     /// `adl_utilization_bps` is out of (0, BPS] range.
@@ -53,8 +53,8 @@ pub enum ConfigManagerError {
     /// `min_position_lifetime` exceeds `MAX_MIN_POSITION_LIFETIME_SECS`.
     InvalidMinPositionLifetime = 37,
 
-    // ---- Per-rule BorrowRateConfig codes (40–43) ----
-    /// A BorrowRateConfig rate is negative.
+    // ---- Per-rule CarryingFeeConfig codes (40–43) ----
+    /// A CarryingFeeConfig rate is negative.
     InvalidBorrowRateNegative = 40,
     /// `optimal_utilization_bps` is out of (0, BPS] range.
     InvalidOptimalUtilization = 41,
@@ -72,6 +72,6 @@ pub enum ConfigManagerError {
     InvalidTpSlExecutionFee = 46,
     /// `base_borrow_rate_bps` exceeds `MAX_BASE_BORROW_RATE_BPS`.
     InvalidBaseBorrowRate = 47,
-    /// `base_funding_rate_bps` exceeds `MAX_BASE_FUNDING_RATE_BPS`.
-    InvalidBaseFundingRate = 48,
+    /// `max_skew_rate_bps` exceeds `MAX_SKEW_RATE_BPS`.
+    InvalidMaxSkewRate = 48,
 }

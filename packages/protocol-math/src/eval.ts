@@ -3,7 +3,7 @@
 // each with a single fixed shape — callers pick the one matching what data
 // they hold, instead of branching on optional tick inputs.
 
-import { BPS } from "./constants.js";
+import { BPS, EXPOSURE_PRECISION } from "./constants.js";
 import { calcUnrealizedPnl } from "./pure.js";
 import {
   toBigInt,
@@ -18,20 +18,19 @@ import type { PositionEvaluation } from "./types.js";
 export interface PositionMarkInput {
   is_long: boolean;
   size: Stringy;
-  entry_price: Stringy;
+  base_exposure: Stringy;
 }
 
 /**
  * Full PositionEvaluation for an existing Position row against a MarketTick.
  * Used wherever the projection inputs (vault, market, config) are loaded so
- * the row can surface fee-adjusted health / accrued borrow + funding.
+ * the row can surface fee-adjusted health / accrued borrow + skew fees.
  */
 export function evaluatePositionRow(
   row: PositionRowShape,
   tick: MarketTick,
-  funding_cut_bps: bigint = 0n,
 ): PositionEvaluation {
-  return tick.evaluate(toPositionState(row), undefined, funding_cut_bps);
+  return tick.evaluate(toPositionState(row));
 }
 
 /**
@@ -46,7 +45,7 @@ export function evaluatePositionMarkOnly(
   return {
     pnl: calcUnrealizedPnl(
       toBigInt(row.size),
-      toBigInt(row.entry_price),
+      toBigInt(row.base_exposure),
       mark_price,
       row.is_long,
     ),
@@ -58,7 +57,7 @@ export function evaluatePositionMarkOnly(
  * MarketTick. Inverts the on-chain liquidation gate
  *   `effective_health < collateral * liquidation_threshold_bps / BPS`
  * to solve for the mark price that would trip it, using the position's
- * current accrued borrow / effective_funding so the line on the chart
+ * current accrued borrow and skew fees so the line on the chart
  * reflects "where the position liquidates *right now*", not "where it
  * would have liquidated at t=0 with no fees."
  *
@@ -68,20 +67,19 @@ export function liquidationPriceForPosition(
   row: PositionRowShape,
   tick: MarketTick,
   liquidation_threshold_bps: bigint,
-  funding_cut_bps: bigint = 0n,
 ): bigint | null {
   const state = toPositionState(row);
-  if (state.size === 0n || state.collateral === 0n || state.entry_price === 0n) {
+  if (state.size === 0n || state.collateral === 0n || state.base_exposure === 0n) {
     return null;
   }
-  const evald = tick.evaluate(state, undefined, funding_cut_bps);
+  const evald = tick.evaluate(state);
   const threshold_value = (state.collateral * liquidation_threshold_bps) / BPS;
-  // At liq: collateral + pnl - borrow_fee + effective_funding == threshold_value
-  // ⇒ pnl_at_liq = threshold_value - collateral + borrow_fee - effective_funding
+  // At liq: collateral + pnl - borrow_fee - skew_fee == threshold_value.
   const pnl_at_liq =
-    threshold_value - state.collateral + evald.borrow_fee - evald.effective_funding;
-  // Long:  pnl = size * (liq - entry) / entry  ⇒  liq = entry + entry * pnl / size
-  // Short: pnl = size * (entry - liq) / entry  ⇒  liq = entry - entry * pnl / size
-  const adjustment = (state.entry_price * pnl_at_liq) / state.size;
-  return state.is_long ? state.entry_price + adjustment : state.entry_price - adjustment;
+    threshold_value - state.collateral + evald.borrow_fee + evald.skew_fee;
+  const mark_value = state.is_long
+    ? state.size + pnl_at_liq
+    : state.size - pnl_at_liq;
+  if (mark_value <= 0n) return 0n;
+  return (mark_value * EXPOSURE_PRECISION) / state.base_exposure;
 }

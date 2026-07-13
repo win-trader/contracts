@@ -64,8 +64,19 @@ pub fn do_increase_position(
     // Open fee + TP/SL escrow.
     let fee_config = config_loaders::fee_config(env);
     let open_fee = math::calc_open_fee(size, fee_config.open_fee_bps);
+    let base_delta = math::calc_base_exposure(env, size, mark_price);
+    let borrow_debt_delta = math::calc_fee_debt(env, size, market.acc_borrow_index);
+    let skew_index = if is_long {
+        market.acc_long_skew_index
+    } else {
+        market.acc_short_skew_index
+    };
+    let skew_debt_delta = math::calc_fee_debt(env, size, skew_index);
 
-    let prior_escrow = existing.as_ref().map(|p| p.execution_fee_escrow).unwrap_or(0);
+    let prior_escrow = existing
+        .as_ref()
+        .map(|p| p.execution_fee_escrow)
+        .unwrap_or(0);
     let prior_tp = existing.as_ref().map(|p| p.take_profit).unwrap_or(0);
     let prior_sl = existing.as_ref().map(|p| p.stop_loss).unwrap_or(0);
     let (resulting_tp, resulting_sl) =
@@ -86,21 +97,10 @@ pub fn do_increase_position(
             if is_long != pos.is_long {
                 panic_with_error!(env, PositionManagerError::DirectionMismatch);
             }
-            pos.entry_price =
-                math::update_global_avg_price(pos.entry_price, pos.size, mark_price, size);
-            // Weighted-average entry indices so accrued fees reset proportionally
-            pos.entry_borrow_index = math::update_global_avg_price(
-                pos.entry_borrow_index,
-                pos.size,
-                market.acc_borrow_index,
-                size,
-            );
-            pos.entry_funding_index = math::update_global_avg_price(
-                pos.entry_funding_index,
-                pos.size,
-                market.acc_funding_index,
-                size,
-            );
+            pos.base_exposure += base_delta;
+            pos.entry_price = math::derive_entry_price(env, pos.size + size, pos.base_exposure);
+            pos.borrow_fee_debt += borrow_debt_delta;
+            pos.skew_fee_debt += skew_debt_delta;
             pos.size += size;
             pos.collateral += collateral;
             pos.last_increased_time = env.ledger().timestamp();
@@ -116,9 +116,10 @@ pub fn do_increase_position(
         None => Position {
             collateral,
             size,
+            base_exposure: base_delta,
             entry_price: mark_price,
-            entry_borrow_index: market.acc_borrow_index,
-            entry_funding_index: market.acc_funding_index,
+            borrow_fee_debt: borrow_debt_delta,
+            skew_fee_debt: skew_debt_delta,
             is_long,
             last_increased_time: env.ledger().timestamp(),
             take_profit,
@@ -145,21 +146,15 @@ pub fn do_increase_position(
     validate_tp_sl(env, &position, position.take_profit, position.stop_loss);
 
     if is_long {
-        market.global_long_avg_price = math::update_global_avg_price(
-            market.global_long_avg_price,
-            market.long_open_interest,
-            mark_price,
-            size,
-        );
         market.long_open_interest += size;
+        market.long_base_exposure += base_delta;
+        market.global_long_avg_price =
+            math::derive_entry_price(env, market.long_open_interest, market.long_base_exposure);
     } else {
-        market.global_short_avg_price = math::update_global_avg_price(
-            market.global_short_avg_price,
-            market.short_open_interest,
-            mark_price,
-            size,
-        );
         market.short_open_interest += size;
+        market.short_base_exposure += base_delta;
+        market.global_short_avg_price =
+            math::derive_entry_price(env, market.short_open_interest, market.short_base_exposure);
     }
 
     // Use the snapshot's safe basis — the mark-price-insensitive denominator
@@ -191,14 +186,15 @@ pub fn do_increase_position(
         symbol: symbol.clone(),
         size_delta: size,
         collateral,
-        entry_price: position.entry_price,
+        entry_price: math::derive_entry_price(env, position.size, position.base_exposure),
+        base_exposure: position.base_exposure,
         is_long,
         tp: position.take_profit,
         sl: position.stop_loss,
         new_total_size: position.size,
         new_total_collateral: position.collateral,
-        entry_borrow_index: position.entry_borrow_index,
-        entry_funding_index: position.entry_funding_index,
+        borrow_fee_debt: position.borrow_fee_debt,
+        skew_fee_debt: position.skew_fee_debt,
         last_increased_time: position.last_increased_time,
     }
     .publish(env);

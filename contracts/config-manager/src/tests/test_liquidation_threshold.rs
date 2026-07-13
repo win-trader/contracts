@@ -99,7 +99,6 @@ fn test_update_protocol_limits_with_threshold_preserves_other_fields() {
     assert_eq!(stored.cooldown_duration, limits.cooldown_duration, "cooldown_duration preserved");
     assert_eq!(stored.min_position_lifetime, limits.min_position_lifetime, "min_position_lifetime preserved");
     assert_eq!(stored.max_utilization_ratio, limits.max_utilization_ratio, "max_utilization_ratio preserved");
-    assert_eq!(stored.funding_cut_bps, limits.funding_cut_bps, "funding_cut_bps preserved");
     assert_eq!(stored.adl_pnl_bps, limits.adl_pnl_bps, "adl_pnl_bps preserved");
     assert_eq!(stored.adl_utilization_bps, limits.adl_utilization_bps, "adl_utilization_bps preserved");
 }
@@ -308,26 +307,25 @@ fn test_update_protocol_limits_emits_event_including_liquidation_threshold() {
     // declaration order. Soroban's tuple TryFromVal<Env, Val> impl unpacks a
     // VecObject into a fixed-arity tuple.
     //
-    // The struct has SEVEN existing fields plus the new
-    // `liquidation_threshold_bps`, so the tuple here is 8-arity. If
+    // The struct has six existing fields plus the new
+    // `liquidation_threshold_bps`, so the tuple here is 7-arity. If
     // code-writer forgets to add the field to the `LimitsUpdate` struct in
     // events.rs, the runtime Vec will only contain 7 elements and this 8-tuple
     // unpack will return an error — exactly the desired red signal.
-    let parsed: Result<(i128, u64, u64, i128, u32, u32, u32, u32), _> =
+    let parsed: Result<(i128, u64, u64, i128, u32, u32, u32), _> =
         data.try_into_val(&env);
     let tuple = parsed.expect(
-        "LimitsUpdate event data must unpack into the 8-field tuple including liquidation_threshold_bps; if this fails, the event struct is missing the new trailing field"
+        "LimitsUpdate event data must include liquidation_threshold_bps"
     );
 
     assert_eq!(tuple.0, limits.min_collateral, "event[0] = min_collateral");
     assert_eq!(tuple.1, limits.cooldown_duration, "event[1] = cooldown_duration");
     assert_eq!(tuple.2, limits.min_position_lifetime, "event[2] = min_position_lifetime");
     assert_eq!(tuple.3, limits.max_utilization_ratio, "event[3] = max_utilization_ratio");
-    assert_eq!(tuple.4, limits.funding_cut_bps, "event[4] = funding_cut_bps");
-    assert_eq!(tuple.5, limits.adl_pnl_bps, "event[5] = adl_pnl_bps");
-    assert_eq!(tuple.6, limits.adl_utilization_bps, "event[6] = adl_utilization_bps");
+    assert_eq!(tuple.4, limits.adl_pnl_bps, "event[4] = adl_pnl_bps");
+    assert_eq!(tuple.5, limits.adl_utilization_bps, "event[5] = adl_utilization_bps");
     assert_eq!(
-        tuple.7, limits.liquidation_threshold_bps,
-        "event[7] = liquidation_threshold_bps — load-bearing assertion: this is the new field"
+        tuple.6, limits.liquidation_threshold_bps,
+        "event[6] = liquidation_threshold_bps"
     );
 }

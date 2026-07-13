@@ -6,7 +6,7 @@
 //! - Open fee: `size * open_fee_bps / BPS`, charged on every `increase_position`.
 //!   Trader -> PM -> Vault. Non-LP slice (dev+staker bps of FeeSplits) accrues
 //!   to `vault.unclaimed_fees`; LP slice stays in `vault.total_assets` implicitly.
-//! - Close-time revenue fees (borrow + funding_protocol_cut): split via the
+//! - Close-time borrow revenue: split via the
 //!   same FeeSplits.
 //! - Liquidation bounty: `min(collateral * liquidation_bounty_bps / BPS, pm_to_vault)`,
 //!   paid PM -> liquidator. Separate from the revenue split.
@@ -176,20 +176,19 @@ fn test_adl_no_keeper_share() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 3_000,
             liquidation_threshold_bps: 200,
         },
     );
-    f.config_manager.update_borrow_rate_config(
+    f.config_manager.update_carrying_fee_config(
         &f.admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -329,7 +328,7 @@ fn test_zero_fees_no_distribution() {
 /// Verifies the LP vs dev split on the open-fee revenue stream: with FeeSplits
 /// {9000/1000/0}, `vault.unclaimed_fees` grows by exactly `dev_bps + staker_bps`
 /// of the open fee, and `total_assets - unclaimed_fees` grows by the LP slice.
-/// Isolates the open-fee split from close-time funding-no-counterparty drift.
+/// Isolates the open-fee split from close-time carrying-fee drift.
 #[test]
 fn test_fee_split_bps_precision() {
     let env = Env::default();

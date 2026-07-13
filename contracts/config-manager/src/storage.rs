@@ -1,7 +1,7 @@
 use soroban_sdk::{contracttype, panic_with_error, Address, Env};
 
 use crate::errors::ConfigManagerError;
-use crate::types::{BorrowRateConfig, FeeConfig, FeeSplits, ProtocolLimits};
+use crate::types::{CarryingFeeConfig, FeeConfig, FeeSplits, ProtocolLimits};
 
 /// Pending WASM upgrade is the same shape across every protocol contract —
 /// re-exported here so callers can keep saying `storage::PendingUpgrade`.
@@ -26,8 +26,8 @@ pub enum StorageKey {
     FeeConfig,
     /// Protocol risk and timing limits (single struct replaces four separate keys).
     ProtocolLimits,
-    /// Borrow rate kink curve and funding rate parameters.
-    BorrowRateConfig,
+    /// Borrow-rate curve and dominant-side skew carrying-rate ceiling.
+    CarryingFeeConfig,
     /// Configurable upgrade timelock in seconds. Floor enforced at
     /// `shared::constants::MIN_UPGRADE_TIMELOCK`.
     UpgradeTimelock,
@@ -106,9 +106,7 @@ pub fn load_fee_config(env: &Env) -> FeeConfig {
 }
 
 pub fn save_fee_config(env: &Env, config: &FeeConfig) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::FeeConfig, config);
+    env.storage().instance().set(&StorageKey::FeeConfig, config);
 }
 // ---------------------------------------------------------------------------
 // ProtocolLimits helpers
@@ -128,20 +126,20 @@ pub fn save_protocol_limits(env: &Env, limits: &ProtocolLimits) {
 }
 
 // ---------------------------------------------------------------------------
-// BorrowRateConfig helpers
+// CarryingFeeConfig helpers
 // ---------------------------------------------------------------------------
 
-pub fn load_borrow_rate_config(env: &Env) -> BorrowRateConfig {
+pub fn load_carrying_fee_config(env: &Env) -> CarryingFeeConfig {
     env.storage()
         .instance()
-        .get(&StorageKey::BorrowRateConfig)
+        .get(&StorageKey::CarryingFeeConfig)
         .unwrap_or_else(|| panic_with_error!(env, ConfigManagerError::NotInitialized))
 }
 
-pub fn save_borrow_rate_config(env: &Env, config: &BorrowRateConfig) {
+pub fn save_carrying_fee_config(env: &Env, config: &CarryingFeeConfig) {
     env.storage()
         .instance()
-        .set(&StorageKey::BorrowRateConfig, config);
+        .set(&StorageKey::CarryingFeeConfig, config);
 }
 
 // ---------------------------------------------------------------------------

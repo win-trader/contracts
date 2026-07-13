@@ -6,13 +6,12 @@
 //! every entrypoint that accepts one of these wire structs so a future
 //! mutator cannot bypass the bounds.
 
-use shared::{BorrowRateConfig, FeeConfig, FeeSplits, ProtocolLimits};
 use shared::constants::{
-    BPS, MAX_BASE_BORROW_RATE_BPS, MAX_BASE_FUNDING_RATE_BPS, MAX_COOLDOWN_DURATION,
-    MAX_FUNDING_CUT_BPS, MAX_LIQUIDATION_BOUNTY_BPS, MAX_MIN_POSITION_LIFETIME_SECS,
-    MAX_OPEN_FEE_BPS, MAX_SLOPE2_BPS, MAX_TP_SL_EXECUTION_FEE, MIN_ADL_PNL_BPS,
-    MIN_LIQUIDATION_THRESHOLD_BPS,
+    BPS, MAX_BASE_BORROW_RATE_BPS, MAX_COOLDOWN_DURATION, MAX_LIQUIDATION_BOUNTY_BPS,
+    MAX_MIN_POSITION_LIFETIME_SECS, MAX_OPEN_FEE_BPS, MAX_SKEW_RATE_BPS, MAX_SLOPE2_BPS,
+    MAX_TP_SL_EXECUTION_FEE, MIN_ADL_PNL_BPS, MIN_LIQUIDATION_THRESHOLD_BPS,
 };
+use shared::{CarryingFeeConfig, FeeConfig, FeeSplits, ProtocolLimits};
 use soroban_sdk::{panic_with_error, Env};
 
 use crate::errors::ConfigManagerError;
@@ -59,9 +58,6 @@ impl Validate for ProtocolLimits {
         if self.max_utilization_ratio < 1 || self.max_utilization_ratio > BPS {
             panic_with_error!(env, ConfigManagerError::InvalidMaxUtilization);
         }
-        if self.funding_cut_bps > MAX_FUNDING_CUT_BPS {
-            panic_with_error!(env, ConfigManagerError::InvalidFundingCut);
-        }
         if self.adl_pnl_bps < MIN_ADL_PNL_BPS || self.adl_pnl_bps > (BPS as u32) {
             panic_with_error!(env, ConfigManagerError::InvalidAdlPnl);
         }
@@ -82,12 +78,12 @@ impl Validate for ProtocolLimits {
     }
 }
 
-impl Validate for BorrowRateConfig {
+impl Validate for CarryingFeeConfig {
     fn validate(&self, env: &Env) {
         if self.base_borrow_rate_bps < 0
             || self.slope1_bps < 0
             || self.slope2_bps < 0
-            || self.base_funding_rate_bps < 0
+            || self.max_skew_rate_bps < 0
         {
             panic_with_error!(env, ConfigManagerError::InvalidBorrowRateNegative);
         }
@@ -103,8 +99,8 @@ impl Validate for BorrowRateConfig {
         if self.base_borrow_rate_bps > MAX_BASE_BORROW_RATE_BPS {
             panic_with_error!(env, ConfigManagerError::InvalidBaseBorrowRate);
         }
-        if self.base_funding_rate_bps > MAX_BASE_FUNDING_RATE_BPS {
-            panic_with_error!(env, ConfigManagerError::InvalidBaseFundingRate);
+        if self.max_skew_rate_bps > MAX_SKEW_RATE_BPS {
+            panic_with_error!(env, ConfigManagerError::InvalidMaxSkewRate);
         }
     }
 }

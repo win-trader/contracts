@@ -2,46 +2,53 @@
 // semantics, same rounding (integer division everywhere). All amounts are
 // protocol-scaled bigints.
 
-import { BPS, INDEX_PRECISION, SECONDS_PER_YEAR } from "./constants.js";
+import { BPS, EXPOSURE_PRECISION, INDEX_PRECISION, SECONDS_PER_YEAR } from "./constants.js";
+
+export function calcBaseExposure(size: bigint, price: bigint): bigint {
+  if (size <= 0n || price <= 0n) return 0n;
+  return (size * EXPOSURE_PRECISION) / price;
+}
+
+export function deriveEntryPrice(size: bigint, base_exposure: bigint): bigint {
+  if (size <= 0n || base_exposure <= 0n) return 0n;
+  return (size * EXPOSURE_PRECISION) / base_exposure;
+}
+
+export function calcMarkValue(base_exposure: bigint, mark_price: bigint): bigint {
+  if (base_exposure <= 0n) return 0n;
+  return (base_exposure * mark_price) / EXPOSURE_PRECISION;
+}
 
 export function calcUnrealizedPnl(
   size: bigint,
-  entry_price: bigint,
+  base_exposure: bigint,
   mark_price: bigint,
   is_long: boolean,
 ): bigint {
-  if (entry_price === 0n || size === 0n) return 0n;
-  const price_diff = is_long ? mark_price - entry_price : entry_price - mark_price;
-  return (size * price_diff) / entry_price;
+  const mark_value = calcMarkValue(base_exposure, mark_price);
+  return is_long ? mark_value - size : size - mark_value;
 }
 
-export function calcBorrowFee(
-  size: bigint,
-  entry_borrow_index: bigint,
-  current_borrow_index: bigint,
-): bigint {
-  return ((current_borrow_index - entry_borrow_index) * size) / INDEX_PRECISION;
+export function calcFeeDebt(size: bigint, current_index: bigint): bigint {
+  return (size * current_index) / INDEX_PRECISION;
 }
 
-export function calcFundingFee(
+export function calcFeeFromDebt(
   size: bigint,
-  entry_funding_index: bigint,
-  current_funding_index: bigint,
-  is_long: boolean,
+  current_index: bigint,
+  debt: bigint,
 ): bigint {
-  const delta = current_funding_index - entry_funding_index;
-  return is_long
-    ? -((delta * size) / INDEX_PRECISION)
-    : (delta * size) / INDEX_PRECISION;
+  const accrued = calcFeeDebt(size, current_index) - debt;
+  return accrued > 0n ? accrued : 0n;
 }
 
 export function calcHealth(
   collateral: bigint,
   unrealized_pnl: bigint,
   borrow_fee: bigint,
-  funding_fee: bigint,
+  skew_fee: bigint,
 ): bigint {
-  return collateral + unrealized_pnl - borrow_fee + funding_fee;
+  return collateral + unrealized_pnl - borrow_fee - skew_fee;
 }
 
 export function calcUtilizationBps(reserved: bigint, total_assets: bigint): bigint {
@@ -66,32 +73,23 @@ export function calcBorrowRate(
   );
 }
 
-export function calcFundingRate(
+export function calcSkewRate(
   long_oi: bigint,
   short_oi: bigint,
-  base_funding_rate: bigint,
+  utilization_bps: bigint,
+  max_skew_rate_bps: bigint,
 ): bigint {
   const total = long_oi + short_oi;
-  if (total === 0n) return 0n;
-  // bigint is unbounded, so the Rust contract's progressive-halving fallback
-  // for i128 overflow is unnecessary. Direct division gives identical results
-  // for any input that wouldn't have overflowed i128 in the contract.
-  const imbalance = long_oi - short_oi;
-  return (imbalance * base_funding_rate) / total;
+  if (total <= 0n || long_oi === short_oi || utilization_bps <= 0n) return 0n;
+  const skew = long_oi > short_oi ? long_oi - short_oi : short_oi - long_oi;
+  const concentration = ((skew * BPS) / total) < BPS ? (skew * BPS) / total : BPS;
+  const quadratic = (concentration * concentration) / BPS;
+  const concentrated_rate = (max_skew_rate_bps * quadratic) / BPS;
+  const util = utilization_bps < BPS ? utilization_bps : BPS;
+  return (concentrated_rate * util) / BPS;
 }
 
-export function accumulateBorrowIndex(
-  current_index: bigint,
-  rate_bps: bigint,
-  time_delta: bigint,
-): bigint {
-  return (
-    current_index +
-    (rate_bps * INDEX_PRECISION * time_delta) / (BPS * SECONDS_PER_YEAR)
-  );
-}
-
-export function accumulateFundingIndex(
+export function accumulateFeeIndex(
   current_index: bigint,
   rate_bps: bigint,
   time_delta: bigint,

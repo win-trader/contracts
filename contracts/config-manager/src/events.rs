@@ -31,7 +31,6 @@ pub struct LimitsUpdate {
     pub cooldown_duration: u64,
     pub min_position_lifetime: u64,
     pub max_utilization_ratio: i128,
-    pub funding_cut_bps: u32,
     pub adl_pnl_bps: u32,
     pub adl_utilization_bps: u32,
     pub liquidation_threshold_bps: u32,
@@ -39,12 +38,12 @@ pub struct LimitsUpdate {
 
 #[contractevent(topics = ["rates"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BorrowRateUpdate {
+pub struct CarryingFeeUpdate {
     pub base_borrow_rate_bps: i128,
     pub slope1_bps: i128,
     pub slope2_bps: i128,
     pub optimal_utilization_bps: i128,
-    pub base_funding_rate_bps: i128,
+    pub max_skew_rate_bps: i128,
 }
 
 #[contractevent(topics = ["upgtl"], data_format = "vec")]

@@ -166,7 +166,7 @@ fn test_multi_trader_with_keeper_index_updates() {
         "Borrow index must have incremented"
     );
 
-    // Trader B opens after index update (will snapshot the newer index)
+    // Trader B opens after index update and records its debt baseline.
     f.increase_position(
         &trader_b,
         &symbol_short!("BTC"),
@@ -180,10 +180,9 @@ fn test_multi_trader_with_keeper_index_updates() {
     let pos_b = f
         .position_manager
         .get_position(&trader_b, &symbol_short!("BTC"));
-    assert_eq!(
-        pos_b.entry_borrow_index, market_mid.acc_borrow_index,
-        "Trader B must snapshot the updated borrow index"
-    );
+    let expected_debt =
+        15_000 * USDC_UNIT * market_mid.acc_borrow_index / 100_000_000_000_000_i128;
+    assert_eq!(pos_b.borrow_fee_debt, expected_debt);
 
     // Verify total OI
     let market_final = f.position_manager.get_market(&symbol_short!("BTC"));

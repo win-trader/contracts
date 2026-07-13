@@ -7,8 +7,8 @@
 //! - [`recv_revenue`] — *new* dollars arriving at the Vault (Open fee from
 //!   trader, escrow forfeit on Liquidation). Moves USDC PM→Vault, then
 //!   slices.
-//! - [`reslice_revenue`] — dollars already in the Vault (Close-time borrow
-//!   fee + Funding cut against absorbed collateral). No transfer; just
+//! - [`reslice_revenue`] — dollars already in the Vault (close-time borrow
+//!   fee against absorbed collateral). No transfer; just
 //!   bumps `unclaimed_fees` by the non-LP slice.
 //!
 //! Both share the same slicing rule: `amount * (dev_bps + staker_bps) / BPS`
@@ -40,8 +40,8 @@ pub fn recv_revenue(env: &Env, vault_addr: &Address, amount: i128) {
 }
 
 /// Accrue the non-LP slice of `amount` to `unclaimed_fees` for revenue that
-/// is already physically in the Vault. Used at Close to slice borrow/funding
-/// fees out of the trader's absorbed collateral — the collateral has already
+/// is already physically in the Vault. Used at Close to slice borrow fees
+/// fee out of the trader's absorbed collateral — the collateral has already
 /// moved (via `record_absorbed_collateral`), so all we do here is the
 /// LP-vs-dev+staker re-tag.
 ///

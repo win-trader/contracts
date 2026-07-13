@@ -1,4 +1,4 @@
-pub use shared::{BorrowRateConfig, FeeConfig, FeeSplits, ProtocolLimits};
+pub use shared::{CarryingFeeConfig, FeeConfig, FeeSplits, ProtocolLimits};
 
 /// Role identifiers — canonical strings are defined in `shared::constants`.
 pub mod roles {

@@ -4,7 +4,7 @@
 //! separate `initialize` entrypoint and no uninitialized window. These tests
 //! assert the post-construction STATE: the provided admin holds the ADMIN
 //! role, the seeded defaults (FeeSplits / ProtocolLimits / FeeConfig /
-//! BorrowRateConfig) are readable via their getters, and the seed events are
+//! CarryingFeeConfig) are readable via their getters, and the seed events are
 //! emitted for off-chain indexers.
 
 use soroban_sdk::{testutils::Address as _, Address, Env};
@@ -97,22 +97,24 @@ fn test_constructor_emits_seeded_default_events() {
             let parsed: Result<(u32, u32, u32), _> = data.try_into_val(&env);
             let (lp, d, staker) = parsed.expect("feecfg event must unpack as (u32, u32, u32)");
             assert_eq!(
-                lp, shared::constants::DEFAULT_LP_BPS,
+                lp,
+                shared::constants::DEFAULT_LP_BPS,
                 "first field of feecfg must be lp_bps (declaration order)",
             );
             assert_eq!(d, shared::constants::DEFAULT_DEV_BPS);
             assert_eq!(
-                staker, shared::constants::DEFAULT_STAKER_BPS,
+                staker,
+                shared::constants::DEFAULT_STAKER_BPS,
                 "third field of feecfg must be staker_bps (new shape)",
             );
             saw_feecfg = true;
         } else if topic0 == Symbol::new(&env, "limits") {
-            let parsed: Result<(i128, u64, u64, i128, u32, u32, u32, u32), _> =
-                data.try_into_val(&env);
-            let tup = parsed.expect("limits event must unpack as 8-tuple including liquidation_threshold_bps");
+            let parsed: Result<(i128, u64, u64, i128, u32, u32, u32), _> = data.try_into_val(&env);
+            let tup = parsed
+                .expect("limits event must unpack as 7-tuple including liquidation_threshold_bps");
             assert_eq!(tup.0, shared::constants::DEFAULT_MIN_COLLATERAL);
             assert_eq!(tup.1, shared::constants::DEFAULT_COOLDOWN_DURATION);
-            assert_eq!(tup.7, shared::constants::DEFAULT_LIQUIDATION_THRESHOLD_BPS);
+            assert_eq!(tup.6, shared::constants::DEFAULT_LIQUIDATION_THRESHOLD_BPS);
             saw_limits = true;
         } else if topic0 == Symbol::new(&env, "rates") {
             let parsed: Result<(i128, i128, i128, i128, i128), _> = data.try_into_val(&env);
@@ -123,9 +125,18 @@ fn test_constructor_emits_seeded_default_events() {
         let _: Val = topics.get(0).unwrap();
     }
 
-    assert!(saw_feecfg, "constructor must emit a `feecfg` event with seeded defaults");
-    assert!(saw_limits, "constructor must emit a `limits` event with seeded defaults");
-    assert!(saw_rates, "constructor must emit a `rates` event with seeded defaults");
+    assert!(
+        saw_feecfg,
+        "constructor must emit a `feecfg` event with seeded defaults"
+    );
+    assert!(
+        saw_limits,
+        "constructor must emit a `limits` event with seeded defaults"
+    );
+    assert!(
+        saw_rates,
+        "constructor must emit a `rates` event with seeded defaults"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -201,12 +212,12 @@ fn test_constructor_seeds_protocol_limits_readable_via_getter() {
 }
 
 #[test]
-fn test_constructor_seeds_borrow_rate_config_readable_via_getter() {
+fn test_constructor_seeds_carrying_fee_config_readable_via_getter() {
     let env = Env::default();
     let admin = Address::generate(&env);
     let client = deploy(&env, &admin);
 
-    let rates = client.get_borrow_rate_config();
+    let rates = client.get_carrying_fee_config();
     assert_eq!(
         rates.base_borrow_rate_bps,
         shared::constants::DEFAULT_BASE_BORROW_RATE_BPS,

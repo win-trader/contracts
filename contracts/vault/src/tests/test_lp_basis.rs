@@ -81,7 +81,6 @@ fn set_cooldown(
             cooldown_duration,
             min_position_lifetime: 0,
             max_utilization_ratio: 10_000,
-            funding_cut_bps: 0,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,

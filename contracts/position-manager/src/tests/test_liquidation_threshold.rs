@@ -129,21 +129,20 @@ fn setup_full<'a>() -> TestFixture<'a> {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: 200,
         },
     );
 
-    config_client.update_borrow_rate_config(
+    config_client.update_carrying_fee_config(
         &admin,
-        &config_manager::BorrowRateConfig {
+        &config_manager::CarryingFeeConfig {
             base_borrow_rate_bps: 100,
             slope1_bps: 500,
             slope2_bps: 5_000,
             optimal_utilization_bps: 8_000,
-            base_funding_rate_bps: 100,
+            max_skew_rate_bps: 100,
         },
     );
 
@@ -270,7 +269,6 @@ fn set_liquidation_threshold(f: &TestFixture, threshold_bps: u32) {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: threshold_bps,
@@ -361,7 +359,6 @@ fn test_threshold_below_floor_is_rejected_by_config() {
             cooldown_duration: 60,
             min_position_lifetime: 60,
             max_utilization_ratio: 8_500,
-            funding_cut_bps: 500,
             adl_pnl_bps: 9_000,
             adl_utilization_bps: 9_500,
             liquidation_threshold_bps: shared::constants::MIN_LIQUIDATION_THRESHOLD_BPS - 1,
@@ -481,7 +478,7 @@ fn test_liquidate_reverts_when_health_just_above_threshold() {
     // Drop to $45,110:
     //   pnl = 10_000 * (45_110 - 50_000) / 50_000 = -978 USDC
     //   health ≈ 1_000 - 978 = +22 USDC, which is +2 USDC above the threshold.
-    //   (Hitting exact equality is impractical: a small borrow/funding fee accrues
+    //   (Hitting exact equality is impractical: a small carrying fee accrues
     //   over the 75s TIME_ADVANCE window and would drop health below threshold.)
     //   22 > 20 -> REVERT.
     //

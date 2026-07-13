@@ -23,6 +23,33 @@ use crate::tp_sl_escrow;
 use crate::types::{CloseType, Position};
 use crate::vault_view::VaultView;
 
+struct PositionSlice {
+    size: i128,
+    collateral: i128,
+    base_exposure: i128,
+    borrow_fee_debt: i128,
+    skew_fee_debt: i128,
+}
+
+fn position_slice(env: &Env, pos: &Position, size: i128) -> PositionSlice {
+    if size == pos.size {
+        return PositionSlice {
+            size,
+            collateral: pos.collateral,
+            base_exposure: pos.base_exposure,
+            borrow_fee_debt: pos.borrow_fee_debt,
+            skew_fee_debt: pos.skew_fee_debt,
+        };
+    }
+    PositionSlice {
+        size,
+        collateral: mul_div_i128(env, pos.collateral, size, pos.size, Rounding::Floor),
+        base_exposure: mul_div_i128(env, pos.base_exposure, size, pos.size, Rounding::Floor),
+        borrow_fee_debt: mul_div_i128(env, pos.borrow_fee_debt, size, pos.size, Rounding::Floor),
+        skew_fee_debt: mul_div_i128(env, pos.skew_fee_debt, size, pos.size, Rounding::Floor),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Decrease (user-initiated, partial or full close)
 // ---------------------------------------------------------------------------
@@ -74,13 +101,17 @@ pub fn do_decrease_position(
     // Proportional collateral. mul_div widens through I256, so the
     // `collateral * actual_delta` intermediate cannot trap on a large
     // position before the divide brings it back into range.
-    let collateral_delta = if is_full_close {
-        pos.collateral
-    } else {
-        mul_div_i128(env, pos.collateral, actual_delta, pos.size, Rounding::Floor)
-    };
-
-    let eval = market_tick.evaluate(&pos, actual_delta, collateral_delta, limits.funding_cut_bps);
+    let slice = position_slice(env, &pos, actual_delta);
+    let collateral_delta = slice.collateral;
+    let eval = market_tick.evaluate(
+        env,
+        &pos,
+        slice.size,
+        slice.collateral,
+        slice.base_exposure,
+        slice.borrow_fee_debt,
+        slice.skew_fee_debt,
+    );
 
     execute_close(
         env,
@@ -88,22 +119,25 @@ pub fn do_decrease_position(
         symbol,
         &pos,
         market_tick,
-        actual_delta,
-        collateral_delta,
+        &slice,
         &eval,
         &CloseType::User,
         None,
     );
 
     let new_total_size = pos.size - actual_delta;
-    let new_total_collateral = if is_full_close { 0 } else { pos.collateral - collateral_delta };
+    let new_total_collateral = if is_full_close {
+        0
+    } else {
+        pos.collateral - collateral_delta
+    };
     events::DecreasePosition {
         trader: trader.clone(),
         symbol: symbol.clone(),
         size_delta: actual_delta,
         pnl: eval.pnl,
         borrow_fee: eval.borrow_fee,
-        funding_fee: eval.funding_fee,
+        skew_fee: eval.skew_fee,
         mark_price,
         is_full_close,
         new_total_size,
@@ -126,12 +160,18 @@ pub fn do_liquidate_position(env: &Env, caller: &Address, trader: &Address, symb
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::PositionNotFound));
 
     let limits = config_loaders::limits(env);
-    let eval = market_tick.evaluate(&pos, pos.size, pos.collateral, limits.funding_cut_bps);
+    let slice = position_slice(env, &pos, pos.size);
+    let eval = market_tick.evaluate(
+        env,
+        &pos,
+        slice.size,
+        slice.collateral,
+        slice.base_exposure,
+        slice.borrow_fee_debt,
+        slice.skew_fee_debt,
+    );
 
-    // Gate against `effective_health`: settlement applies the zero-sum
-    // funding cap and protocol funding cut, so the raw `eval.health` would
-    // let positions whose realisable funding receipt is capped escape
-    // liquidation even when their actual settled health is below threshold.
+    // Both carrying fees reduce the same health value used by settlement.
     let threshold_amount = mul_div_i128(
         env,
         pos.collateral,
@@ -152,8 +192,7 @@ pub fn do_liquidate_position(env: &Env, caller: &Address, trader: &Address, symb
         symbol,
         &pos,
         market_tick,
-        pos_size,
-        pos_collateral,
+        &slice,
         &eval,
         &CloseType::Liquidation,
         Some(caller),
@@ -166,7 +205,7 @@ pub fn do_liquidate_position(env: &Env, caller: &Address, trader: &Address, symb
         collateral: pos_collateral,
         pnl: eval.pnl,
         borrow_fee: eval.borrow_fee,
-        funding_fee: eval.funding_fee,
+        skew_fee: eval.skew_fee,
         mark_price,
         executor: caller.clone(),
     }
@@ -217,7 +256,16 @@ pub fn do_deleverage_position(env: &Env, trader: &Address, symbol: &Symbol) {
     let pos = storage::get_position(env, trader, symbol)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::PositionNotFound));
 
-    let eval = market_tick.evaluate(&pos, pos.size, pos.collateral, limits.funding_cut_bps);
+    let slice = position_slice(env, &pos, pos.size);
+    let eval = market_tick.evaluate(
+        env,
+        &pos,
+        slice.size,
+        slice.collateral,
+        slice.base_exposure,
+        slice.borrow_fee_debt,
+        slice.skew_fee_debt,
+    );
 
     // Only profitable positions can be ADL'd.
     if eval.pnl <= 0 {
@@ -232,8 +280,7 @@ pub fn do_deleverage_position(env: &Env, trader: &Address, symbol: &Symbol) {
         symbol,
         &pos,
         market_tick,
-        pos_size,
-        pos.collateral,
+        &slice,
         &eval,
         &CloseType::Deleverage,
         None,
@@ -277,7 +324,16 @@ pub fn do_execute_order(env: &Env, executor: &Address, trader: &Address, symbol:
         panic_with_error!(env, PositionManagerError::OrderNotTriggered);
     }
 
-    let eval = market_tick.evaluate(&pos, pos.size, pos.collateral, limits.funding_cut_bps);
+    let slice = position_slice(env, &pos, pos.size);
+    let eval = market_tick.evaluate(
+        env,
+        &pos,
+        slice.size,
+        slice.collateral,
+        slice.base_exposure,
+        slice.borrow_fee_debt,
+        slice.skew_fee_debt,
+    );
     let pos_size = pos.size;
 
     execute_close(
@@ -286,8 +342,7 @@ pub fn do_execute_order(env: &Env, executor: &Address, trader: &Address, symbol:
         symbol,
         &pos,
         market_tick,
-        pos_size,
-        pos.collateral,
+        &slice,
         &eval,
         &CloseType::OrderExecution,
         Some(executor),
@@ -325,18 +380,19 @@ pub fn do_execute_order(env: &Env, executor: &Address, trader: &Address, symbol:
 /// fund the dev+staker slice from their own capital and the bounty has
 /// strict priority.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_close(
+fn execute_close(
     env: &Env,
     trader: &Address,
     symbol: &Symbol,
     pos: &Position,
     tick: MarketTick,
-    size_delta: i128,
-    collateral_delta: i128,
+    slice: &PositionSlice,
     eval: &PositionEvaluation,
     kind: &CloseType,
     executor: Option<&Address>,
 ) {
+    let size_delta = slice.size;
+    let collateral_delta = slice.collateral;
     let mut market = tick.market;
     let mark_price = tick.mark_price;
 
@@ -348,13 +404,11 @@ pub(crate) fn execute_close(
 
     // ----- Cluster 1: settlement -----
 
-    // Zero-sum scaling and protocol funding cut were computed by
-    // `MarketTick::evaluate` and carried on `eval` — the liquidation gate
-    // reads the same `effective_health`, so the gate and settlement cannot
-    // disagree on what a position is worth.
-    let effective_funding = eval.effective_funding;
-    let funding_protocol_cut = eval.funding_protocol_cut;
-    let trader_payout = if eval.effective_health > 0 { eval.effective_health } else { 0 };
+    let trader_payout = if eval.effective_health > 0 {
+        eval.effective_health
+    } else {
+        0
+    };
 
     // Token routing.
     let pm_to_trader = if trader_payout <= collateral_delta {
@@ -400,30 +454,18 @@ pub(crate) fn execute_close(
         }
     }
 
-    // Receivers drew their funding from the market pool — burn the draw so
-    // a later receiver cannot collect the same accrual twice. The protocol
-    // cut is part of the draw: it left the pool even though it routes to
-    // revenue rather than the trader.
-    let funding_draw = effective_funding + funding_protocol_cut;
-    if funding_draw > 0 {
-        // `tick.funding_pool` is the post-accrual balance from this tick's
-        // refresh; nothing writes the pool between then and here.
-        let remaining = tick.funding_pool - funding_draw;
-        storage::set_funding_pool(env, symbol, remaining.max(0));
-    }
-
     // Track the full economic outcome in realized PnL.
-    let net_economic_pnl = eval.pnl - eval.borrow_fee + effective_funding;
+    let net_economic_pnl = eval.pnl - eval.borrow_fee - eval.skew_fee;
     let old_realized = storage::get_realized_pnl(env);
     storage::set_realized_pnl(env, old_realized + net_economic_pnl);
 
-    // Reslice the borrow/funding fees with the underwater cap. The cap binds
-    // only when `trader_payout == 0`: in that branch the only inflow funding
-    // the dev+staker slice is the absorbed collateral net of bounty. The
+    // Reslice the borrow fee with the underwater cap. The cap binds
+    // only when `trader_payout == 0`: in that branch absorbed collateral net
+    // of bounty is the only value available for dev+staker attribution. The
     // dollars are already in the vault (via record_absorbed_collateral on the
     // underwater branch, or via the prior open-fee + collateral inflows
     // otherwise), so this is a re-tag, not a new transfer.
-    let total_fees = eval.borrow_fee + funding_protocol_cut;
+    let total_fees = eval.borrow_fee;
     let distributable_fees = if trader_payout > 0 {
         total_fees
     } else {
@@ -446,23 +488,16 @@ pub(crate) fn execute_close(
 
     // ----- Cluster 2: state finalization -----
 
-    // Recalculate global avg BEFORE decrementing OI.
     if pos.is_long {
-        market.global_long_avg_price = math::remove_from_global_avg_price(
-            market.global_long_avg_price,
-            market.long_open_interest,
-            pos.entry_price,
-            size_delta,
-        );
         market.long_open_interest -= size_delta;
+        market.long_base_exposure -= slice.base_exposure;
+        market.global_long_avg_price =
+            math::derive_entry_price(env, market.long_open_interest, market.long_base_exposure);
     } else {
-        market.global_short_avg_price = math::remove_from_global_avg_price(
-            market.global_short_avg_price,
-            market.short_open_interest,
-            pos.entry_price,
-            size_delta,
-        );
         market.short_open_interest -= size_delta;
+        market.short_base_exposure -= slice.base_exposure;
+        market.global_short_avg_price =
+            math::derive_entry_price(env, market.short_open_interest, market.short_base_exposure);
     }
 
     // Vault's ReservedUsdc was already decremented by release_liquidity above.
@@ -475,9 +510,14 @@ pub(crate) fn execute_close(
         let updated = Position {
             collateral: pos.collateral - collateral_delta,
             size: pos.size - size_delta,
-            entry_price: pos.entry_price,
-            entry_borrow_index: pos.entry_borrow_index,
-            entry_funding_index: pos.entry_funding_index,
+            base_exposure: pos.base_exposure - slice.base_exposure,
+            entry_price: math::derive_entry_price(
+                env,
+                pos.size - size_delta,
+                pos.base_exposure - slice.base_exposure,
+            ),
+            borrow_fee_debt: pos.borrow_fee_debt - slice.borrow_fee_debt,
+            skew_fee_debt: pos.skew_fee_debt - slice.skew_fee_debt,
             is_long: pos.is_long,
             last_increased_time: pos.last_increased_time,
             take_profit: pos.take_profit,
@@ -492,4 +532,3 @@ pub(crate) fn execute_close(
     // Refresh Unrealized PnL after the OI/avg mutations.
     refresh_market_unrealized_pnl(env, symbol, mark_price);
 }
-

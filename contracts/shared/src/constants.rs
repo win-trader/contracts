@@ -48,8 +48,10 @@ pub const PRECISION: i128 = 10_000_000;
 /// 10^PRICE_DECIMALS`. Every SEP-40 source the OracleRouter aggregates must
 /// report this scale, or its prices would skew the median.
 pub const PRICE_DECIMALS: u32 = 7;
-/// 1e14 — borrow/funding index accumulator precision.
+/// 1e14 — carrying-fee index accumulator precision.
 pub const INDEX_PRECISION: i128 = 100_000_000_000_000;
+/// 1e18 — stored base-exposure precision used by additive PnL math.
+pub const EXPOSURE_PRECISION: i128 = 1_000_000_000_000_000_000;
 /// 10_000 — basis-point denominator. Single source of truth.
 pub const BPS: i128 = 10_000;
 
@@ -103,8 +105,6 @@ pub const DEFAULT_COOLDOWN_DURATION: u64 = 300;
 pub const DEFAULT_MIN_POSITION_LIFETIME: u64 = 60;
 /// Default max vault utilization: 85% (8500 bps).
 pub const DEFAULT_MAX_UTILIZATION_RATIO: i128 = 8_500;
-/// Default protocol cut of positive funding fees: 5% (500 bps).
-pub const DEFAULT_FUNDING_CUT_BPS: u32 = 500;
 /// Default ADL trigger: net PnL / total assets threshold: 90% (9000 bps).
 pub const DEFAULT_ADL_PNL_BPS: u32 = 9_000;
 /// Default ADL trigger: utilization threshold: 95% (9500 bps).
@@ -121,8 +121,8 @@ pub const DEFAULT_SLOPE1_BPS: i128 = 500;
 pub const DEFAULT_SLOPE2_BPS: i128 = 5_000;
 /// Default optimal utilization breakpoint: 80% (8000 bps).
 pub const DEFAULT_OPTIMAL_UTILIZATION_BPS: i128 = 8_000;
-/// Default base funding rate: 1% annualized (100 bps).
-pub const DEFAULT_BASE_FUNDING_RATE_BPS: i128 = 100;
+/// Default maximum skew carrying rate: 50% annualized at maximum risk.
+pub const DEFAULT_MAX_SKEW_RATE_BPS: i128 = 5_000;
 
 /// Default oracle quorum. Two sources preserves a real quorum and deviation
 /// check when multiple feeds are configured.
@@ -158,9 +158,6 @@ pub const MAX_ORACLE_SOURCES: u32 = 16;
 /// quorum and a structurally-zero deviation check.
 pub const MIN_REQUIRED_SOURCES_FLOOR: u32 = 2;
 
-/// Maximum permissible `funding_cut_bps` — 30%. Stops the admin from sending
-/// the entire funding stream to the protocol.
-pub const MAX_FUNDING_CUT_BPS: u32 = 3_000;
 /// Minimum permissible `adl_pnl_bps` — 50%. Stops the admin from configuring
 /// continuous ADL.
 pub const MIN_ADL_PNL_BPS: u32 = 5_000;
@@ -175,9 +172,8 @@ pub const MAX_COOLDOWN_DURATION: u64 = SHARED_BUMP_SECONDS;
 /// admin from configuring a base rate that overflows or runs away in PM
 /// borrow-fee index math (same rationale as `MAX_SLOPE2_BPS`).
 pub const MAX_BASE_BORROW_RATE_BPS: i128 = 10_000;
-/// Maximum permissible `base_funding_rate_bps` — 100% per year. Same
-/// rationale as `MAX_BASE_BORROW_RATE_BPS` for the funding index.
-pub const MAX_BASE_FUNDING_RATE_BPS: i128 = 10_000;
+/// Maximum permissible dominant-side skew carrying rate: 200% per year.
+pub const MAX_SKEW_RATE_BPS: i128 = 20_000;
 /// Minimum permissible `liquidation_threshold_bps` — 0.5%. A zero threshold
 /// makes positions liquidatable only once health is already negative, so
 /// every liquidation would start inside a bad-debt window.

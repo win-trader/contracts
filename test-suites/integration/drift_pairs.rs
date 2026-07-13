@@ -123,7 +123,9 @@ fn drift_reserved_usdc_grows_by_exact_size_on_open() {
     assert!(
         trader_outflow >= collateral,
         "trader paid at least collateral. before={}, after={}, collateral={}",
-        trader_before, trader_after, collateral,
+        trader_before,
+        trader_after,
+        collateral,
     );
     assert!(
         trader_outflow <= collateral + (collateral / 100),
@@ -139,14 +141,16 @@ fn drift_reserved_usdc_grows_by_exact_size_on_open() {
         pm_inflow + vault_inflow,
         trader_outflow,
         "tokens are conserved: trader's outflow {} must equal PM inflow {} + vault inflow {}",
-        trader_outflow, pm_inflow, vault_inflow,
+        trader_outflow,
+        pm_inflow,
+        vault_inflow,
     );
 }
 
 // ---------------------------------------------------------------------------
 // 3. UnclaimedFees ↔ vault.accrue_fees on a close
 //
-// At close, the per-position borrow + funding fees are re-tagged from the
+// At close, per-position carrying fees are re-tagged from the
 // LP pool to the dev/staker pool via `reslice_revenue` → `vault.accrue_fees`.
 // This is a re-tag, NOT a transfer: vault's physical balance does NOT
 // change in the reslice step, only `unclaimed_fees` increments.
@@ -194,7 +198,8 @@ fn drift_unclaimed_fees_grows_on_close_without_token_movement() {
     assert!(
         unclaimed_after <= vault_phys_after,
         "unclaimed_fees {} > vault_physical {} — accrue_fees invariant violated",
-        unclaimed_after, vault_phys_after,
+        unclaimed_after,
+        vault_phys_after,
     );
     // The change in physical balance is the trader's profit payout (net of
     // any open-fee accrual). It must NEVER equal `-unclaimed_delta` (i.e.
@@ -437,20 +442,25 @@ fn drift_global_avg_price_recalculates_before_oi_decrement() {
     f.set_btc_price(60_000);
     f.open_long(&trader2, 10_000 * USDC_UNIT, 1_000 * USDC_UNIT);
 
-    // Global avg should be the weighted average: (50k*10k + 60k*10k) / 20k = 55k.
-    // Scaled by 1e7 price domain.
+    // The display price is derived from additive base exposure. Equal quote
+    // notionals therefore produce the harmonic mean, while PnL remains exact.
     let market = f.position_manager.get_market(&symbol_short!("BTC"));
-    let expected_after_open = 55_000 * 10_000_000_i128;
+    let expected_after_open = 545_454_545_454_i128;
     assert_eq!(
         market.global_long_avg_price, expected_after_open,
-        "Two longs at 50k + 60k: weighted avg should be 55k",
+        "display price must be derived from aggregate base exposure",
     );
 
     // Now close Trader A's position. Remaining is Trader B's 10k @ 60k.
     // Avg must recalc to 60k BEFORE decrementing OI.
     f.advance_time(TEST_TIMESTAMP + 30 + MIN_POSITION_LIFETIME + 11);
     f.set_btc_price(60_000); // keep flat to isolate
-    f.decrease_position(&f.trader, &symbol_short!("BTC"), &(10_000 * USDC_UNIT), &0_i128);
+    f.decrease_position(
+        &f.trader,
+        &symbol_short!("BTC"),
+        &(10_000 * USDC_UNIT),
+        &0_i128,
+    );
 
     let market_after = f.position_manager.get_market(&symbol_short!("BTC"));
     let expected_after_close = 60_000 * 10_000_000_i128;
@@ -460,7 +470,8 @@ fn drift_global_avg_price_recalculates_before_oi_decrement() {
          A wrong recalc-after-decrement ordering would leave the avg at a stale value.",
     );
     assert_eq!(
-        market_after.long_open_interest, 10_000 * USDC_UNIT,
+        market_after.long_open_interest,
+        10_000 * USDC_UNIT,
         "OI must drop by exactly the closed size",
     );
 }
@@ -558,4 +569,3 @@ fn drift_claim_fees_cascade_drains_to_zero_with_token_conservation() {
     // an explicit pin here as the canonical "clean state" check.
     assert_protocol_invariants(&env, &f, "drift_claim_fees_cascade end-state");
 }
-
