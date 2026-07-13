@@ -52,40 +52,40 @@
     ],
     "contracts": {
       "vault": {
-        "address": "CDTLXP6KC3DMKQ5EHWLB5YUTXF5NKPACOWFPXLPLB56MQZ2EMWRFHIZA",
-        "startLedger": 3467673
+        "address": "CBK2QXDE7X4RCXOJQ5R5P54ACFPQCJV5RXPEB5S7DQCIEW6K2ZV5MK5X",
+        "startLedger": 3584309
       },
       "positionManager": {
-        "address": "CBPJA62PDZCVWZWVKZLUTWEOOCIJCQJNYVJW5HDC7VPB7UPC62CF63LP",
-        "startLedger": 3467672
+        "address": "CBAHPTLRDJSW6KK3SKN2NH3DUI5VUC7WFSOEIUDK6TEGKL6C6VSCJF56",
+        "startLedger": 3584308
       },
       "configManager": {
-        "address": "CAHU4B47BA2H3TRUAFPM4LIVDIQKBWLPJKLOONULJXK73RQDTWUCJMOS",
-        "startLedger": 3467663
+        "address": "CCCEXVKLRQKQNUDE7EXQZVYIGUM7VH3EHEML5JER4UEYPXDDNINN42QO",
+        "startLedger": 3584300
       },
       "oracleRouter": {
-        "address": "CAO54YKI3XX2S35EML4WXQIUFETMU5RSRGR6SGYX5BXFMZC6AXM6JVZR",
-        "startLedger": 3467664
+        "address": "CBDU5D3RTV4F7HEDODHBYU5DZEUKJDPFNPKOTO5JSQXJL6BKRZ4TBLWG",
+        "startLedger": 3584301
       },
       "oracle": {
-        "address": "CDLHMXUYWBNYB3YKYFCHCPQHEHBF7ZH5RNDD7MSJTA3AVUDIWPW47IBT",
-        "startLedger": 3467665
+        "address": "CA2DRD4J3GAYH2LAH6UGLKKBAZRLTKLA6A5XEDZAAMIMN6BUQBXD42K6",
+        "startLedger": 3584302
       },
       "binanceOracle": {
-        "address": "CAEDMM7JIHNQ4HRFL2ZR2U32IGRQO2XJL6ZK3N2S25ZZXGMKAB7L7NWH",
-        "startLedger": 3468000
+        "address": "CBDKSXMVAX72JC45Q7QW2CA7YXCEL5KGUWCPA5ZKOYAKUIZ3BBRZMS6G",
+        "startLedger": 3584325
       },
       "kucoinOracle": {
-        "address": "CB3DTL5QNH63VEZFDI33R6OWGRFBE2OEP6PTA5CSZJAVOWQSATIJSGED",
-        "startLedger": 3468001
+        "address": "CBLLRLO7BJZHYI325BCKMNUIKXYHKCM3FKHCQTEAF3YAINUNGY3PLNYD",
+        "startLedger": 3584326
       },
       "mockToken": {
-        "address": "CDY3K2D6RXL67NXYJQL7HG67P7LDQBE2DH6S3WK62WHTJ3PWSZLW5IJ4",
-        "startLedger": 3467668
+        "address": "CA63WWGJ36W75M6QND4WIOIIHVRIVT6FGMKZRBIDHCRX5GXIQSAZV46U",
+        "startLedger": 3584305
       },
       "oracle2": {
-        "address": "CA26PAOXWTOSN2NIPOFMZRWFWWHWZP35IDIQN52C7GJEVN5YYQZIFTTQ",
-        "startLedger": 3467666
+        "address": "CCT7N3A6AOX4EI72RF6XEIMJPI7TYHMT4YDHFPAIMN2XZCESAVDOE5U7",
+        "startLedger": 3584303
       }
     }
   },
