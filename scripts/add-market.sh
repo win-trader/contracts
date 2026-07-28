@@ -4,15 +4,14 @@
 #   1. registers the ticker on OracleRouter with primaries chosen from
 #      whichever of {mock-oracle, binance, kucoin} are present in
 #      addresses.json (so this works whether or not CEX oracles are up)
-#   2. sets max leverage on PositionManager
+#   2. installs the market risk and fee configuration on PositionManager
 #
 # Use this instead of re-running deploy.sh when the rest of the system
 # is healthy and you only need to add a market. deploy.sh would wipe
 # state by re-deploying every contract.
 #
 # Usage:
-#   bash scripts/add-market.sh XLMUSD              # default 50× max leverage
-#   MAX_LEVERAGE=20 bash scripts/add-market.sh XLMUSD
+#   bash scripts/add-market.sh XLMUSD
 #   NETWORK_KEY=testnet bash scripts/add-market.sh XLMUSD
 #
 # Pre-req: the symbol's mapping must already exist in the binance/kucoin
@@ -29,8 +28,8 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADDRESSES_FILE="$ROOT/packages/config/addresses.json"
 NETWORK_KEY="${NETWORK_KEY:-local}"
-MAX_LEVERAGE="${MAX_LEVERAGE:-50}"
 SOURCE="${SOURCE:-admin}"
+MARKET_CONFIG="{\"open_fee_low_bps\":${OPEN_FEE_LOW_BPS:-5},\"open_fee_high_bps\":${OPEN_FEE_HIGH_BPS:-10},\"max_funding_rate_bps_day\":\"${MAX_FUNDING_RATE_BPS_DAY:-80}\",\"market_risk_factor_bps\":${MARKET_RISK_FACTOR_BPS:-1000},\"max_long_size_open_interest\":\"${MAX_MARKET_SIZE_OPEN_INTEREST:-1000000000000000}\",\"max_short_size_open_interest\":\"${MAX_MARKET_SIZE_OPEN_INTEREST:-1000000000000000}\",\"max_long_base_exposure\":\"${MAX_MARKET_BASE_EXPOSURE:-1000000000000000000}\",\"max_short_base_exposure\":\"${MAX_MARKET_BASE_EXPOSURE:-1000000000000000000}\",\"recovery_pnl_factor_bps\":${RECOVERY_PNL_FACTOR_BPS:-250},\"warning_pnl_factor_bps\":${WARNING_PNL_FACTOR_BPS:-400},\"adl_pnl_factor_bps\":${ADL_PNL_FACTOR_BPS:-500},\"hard_cap_pnl_factor_bps\":${HARD_CAP_PNL_FACTOR_BPS:-600},\"maintenance_margin_bps\":${MAINTENANCE_MARGIN_BPS:-500},\"liquidation_reward_bps\":${LIQUIDATION_REWARD_BPS:-100},\"adl_reward_bps\":${ADL_REWARD_BPS:-5}}"
 
 case "$NETWORK_KEY" in
   local)
@@ -98,7 +97,7 @@ invoke() {
     "$@"
 }
 
-echo "=== Adding market '$SYMBOL' on '$NETWORK_KEY' (max leverage ${MAX_LEVERAGE}×) ==="
+echo "=== Adding market '$SYMBOL' on '$NETWORK_KEY' ==="
 echo "  sources: $SOURCES_JSON"
 
 echo "  oracle_router.set_oracle_sources($SYMBOL, …)"
@@ -107,11 +106,11 @@ invoke --id "$OR_ID" -- set_oracle_sources \
   --symbol "$SYMBOL" \
   --sources "$SOURCES_JSON"
 
-echo "  position_manager.set_max_leverage($SYMBOL, $MAX_LEVERAGE)"
-invoke --id "$PM_ID" -- set_max_leverage \
+echo "  position_manager.set_market_config($SYMBOL)"
+invoke --id "$PM_ID" -- set_market_config \
   --caller "$ADMIN_ADDR" \
-  --symbol "$SYMBOL" \
-  --max_leverage "$MAX_LEVERAGE"
+  --market_symbol "$SYMBOL" \
+  --config "$MARKET_CONFIG"
 
 # Mirror the new ticker into addresses.json if it isn't already there, so
 # the publisher loops + frontend SUPPORTED_SYMBOLS pick it up automatically.

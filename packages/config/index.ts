@@ -13,6 +13,7 @@ export interface ContractInfo {
 
 export interface NetworkContracts {
   vault: ContractInfo;
+  requestRouter: ContractInfo;
   positionManager: ContractInfo;
   configManager: ContractInfo;
   oracleRouter: ContractInfo;

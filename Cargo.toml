@@ -8,7 +8,7 @@ members = [
     "contracts/config-manager",
     "contracts/oracle",
     "contracts/oracle-router",
-    "test-suites",
+    "contracts/request-router",
     "mocks/mock-token",
     "mocks/mock-oracle",
 ]

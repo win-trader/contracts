@@ -32,7 +32,9 @@ pub fn load_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
 }
 
 pub fn save_pending_upgrade(env: &Env, pending: &PendingUpgrade) {
-    env.storage().instance().set(&pending_upgrade_key(env), pending);
+    env.storage()
+        .instance()
+        .set(&pending_upgrade_key(env), pending);
 }
 
 pub fn clear_pending_upgrade(env: &Env) {
@@ -120,4 +122,3 @@ pub trait TimelockedUpgradeable {
         UpgradeCancelled { caller }.publish(env);
     }
 }
-

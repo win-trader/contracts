@@ -16,9 +16,8 @@
 #   - `provision-keys.sh` already run (admin + keeper identities exist & are
 #     funded). On mainnet, accounts must be pre-funded by the operator.
 #
-# Note on protocol limits: local gets a permissive 60s LP cooldown so the
-# lockup path is testable in seconds; testnet/mainnet default to 1 hour.
-# Override per network with $COOLDOWN_DURATION.
+# Local uses a short LP request delay. Public networks use a longer delay.
+# Override it with LP_REQUEST_DELAY.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,25 +31,25 @@ case "$NETWORK_KEY" in
   local)
     RPC_URL="${RPC_URL:-http://localhost:8000/soroban/rpc}"
     NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Standalone Network ; February 2017}"
-    COOLDOWN_DURATION="${COOLDOWN_DURATION:-60}"
+    LP_REQUEST_DELAY="${LP_REQUEST_DELAY:-60}"
     DATABASE_URL_DEFAULT="postgresql://stellars:stellars@localhost:5432/stellars"
     ;;
   testnet)
     RPC_URL="${RPC_URL:-https://soroban-testnet.stellar.org}"
     NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
-    COOLDOWN_DURATION="${COOLDOWN_DURATION:-3600}"
+    LP_REQUEST_DELAY="${LP_REQUEST_DELAY:-3600}"
     DATABASE_URL_DEFAULT="${DATABASE_URL:-}"
     ;;
   mainnet)
     RPC_URL="${RPC_URL:-https://soroban.stellar.org}"
     NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}"
-    COOLDOWN_DURATION="${COOLDOWN_DURATION:-86400}"
+    LP_REQUEST_DELAY="${LP_REQUEST_DELAY:-86400}"
     DATABASE_URL_DEFAULT="${DATABASE_URL:-}"
     ;;
   *)
     echo "❌ Unknown NETWORK_KEY '$NETWORK_KEY' — set RPC_URL/NETWORK_PASSPHRASE explicitly"
     : "${RPC_URL:?required}" "${NETWORK_PASSPHRASE:?required}"
-    COOLDOWN_DURATION="${COOLDOWN_DURATION:-3600}"
+    LP_REQUEST_DELAY="${LP_REQUEST_DELAY:-3600}"
     DATABASE_URL_DEFAULT="${DATABASE_URL:-}"
     ;;
 esac
@@ -59,6 +58,28 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "❌ jq is required — install via 'brew install jq'"
   exit 1
 fi
+
+# Load the bounded market registry before contract construction.
+TICKERS=()
+while IFS= read -r ticker; do
+  [[ -n "$ticker" ]] && TICKERS+=("$ticker")
+done < <(jq -r --arg net "$NETWORK_KEY" '.[$net].tickers[]' "$ADDRESSES_FILE")
+if [[ ${#TICKERS[@]} -eq 0 ]]; then
+  echo "❌ No tickers configured for network '$NETWORK_KEY' in $ADDRESSES_FILE"
+  exit 1
+fi
+
+MAX_ACTIVE_MARKETS="${MAX_ACTIVE_MARKETS:-8}"
+if (( ${#TICKERS[@]} > MAX_ACTIVE_MARKETS )); then
+  echo "❌ ${#TICKERS[@]} configured markets exceed MAX_ACTIVE_MARKETS=$MAX_ACTIVE_MARKETS"
+  exit 1
+fi
+
+# Explicit constructor parameters. They are deployment policy, not hidden
+# contract defaults. Values use 1e7 USD/base precision where applicable.
+GLOBAL_CONFIG="{\"min_collateral\":\"${MIN_COLLATERAL:-10000000}\",\"min_position_lifetime\":${MIN_POSITION_LIFETIME:-0},\"risk_capacity_limit_bps\":${RISK_CAPACITY_LIMIT_BPS:-8500},\"base_borrow_rate_bps_day\":\"${BASE_BORROW_RATE_BPS_DAY:-1}\",\"max_variable_borrow_bps_day\":\"${MAX_VARIABLE_BORROW_BPS_DAY:-100}\",\"lp_revenue_share_bps\":${LP_REVENUE_SHARE_BPS:-9000},\"risk_keeper_revenue_share_bps\":${RISK_KEEPER_REVENUE_SHARE_BPS:-500},\"hard_cap_factor_limit_bps\":${HARD_CAP_FACTOR_LIMIT_BPS:-10000},\"max_adl_reward\":\"${MAX_ADL_REWARD:-50000000}\",\"max_insolvent_touch_reward\":\"${MAX_INSOLVENT_TOUCH_REWARD:-50000000}\",\"max_active_markets\":${MAX_ACTIVE_MARKETS}}"
+LP_CONFIG="{\"max_withdraw_utilization_bps\":${MAX_WITHDRAW_UTILIZATION_BPS:-8000},\"min_deposit_nav_factor_bps\":${MIN_DEPOSIT_NAV_FACTOR_BPS:-8000},\"lp_request_delay\":${LP_REQUEST_DELAY}}"
+MARKET_CONFIG="{\"open_fee_low_bps\":${OPEN_FEE_LOW_BPS:-5},\"open_fee_high_bps\":${OPEN_FEE_HIGH_BPS:-10},\"max_funding_rate_bps_day\":\"${MAX_FUNDING_RATE_BPS_DAY:-80}\",\"market_risk_factor_bps\":${MARKET_RISK_FACTOR_BPS:-1000},\"max_long_size_open_interest\":\"${MAX_MARKET_SIZE_OPEN_INTEREST:-1000000000000000}\",\"max_short_size_open_interest\":\"${MAX_MARKET_SIZE_OPEN_INTEREST:-1000000000000000}\",\"max_long_base_exposure\":\"${MAX_MARKET_BASE_EXPOSURE:-1000000000000000000}\",\"max_short_base_exposure\":\"${MAX_MARKET_BASE_EXPOSURE:-1000000000000000000}\",\"recovery_pnl_factor_bps\":${RECOVERY_PNL_FACTOR_BPS:-250},\"warning_pnl_factor_bps\":${WARNING_PNL_FACTOR_BPS:-400},\"adl_pnl_factor_bps\":${ADL_PNL_FACTOR_BPS:-500},\"hard_cap_pnl_factor_bps\":${HARD_CAP_PNL_FACTOR_BPS:-600},\"maintenance_margin_bps\":${MAINTENANCE_MARGIN_BPS:-500},\"liquidation_reward_bps\":${LIQUIDATION_REWARD_BPS:-100},\"adl_reward_bps\":${ADL_REWARD_BPS:-5}}"
 
 # Mainnet guardrails.
 #   1. Typed confirmation prompt — no accidental `NETWORK_KEY=mainnet make deploy`
@@ -83,10 +104,6 @@ if [[ "$NETWORK_KEY" == "mainnet" ]]; then
   if [[ -z "${UPGRADER_ADDR:-}" ]] || [[ -z "${PAUSER_ADDR:-}" ]]; then
     echo "❌ Mainnet deploy requires UPGRADER_ADDR and PAUSER_ADDR to be distinct from ADMIN."
     echo "    Set both env vars before running."
-    exit 1
-  fi
-  if [[ "$UPGRADER_ADDR" == "$ADMIN_ADDR" ]] || [[ "$PAUSER_ADDR" == "$ADMIN_ADDR" ]]; then
-    echo "❌ UPGRADER_ADDR and PAUSER_ADDR must NOT equal the admin address."
     exit 1
   fi
 fi
@@ -126,6 +143,13 @@ require_identity admin
 require_identity keeper
 ADMIN_ADDR=$(stellar keys address admin)
 KEEPER_ADDR=$(stellar keys address keeper)
+UPGRADER_ROLE_ADDR="${UPGRADER_ADDR:-$ADMIN_ADDR}"
+PAUSER_ROLE_ADDR="${PAUSER_ADDR:-$ADMIN_ADDR}"
+if [[ "$NETWORK_KEY" == "mainnet" ]] \
+  && { [[ "$UPGRADER_ROLE_ADDR" == "$ADMIN_ADDR" ]] || [[ "$PAUSER_ROLE_ADDR" == "$ADMIN_ADDR" ]]; }; then
+  echo "❌ UPGRADER_ADDR and PAUSER_ADDR must NOT equal the admin address."
+  exit 1
+fi
 echo "Admin:  $ADMIN_ADDR"
 echo "Keeper: $KEEPER_ADDR"
 
@@ -199,7 +223,7 @@ invoke() {
 echo ""
 echo "=== Deploying contracts ==="
 
-CM_ID=$(deploy config-manager --admin_address "$ADMIN_ADDR")
+CM_ID=$(deploy config-manager --admin "$ADMIN_ADDR")
 CM_LEDGER=$(current_ledger)
 echo "  config-manager : $CM_ID  (ledger $CM_LEDGER)"
 
@@ -233,13 +257,28 @@ invoke --id "$MOCK_TOKEN_ID" -- initialize \
 # PositionManager atomically in its own constructor, so PM must already exist.
 # PM's constructor omits the Vault; the reference cycle is closed by the
 # one-shot `set_vault` call below.
-PM_ID=$(deploy position-manager --config_manager "$CM_ID" --oracle_router "$OR_ID")
+PM_ID=$(deploy position-manager \
+  --config_manager "$CM_ID" \
+  --oracle_router "$OR_ID" \
+  --config "$GLOBAL_CONFIG")
 PM_LEDGER=$(current_ledger)
 echo "  position-mgr   : $PM_ID  (ledger $PM_LEDGER)"
 
-VAULT_ID=$(deploy vault --asset "$MOCK_TOKEN_ID" --config_manager "$CM_ID" --position_manager "$PM_ID")
+VAULT_ID=$(deploy vault \
+  --asset_address "$MOCK_TOKEN_ID" \
+  --config_manager "$CM_ID" \
+  --position_manager "$PM_ID" \
+  --lp_config "$LP_CONFIG")
 VAULT_LEDGER=$(current_ledger)
 echo "  vault          : $VAULT_ID  (ledger $VAULT_LEDGER)"
+
+REQUEST_ROUTER_ID=$(deploy request-router \
+  --asset_address "$MOCK_TOKEN_ID" \
+  --vault_address "$VAULT_ID" \
+  --oracle_router "$OR_ID" \
+  --config_manager_address "$CM_ID")
+REQUEST_ROUTER_LEDGER=$(current_ledger)
+echo "  request-router : $REQUEST_ROUTER_ID  (ledger $REQUEST_ROUTER_LEDGER)"
 
 # ---------- Wire contracts ----------
 echo ""
@@ -252,13 +291,29 @@ echo "=== Wiring contracts ==="
 echo "  position-manager.set_vault(admin, vault)"
 invoke --id "$PM_ID" -- set_vault \
   --caller "$ADMIN_ADDR" \
-  --vault_address "$VAULT_ID"
+  --vault "$VAULT_ID"
+
+echo "  vault.set_request_router(admin, request-router)"
+invoke --id "$VAULT_ID" -- set_request_router \
+  --caller "$ADMIN_ADDR" \
+  --request_router "$REQUEST_ROUTER_ID"
+
+echo "  oracle-router.set_position_manager(admin, position-manager)"
+invoke --id "$OR_ID" -- set_position_manager \
+  --caller "$ADMIN_ADDR" \
+  --position_manager "$PM_ID"
 
 echo "  mock-token.configure_protocol(admin, vault, position-manager)"
 invoke --id "$MOCK_TOKEN_ID" -- configure_protocol \
   --admin "$ADMIN_ADDR" \
   --vault "$VAULT_ID" \
   --position_manager "$PM_ID"
+
+echo "  mock-token.set_protocol_contract(admin, request-router)"
+invoke --id "$MOCK_TOKEN_ID" -- set_protocol_contract \
+  --admin "$ADMIN_ADDR" \
+  --contract "$REQUEST_ROUTER_ID" \
+  --allowed true
 
 # ---------- Grant roles ----------
 echo ""
@@ -276,43 +331,24 @@ invoke --id "$CM_ID" -- grant_role \
   --role KEEPER \
   --account "$ADMIN_ADDR"
 
-echo "  grant PAUSER to admin"
+echo "  grant PAUSER"
 invoke --id "$CM_ID" -- grant_role \
   --caller "$ADMIN_ADDR" \
   --role PAUSER \
-  --account "$ADMIN_ADDR"
+  --account "$PAUSER_ROLE_ADDR"
 
 # UPGRADER — needed for `upgrade.sh` to push new WASMs without an extra
 # manual grant step. Fine on a single-admin deployment; production multi-sig
 # would gate this with a separate operator key.
-echo "  grant UPGRADER to admin"
+echo "  grant UPGRADER"
 invoke --id "$CM_ID" -- grant_role \
   --caller "$ADMIN_ADDR" \
   --role UPGRADER \
-  --account "$ADMIN_ADDR"
-
-# ---------- Protocol limits ----------
-echo ""
-echo "=== Setting protocol limits (cooldown=${COOLDOWN_DURATION}s) ==="
-invoke --id "$CM_ID" -- update_protocol_limits \
-  --caller "$ADMIN_ADDR" \
-  --limits "{\"min_collateral\":\"10000000\",\"cooldown_duration\":${COOLDOWN_DURATION},\"min_position_lifetime\":0,\"max_utilization_ratio\":\"8500\",\"funding_cut_bps\":500,\"adl_pnl_bps\":9000,\"adl_utilization_bps\":9500,\"liquidation_threshold_bps\":200}"
+  --account "$UPGRADER_ROLE_ADDR"
 
 # ---------- Wire oracle ----------
 echo ""
 echo "=== Configuring oracle ==="
-
-# Pull tickers from addresses.json so this script and the rest of the stack
-# stay in sync.
-TICKERS=()
-while IFS= read -r ticker; do
-  [ -n "$ticker" ] && TICKERS+=("$ticker")
-done < <(jq -r --arg net "$NETWORK_KEY" '.[$net].tickers[]' "$ADDRESSES_FILE")
-
-if [ "${#TICKERS[@]}" -eq 0 ]; then
-  echo "❌ No tickers configured for network '$NETWORK_KEY' in $ADDRESSES_FILE"
-  exit 1
-fi
 
 for ticker in "${TICKERS[@]}"; do
   echo "  set oracle sources: $ticker → [oracle, oracle2] (replace via deploy-cex-oracles)"
@@ -331,11 +367,11 @@ invoke --id "$OR_ID" -- set_oracle_config \
 echo ""
 echo "=== Configuring PositionManager markets ==="
 for ticker in "${TICKERS[@]}"; do
-  echo "  set_max_leverage($ticker, 50)"
-  invoke --id "$PM_ID" -- set_max_leverage \
+  echo "  set_market_config($ticker)"
+  invoke --id "$PM_ID" -- set_market_config \
     --caller "$ADMIN_ADDR" \
-    --symbol "$ticker" \
-    --max_leverage 50
+    --market_symbol "$ticker" \
+    --config "$MARKET_CONFIG"
 done
 
 # ---------- Write addresses.json ----------
@@ -345,6 +381,7 @@ TMP_ADDR=$(mktemp)
 jq \
   --arg net "$NETWORK_KEY" \
   --arg vault "$VAULT_ID"           --argjson vaultL    "${VAULT_LEDGER:-0}" \
+  --arg rr "$REQUEST_ROUTER_ID"      --argjson rrL       "${REQUEST_ROUTER_LEDGER:-0}" \
   --arg pm "$PM_ID"                 --argjson pmL       "${PM_LEDGER:-0}" \
   --arg cm "$CM_ID"                 --argjson cmL       "${CM_LEDGER:-0}" \
   --arg or "$OR_ID"                 --argjson orL       "${OR_LEDGER:-0}" \
@@ -352,6 +389,7 @@ jq \
   --arg oracle2 "$ORACLE2_ID"       --argjson oracle2L  "${ORACLE2_LEDGER:-0}" \
   --arg mockToken "$MOCK_TOKEN_ID"  --argjson mockTokenL "${MOCK_TOKEN_LEDGER:-0}" \
   '.[$net].contracts.vault            = {address: $vault,     startLedger: $vaultL}
+   | .[$net].contracts.requestRouter   = {address: $rr,        startLedger: $rrL}
    | .[$net].contracts.positionManager = {address: $pm,        startLedger: $pmL}
    | .[$net].contracts.configManager   = {address: $cm,        startLedger: $cmL}
    | .[$net].contracts.oracleRouter    = {address: $or,        startLedger: $orL}

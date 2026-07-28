@@ -3,6 +3,7 @@ use soroban_sdk::{contracttype, panic_with_error, vec, Address, Env, Symbol, Vec
 
 use crate::errors::OracleRouterError;
 use crate::types::OracleConfig;
+use interfaces::OracleRound;
 
 /// Cached aggregated median price for a symbol. `fetched_at` bounds router
 /// cache duration; `oldest_source_update` ensures the cached median is not
@@ -36,6 +37,9 @@ pub enum StorageKey {
     CachedPriceV2(Symbol, u64),
     /// Current contract version — written by `_migrate` after a WASM upgrade.
     Version,
+    PositionManager,
+    LatestRoundId,
+    Round(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +80,53 @@ pub fn set_config_manager(env: &Env, addr: &Address) {
     env.storage()
         .instance()
         .set(&StorageKey::ConfigManager, addr);
+}
+
+pub fn load_position_manager(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&StorageKey::PositionManager)
+        .unwrap_or_else(|| panic_with_error!(env, OracleRouterError::PositionManagerNotSet))
+}
+
+pub fn has_position_manager(env: &Env) -> bool {
+    env.storage().instance().has(&StorageKey::PositionManager)
+}
+
+pub fn set_position_manager(env: &Env, addr: &Address) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::PositionManager, addr);
+}
+
+pub fn latest_round_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::LatestRoundId)
+        .unwrap_or(0)
+}
+
+pub fn save_round(env: &Env, round: &OracleRound) {
+    let key = StorageKey::Round(round.id);
+    env.storage().persistent().set(&key, round);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+    env.storage()
+        .instance()
+        .set(&StorageKey::LatestRoundId, &round.id);
+    if round.previous_id > 0 {
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::Round(round.previous_id));
+    }
+}
+
+pub fn load_round(env: &Env, id: u64) -> OracleRound {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::Round(id))
+        .unwrap_or_else(|| panic_with_error!(env, OracleRouterError::RoundNotFound))
 }
 
 // ---------------------------------------------------------------------------
@@ -193,9 +244,7 @@ pub fn remove_cached_price(env: &Env, symbol: &Symbol) {
 // ---------------------------------------------------------------------------
 
 pub fn save_version(env: &Env, version: u32) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::Version, &version);
+    env.storage().instance().set(&StorageKey::Version, &version);
 }
 
 // Pending upgrade storage now lives in `interfaces::upgrade` under a shared

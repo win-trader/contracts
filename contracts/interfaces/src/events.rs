@@ -1,6 +1,6 @@
 //! Cross-contract event shapes for the upgrade flow. Defining the events
 //! here (instead of redeclaring them in each contract's `events.rs`) means
-//! off-chain consumers parse one shape across four contracts.
+//! off-chain consumers parse one shape across protocol contracts.
 //!
 //! Topic strings are part of the on-chain event identity — they MUST be the
 //! literals listed below so an indexer keyed on `topic0` can dispatch

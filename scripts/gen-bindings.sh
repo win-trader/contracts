@@ -7,6 +7,7 @@ BIND_OUT="$ROOT/packages/bindings"
 
 CONTRACTS=(
   vault
+  request-router
   position-manager
   config-manager
   oracle-router
@@ -38,17 +39,18 @@ done
 cat > "$BIND_OUT/package.json" <<'EOF'
 {
   "name": "@win-trader/bindings",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "exports": {
     "./vault": "./vault/dist/index.js",
+    "./request-router": "./request-router/dist/index.js",
     "./position-manager": "./position-manager/dist/index.js",
     "./config-manager": "./config-manager/dist/index.js",
     "./oracle-router": "./oracle-router/dist/index.js",
     "./oracle": "./oracle/dist/index.js",
     "./mock-token": "./mock-token/dist/index.js"
   },
-  "files": ["vault/dist", "position-manager/dist", "config-manager/dist", "oracle-router/dist", "oracle/dist", "mock-token/dist"],
+  "files": ["vault/dist", "request-router/dist", "position-manager/dist", "config-manager/dist", "oracle-router/dist", "oracle/dist", "mock-token/dist"],
   "publishConfig": { "access": "public" },
   "repository": { "type": "git", "url": "git+https://github.com/win-trader/contracts.git", "directory": "packages/bindings" },
   "dependencies": {
@@ -61,9 +63,13 @@ cat > "$BIND_OUT/package.json" <<'EOF'
 }
 EOF
 
-# --- Install deps ---
-echo "Installing dependencies..."
-pnpm install --filter @win-trader/bindings
+# --- Ensure compiler ---
+if [ ! -x "$BIND_OUT/node_modules/.bin/tsc" ]; then
+  echo "Installing binding compiler dependencies..."
+  pnpm install --filter @win-trader/bindings
+else
+  echo "Using installed binding compiler."
+fi
 
 # --- Build ---
 # Run tsc from BIND_OUT (where typescript is installed) and point at each

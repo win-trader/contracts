@@ -4,33 +4,21 @@
   "type": "module",
   "exports": {
     "./vault": "./vault/dist/index.js",
+    "./request-router": "./request-router/dist/index.js",
     "./position-manager": "./position-manager/dist/index.js",
     "./config-manager": "./config-manager/dist/index.js",
     "./oracle-router": "./oracle-router/dist/index.js",
     "./oracle": "./oracle/dist/index.js",
     "./mock-token": "./mock-token/dist/index.js"
   },
+  "files": ["vault/dist", "request-router/dist", "position-manager/dist", "config-manager/dist", "oracle-router/dist", "oracle/dist", "mock-token/dist"],
+  "publishConfig": { "access": "public" },
+  "repository": { "type": "git", "url": "git+https://github.com/win-trader/contracts.git", "directory": "packages/bindings" },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.1.1",
     "buffer": "6.0.3"
   },
   "devDependencies": {
     "typescript": "^5.7.0"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "files": [
-    "vault/dist",
-    "position-manager/dist",
-    "config-manager/dist",
-    "oracle-router/dist",
-    "oracle/dist",
-    "mock-token/dist"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/win-trader/contracts.git",
-    "directory": "packages/bindings"
   }
 }

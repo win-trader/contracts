@@ -1,6 +1,6 @@
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
-use crate::types::OracleConfig;
+use crate::types::{OracleConfig, OracleRound};
 
 /// OracleRouter contract interface.
 /// SEP-40 median aggregation with a per-symbol price cache.
@@ -16,6 +16,17 @@ pub trait OracleRouter {
     /// the underlying source freshness window are still valid; otherwise
     /// queries sources fresh and refreshes the cache.
     fn get_price(env: Env, symbol: Symbol) -> i128;
+
+    /// One-shot link used to obtain the bounded active-market registry.
+    fn set_position_manager(env: Env, caller: Address, position_manager: Address);
+
+    /// Publish one synchronized round for every active market. KEEPER only.
+    fn publish_round(env: Env, caller: Address) -> u64;
+
+    fn latest_round_id(env: Env) -> u64;
+
+    /// Return the current round. Older rounds are pruned after publication.
+    fn get_round(env: Env, round_id: u64) -> OracleRound;
 
     /// Add or replace the flat SEP-40 oracle source list for `symbol`.
     /// Sources form a single equally-weighted pool (no primary/secondary

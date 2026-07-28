@@ -1,7 +1,8 @@
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 use stellar_access::access_control::{
-    get_admin as oz_get_admin, grant_role_no_auth as oz_grant_role_no_auth, has_role as oz_has_role,
-    revoke_role_no_auth as oz_revoke_role_no_auth, set_admin as oz_set_admin,
+    get_admin as oz_get_admin, grant_role_no_auth as oz_grant_role_no_auth,
+    has_role as oz_has_role, revoke_role_no_auth as oz_revoke_role_no_auth,
+    set_admin as oz_set_admin,
 };
 
 use crate::{errors::ConfigManagerError, types::roles};
@@ -46,8 +47,7 @@ pub fn rotate_admin(env: &Env, new_admin: &Address) {
 
 /// Read the admin address (returns Err panic if uninitialized).
 pub fn load_admin(env: &Env) -> Address {
-    oz_get_admin(env)
-        .unwrap_or_else(|| panic_with_error!(env, ConfigManagerError::NotInitialized))
+    oz_get_admin(env).unwrap_or_else(|| panic_with_error!(env, ConfigManagerError::NotInitialized))
 }
 
 /// Grant `role` to `account` via OZ. Idempotent: a no-op when the account

@@ -1,13 +1,11 @@
 use interfaces::{
-    ConfigManagerClient, MigrationData, OracleConfig, OracleRouter, TimelockedUpgradeable,
-    UpgradeFailure,
+    ConfigManagerClient, MigrationData, OracleConfig, OracleRound, OracleRouter,
+    PositionManagerClient, RoundPrice, TimelockedUpgradeable, UpgradeFailure,
 };
 use shared::bump_instance_ttl;
 use shared::constants::MAX_ORACLE_SOURCES;
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
-use stellar_contract_utils::upgradeable::{
-    complete_migration, ensure_can_complete_migration,
-};
+use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
 
 use crate::errors::OracleRouterError;
 use crate::{events, logic, storage};
@@ -33,6 +31,56 @@ impl OracleRouterContract {
 impl OracleRouter for OracleRouterContract {
     fn get_price(env: Env, symbol: Symbol) -> i128 {
         logic::fetch_and_validate_price(&env, symbol)
+    }
+
+    fn set_position_manager(env: Env, caller: Address, position_manager: Address) {
+        logic::require_oracle_admin(&env, &caller);
+        if storage::has_position_manager(&env) {
+            panic_with_error!(&env, OracleRouterError::PositionManagerAlreadySet);
+        }
+        storage::set_position_manager(&env, &position_manager);
+        shared::bump_instance_ttl(&env);
+    }
+
+    fn publish_round(env: Env, caller: Address) -> u64 {
+        logic::require_keeper(&env, &caller);
+        let markets = PositionManagerClient::new(&env, &storage::load_position_manager(&env))
+            .active_markets();
+        let mut prices = Vec::new(&env);
+        let mut i = 0u32;
+        while i < markets.len() {
+            let symbol = markets.get(i).unwrap();
+            let price = logic::fetch_and_validate_price(&env, symbol.clone());
+            prices.push_back(RoundPrice { symbol, price });
+            i += 1;
+        }
+        let previous_id = storage::latest_round_id(&env);
+        let previous_timestamp = if previous_id == 0 {
+            0
+        } else {
+            storage::load_round(&env, previous_id).timestamp
+        };
+        let id = previous_id
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, OracleRouterError::InvalidConfig));
+        let round = OracleRound {
+            id,
+            timestamp: env.ledger().timestamp(),
+            previous_id,
+            previous_timestamp,
+            prices,
+        };
+        storage::save_round(&env, &round);
+        shared::bump_instance_ttl(&env);
+        id
+    }
+
+    fn latest_round_id(env: Env) -> u64 {
+        storage::latest_round_id(&env)
+    }
+
+    fn get_round(env: Env, round_id: u64) -> OracleRound {
+        storage::load_round(&env, round_id)
     }
 
     fn set_oracle_sources(env: Env, caller: Address, symbol: Symbol, sources: Vec<Address>) {

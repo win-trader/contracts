@@ -33,86 +33,15 @@ if (typeof window !== "undefined") {
 
 
 
-export const ConfigManagerError = {
-  1: {message:"AlreadyInitialized"},
-  2: {message:"NotInitialized"},
-  3: {message:"Unauthorized"},
-  6: {message:"UpgradeTimelockTooShort"},
-  7: {message:"InvalidAdminProposal"},
-  8: {message:"NotPendingAdmin"},
-  9: {message:"NoPendingAdmin"},
-  10: {message:"NoPendingUpgrade"},
-  11: {message:"UpgradeTimelockNotElapsed"},
-  12: {message:"UpgradeHashMismatch"},
-  13: {message:"AdminProposalExpired"},
-  14: {message:"UpgradeTimelockTooLong"}
+export const RequestRouterError = {
+  1: {message:"InvalidAmount"},
+  2: {message:"InvalidRequest"},
+  3: {message:"TooEarly"},
+  4: {message:"QueueBlocked"},
+  5: {message:"LpActionBlocked"},
+  6: {message:"NoOracleRound"},
+  7: {message:"Unauthorized"}
 }
-
-
-
-
-
-export type StorageKey = {tag: "Initialized", values: void} | {tag: "UpgradeTimelock", values: void} | {tag: "PendingAdmin", values: void} | {tag: "Version", values: void};
-
-
-export interface PendingAdminProposal {
-  admin: string;
-  proposed_at: u64;
-}
-
-export const RoleTransferError = {
-  2200: {message:"NoPendingTransfer"},
-  2201: {message:"InvalidLiveUntilLedger"},
-  2202: {message:"InvalidPendingAccount"}
-}
-
-
-
-
-
-export const AccessControlError = {
-  2000: {message:"Unauthorized"},
-  2001: {message:"AdminNotSet"},
-  2002: {message:"IndexOutOfBounds"},
-  2003: {message:"AdminRoleNotFound"},
-  2004: {message:"RoleCountIsNotZero"},
-  2005: {message:"RoleNotFound"},
-  2006: {message:"AdminAlreadySet"},
-  2007: {message:"RoleNotHeld"},
-  2008: {message:"RoleIsEmpty"},
-  2009: {message:"TransferInProgress"},
-  2010: {message:"MaxRolesExceeded"}
-}
-
-
-
-
-/**
- * Storage key for enumeration of accounts per role.
- */
-export interface RoleAccountKey {
-  index: u32;
-  role: string;
-}
-
-/**
- * Storage keys for the data associated with the access control
- */
-export type AccessControlStorageKey = {tag: "ExistingRoles", values: void} | {tag: "RoleAccounts", values: readonly [RoleAccountKey]} | {tag: "HasRole", values: readonly [string, string]} | {tag: "RoleAccountsCount", values: readonly [string]} | {tag: "RoleAdmin", values: readonly [string]} | {tag: "Admin", values: void} | {tag: "PendingAdmin", values: void};
-
-export const OwnableError = {
-  2100: {message:"OwnerNotSet"},
-  2101: {message:"TransferInProgress"},
-  2102: {message:"OwnerAlreadySet"}
-}
-
-
-
-
-/**
- * Storage keys for `Ownable` utility.
- */
-export type OwnableStorageKey = {tag: "Owner", values: void} | {tag: "PendingOwner", values: void};
 
 
 export interface LpConfig {
@@ -429,29 +358,14 @@ export interface Client {
   upgrade: ({new_wasm_hash, operator}: {new_wasm_hash: Buffer, operator: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
-   * Construct and simulate a has_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a get_request transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  has_role: ({role, account}: {role: string, account: string}, options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
+  get_request: ({request_id}: {request_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<LpRequest>>
 
   /**
-   * Construct and simulate a grant_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a resolve_next transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  grant_role: ({caller, role, account}: {caller: string, role: string, account: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
-   * Construct and simulate a revoke_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  revoke_role: ({caller, role, account}: {caller: string, role: string, account: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
-   * Construct and simulate a accept_admin transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  accept_admin: ({new_admin}: {new_admin: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
-   * Construct and simulate a propose_admin transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  propose_admin: ({caller, new_admin}: {caller: string, new_admin: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+  resolve_next: ({executor}: {executor: string}, options?: MethodOptions) => Promise<AssembledTransaction<SettlementResult>>
 
   /**
    * Construct and simulate a cancel_upgrade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -464,35 +378,25 @@ export interface Client {
   propose_upgrade: ({caller, wasm_hash}: {caller: string, wasm_hash: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
-   * Construct and simulate a bump_config_state transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a request_deposit transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  bump_config_state: (options?: MethodOptions) => Promise<AssembledTransaction<null>>
+  request_deposit: ({owner, assets}: {owner: string, assets: i128}, options?: MethodOptions) => Promise<AssembledTransaction<u64>>
 
   /**
-   * Construct and simulate a get_pending_admin transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a request_withdrawal transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  get_pending_admin: (options?: MethodOptions) => Promise<AssembledTransaction<Option<string>>>
+  request_withdrawal: ({owner, shares}: {owner: string, shares: i128}, options?: MethodOptions) => Promise<AssembledTransaction<u64>>
 
   /**
-   * Construct and simulate a get_upgrade_timelock transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a next_request_to_resolve transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  get_upgrade_timelock: (options?: MethodOptions) => Promise<AssembledTransaction<u64>>
-
-  /**
-   * Construct and simulate a set_upgrade_timelock transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  set_upgrade_timelock: ({caller, seconds}: {caller: string, seconds: u64}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
-   * Construct and simulate a cancel_admin_proposal transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  cancel_admin_proposal: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+  next_request_to_resolve: (options?: MethodOptions) => Promise<AssembledTransaction<u64>>
 
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
         /** Constructor/Initialization Args for the contract's `__constructor` method */
-        {admin}: {admin: string},
+        {asset_address, vault_address, oracle_router, config_manager_address}: {asset_address: string, vault_address: string, oracle_router: string, config_manager_address: string},
     /** Options for initializing a Client as well as for calling a method, with extras specific to deploying. */
     options: MethodOptions &
       Omit<ContractClientOptions, "contractId"> & {
@@ -504,47 +408,21 @@ export class Client extends ContractClient {
         format?: "hex" | "base64";
       }
   ): Promise<AssembledTransaction<T>> {
-    return ContractClient.deploy({admin}, options)
+    return ContractClient.deploy({asset_address, vault_address, oracle_router, config_manager_address}, options)
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAAEkNvbmZpZ01hbmFnZXJFcnJvcgAAAAAADAAAAAAAAAASQWxyZWFkeUluaXRpYWxpemVkAAAAAAABAAAAAAAAAA5Ob3RJbml0aWFsaXplZAAAAAAAAgAAAAAAAAAMVW5hdXRob3JpemVkAAAAAwAAAAAAAAAXVXBncmFkZVRpbWVsb2NrVG9vU2hvcnQAAAAABgAAAAAAAAAUSW52YWxpZEFkbWluUHJvcG9zYWwAAAAHAAAAAAAAAA9Ob3RQZW5kaW5nQWRtaW4AAAAACAAAAAAAAAAOTm9QZW5kaW5nQWRtaW4AAAAAAAkAAAAAAAAAEE5vUGVuZGluZ1VwZ3JhZGUAAAAKAAAAAAAAABlVcGdyYWRlVGltZWxvY2tOb3RFbGFwc2VkAAAAAAAACwAAAAAAAAATVXBncmFkZUhhc2hNaXNtYXRjaAAAAAAMAAAAAAAAABRBZG1pblByb3Bvc2FsRXhwaXJlZAAAAA0AAAAAAAAAFlVwZ3JhZGVUaW1lbG9ja1Rvb0xvbmcAAAAAAA4=",
-        "AAAABQAAAAAAAAAAAAAAClJvbGVDaGFuZ2UAAAAAAAEAAAAEcm9sZQAAAAMAAAAAAAAABHJvbGUAAAARAAAAAAAAAAAAAAAHYWNjb3VudAAAAAATAAAAAAAAAAAAAAAIaXNfZ3JhbnQAAAABAAAAAAAAAAE=",
-        "AAAABQAAAAAAAAAAAAAADUFkbWluUHJvcG9zZWQAAAAAAAABAAAACWFkbWlucHJvcAAAAAAAAAIAAAAAAAAACHByb3Bvc2VyAAAAEwAAAAAAAAAAAAAACW5ld19hZG1pbgAAAAAAABMAAAAAAAAAAQ==",
-        "AAAABQAAAAAAAAAAAAAAFVVwZ3JhZGVUaW1lbG9ja1VwZGF0ZQAAAAAAAAEAAAAFdXBndGwAAAAAAAABAAAAAAAAABB0aW1lbG9ja19zZWNvbmRzAAAABgAAAAAAAAAB",
-        "AAAABQAAAAAAAAAAAAAAFkFkbWluUHJvcG9zYWxDYW5jZWxsZWQAAAAAAAEAAAAIYWRtaW5jeGwAAAABAAAAAAAAAAljYW5jZWxsZXIAAAAAAAATAAAAAAAAAAE=",
-        "AAAAAgAAAAAAAAAAAAAAClN0b3JhZ2VLZXkAAAAAAAQAAAAAAAAAAAAAAAtJbml0aWFsaXplZAAAAAAAAAAAAAAAAA9VcGdyYWRlVGltZWxvY2sAAAAAAAAAAAAAAAAMUGVuZGluZ0FkbWluAAAAAAAAAAAAAAAHVmVyc2lvbgA=",
-        "AAAAAQAAAAAAAAAAAAAAFFBlbmRpbmdBZG1pblByb3Bvc2FsAAAAAgAAAAAAAAAFYWRtaW4AAAAAAAATAAAAAAAAAAtwcm9wb3NlZF9hdAAAAAAG",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAAElJlcXVlc3RSb3V0ZXJFcnJvcgAAAAAABwAAAAAAAAANSW52YWxpZEFtb3VudAAAAAAAAAEAAAAAAAAADkludmFsaWRSZXF1ZXN0AAAAAAACAAAAAAAAAAhUb29FYXJseQAAAAMAAAAAAAAADFF1ZXVlQmxvY2tlZAAAAAQAAAAAAAAAD0xwQWN0aW9uQmxvY2tlZAAAAAAFAAAAAAAAAA1Ob09yYWNsZVJvdW5kAAAAAAAABgAAAAAAAAAMVW5hdXRob3JpemVkAAAABw==",
         "AAAAAAAAAAAAAAAHbWlncmF0ZQAAAAACAAAAAAAAAARkYXRhAAAH0AAAAA1NaWdyYXRpb25EYXRhAAAAAAAAAAAAAAhvcGVyYXRvcgAAABMAAAAA",
         "AAAAAAAAAAAAAAAHdXBncmFkZQAAAAACAAAAAAAAAA1uZXdfd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAAAAAACG9wZXJhdG9yAAAAEwAAAAA=",
-        "AAAAAAAAAAAAAAAIaGFzX3JvbGUAAAACAAAAAAAAAARyb2xlAAAAEQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAQAAAAE=",
-        "AAAAAAAAAAAAAAAKZ3JhbnRfcm9sZQAAAAAAAwAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAARyb2xlAAAAEQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAA==",
-        "AAAAAAAAAAAAAAALcmV2b2tlX3JvbGUAAAAAAwAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAARyb2xlAAAAEQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAA==",
-        "AAAAAAAAAAAAAAAMYWNjZXB0X2FkbWluAAAAAQAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAA=",
-        "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAEAAAAAAAAABWFkbWluAAAAAAAAEwAAAAA=",
-        "AAAAAAAAAAAAAAANcHJvcG9zZV9hZG1pbgAAAAAAAAIAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAA=",
+        "AAAAAAAAAAAAAAALZ2V0X3JlcXVlc3QAAAAAAQAAAAAAAAAKcmVxdWVzdF9pZAAAAAAABgAAAAEAAAfQAAAACUxwUmVxdWVzdAAAAA==",
+        "AAAAAAAAAAAAAAAMcmVzb2x2ZV9uZXh0AAAAAQAAAAAAAAAIZXhlY3V0b3IAAAATAAAAAQAAB9AAAAAQU2V0dGxlbWVudFJlc3VsdA==",
+        "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAQAAAAAAAAADWFzc2V0X2FkZHJlc3MAAAAAAAATAAAAAAAAAA12YXVsdF9hZGRyZXNzAAAAAAAAEwAAAAAAAAANb3JhY2xlX3JvdXRlcgAAAAAAABMAAAAAAAAAFmNvbmZpZ19tYW5hZ2VyX2FkZHJlc3MAAAAAABMAAAAA",
         "AAAAAAAAAAAAAAAOY2FuY2VsX3VwZ3JhZGUAAAAAAAEAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAA=",
         "AAAAAAAAAAAAAAAPcHJvcG9zZV91cGdyYWRlAAAAAAIAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAJd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAA",
-        "AAAAAAAAAAAAAAARYnVtcF9jb25maWdfc3RhdGUAAAAAAAAAAAAAAA==",
-        "AAAAAAAAAAAAAAARZ2V0X3BlbmRpbmdfYWRtaW4AAAAAAAAAAAAAAQAAA+gAAAAT",
-        "AAAAAAAAAAAAAAAUZ2V0X3VwZ3JhZGVfdGltZWxvY2sAAAAAAAAAAQAAAAY=",
-        "AAAAAAAAAAAAAAAUc2V0X3VwZ3JhZGVfdGltZWxvY2sAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAAB3NlY29uZHMAAAAABgAAAAA=",
-        "AAAAAAAAAAAAAAAVY2FuY2VsX2FkbWluX3Byb3Bvc2FsAAAAAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAA==",
-        "AAAABAAAAAAAAAAAAAAAEVJvbGVUcmFuc2ZlckVycm9yAAAAAAAAAwAAAAAAAAARTm9QZW5kaW5nVHJhbnNmZXIAAAAAAAiYAAAAAAAAABZJbnZhbGlkTGl2ZVVudGlsTGVkZ2VyAAAAAAiZAAAAAAAAABVJbnZhbGlkUGVuZGluZ0FjY291bnQAAAAAAAia",
-        "AAAABQAAACVFdmVudCBlbWl0dGVkIHdoZW4gYSByb2xlIGlzIGdyYW50ZWQuAAAAAAAAAAAAAAtSb2xlR3JhbnRlZAAAAAABAAAADHJvbGVfZ3JhbnRlZAAAAAMAAAAAAAAABHJvbGUAAAARAAAAAQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAI=",
-        "AAAABQAAACVFdmVudCBlbWl0dGVkIHdoZW4gYSByb2xlIGlzIHJldm9rZWQuAAAAAAAAAAAAAAtSb2xlUmV2b2tlZAAAAAABAAAADHJvbGVfcmV2b2tlZAAAAAMAAAAAAAAABHJvbGUAAAARAAAAAQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAI=",
-        "AAAABQAAAC9FdmVudCBlbWl0dGVkIHdoZW4gdGhlIGFkbWluIHJvbGUgaXMgcmVub3VuY2VkLgAAAAAAAAAADkFkbWluUmVub3VuY2VkAAAAAAABAAAAD2FkbWluX3Jlbm91bmNlZAAAAAABAAAAAAAAAAVhZG1pbgAAAAAAABMAAAABAAAAAg==",
-        "AAAABQAAACtFdmVudCBlbWl0dGVkIHdoZW4gYSByb2xlIGFkbWluIGlzIGNoYW5nZWQuAAAAAAAAAAAQUm9sZUFkbWluQ2hhbmdlZAAAAAEAAAAScm9sZV9hZG1pbl9jaGFuZ2VkAAAAAAADAAAAAAAAAARyb2xlAAAAEQAAAAEAAAAAAAAAE3ByZXZpb3VzX2FkbWluX3JvbGUAAAAAEQAAAAAAAAAAAAAADm5ld19hZG1pbl9yb2xlAAAAAAARAAAAAAAAAAI=",
-        "AAAABAAAAAAAAAAAAAAAEkFjY2Vzc0NvbnRyb2xFcnJvcgAAAAAACwAAAAAAAAAMVW5hdXRob3JpemVkAAAH0AAAAAAAAAALQWRtaW5Ob3RTZXQAAAAH0QAAAAAAAAAQSW5kZXhPdXRPZkJvdW5kcwAAB9IAAAAAAAAAEUFkbWluUm9sZU5vdEZvdW5kAAAAAAAH0wAAAAAAAAASUm9sZUNvdW50SXNOb3RaZXJvAAAAAAfUAAAAAAAAAAxSb2xlTm90Rm91bmQAAAfVAAAAAAAAAA9BZG1pbkFscmVhZHlTZXQAAAAH1gAAAAAAAAALUm9sZU5vdEhlbGQAAAAH1wAAAAAAAAALUm9sZUlzRW1wdHkAAAAH2AAAAAAAAAASVHJhbnNmZXJJblByb2dyZXNzAAAAAAfZAAAAAAAAABBNYXhSb2xlc0V4Y2VlZGVkAAAH2g==",
-        "AAAABQAAADJFdmVudCBlbWl0dGVkIHdoZW4gYW4gYWRtaW4gdHJhbnNmZXIgaXMgY29tcGxldGVkLgAAAAAAAAAAABZBZG1pblRyYW5zZmVyQ29tcGxldGVkAAAAAAABAAAAGGFkbWluX3RyYW5zZmVyX2NvbXBsZXRlZAAAAAIAAAAAAAAACW5ld19hZG1pbgAAAAAAABMAAAABAAAAAAAAAA5wcmV2aW91c19hZG1pbgAAAAAAEwAAAAAAAAAC",
-        "AAAABQAAADJFdmVudCBlbWl0dGVkIHdoZW4gYW4gYWRtaW4gdHJhbnNmZXIgaXMgaW5pdGlhdGVkLgAAAAAAAAAAABZBZG1pblRyYW5zZmVySW5pdGlhdGVkAAAAAAABAAAAGGFkbWluX3RyYW5zZmVyX2luaXRpYXRlZAAAAAMAAAAAAAAADWN1cnJlbnRfYWRtaW4AAAAAAAATAAAAAQAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAAAAAAAAAAAEWxpdmVfdW50aWxfbGVkZ2VyAAAAAAAABAAAAAAAAAAC",
-        "AAAAAQAAADFTdG9yYWdlIGtleSBmb3IgZW51bWVyYXRpb24gb2YgYWNjb3VudHMgcGVyIHJvbGUuAAAAAAAAAAAAAA5Sb2xlQWNjb3VudEtleQAAAAAAAgAAAAAAAAAFaW5kZXgAAAAAAAAEAAAAAAAAAARyb2xlAAAAEQ==",
-        "AAAAAgAAADxTdG9yYWdlIGtleXMgZm9yIHRoZSBkYXRhIGFzc29jaWF0ZWQgd2l0aCB0aGUgYWNjZXNzIGNvbnRyb2wAAAAAAAAAF0FjY2Vzc0NvbnRyb2xTdG9yYWdlS2V5AAAAAAcAAAAAAAAAAAAAAA1FeGlzdGluZ1JvbGVzAAAAAAAAAQAAAAAAAAAMUm9sZUFjY291bnRzAAAAAQAAB9AAAAAOUm9sZUFjY291bnRLZXkAAAAAAAEAAAAAAAAAB0hhc1JvbGUAAAAAAgAAABMAAAARAAAAAQAAAAAAAAARUm9sZUFjY291bnRzQ291bnQAAAAAAAABAAAAEQAAAAEAAAAAAAAACVJvbGVBZG1pbgAAAAAAAAEAAAARAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAAAxQZW5kaW5nQWRtaW4=",
-        "AAAABAAAAAAAAAAAAAAADE93bmFibGVFcnJvcgAAAAMAAAAAAAAAC093bmVyTm90U2V0AAAACDQAAAAAAAAAElRyYW5zZmVySW5Qcm9ncmVzcwAAAAAINQAAAAAAAAAPT3duZXJBbHJlYWR5U2V0AAAACDY=",
-        "AAAABQAAADZFdmVudCBlbWl0dGVkIHdoZW4gYW4gb3duZXJzaGlwIHRyYW5zZmVyIGlzIGluaXRpYXRlZC4AAAAAAAAAAAART3duZXJzaGlwVHJhbnNmZXIAAAAAAAABAAAAEm93bmVyc2hpcF90cmFuc2ZlcgAAAAAAAwAAAAAAAAAJb2xkX293bmVyAAAAAAAAEwAAAAAAAAAAAAAACW5ld19vd25lcgAAAAAAABMAAAAAAAAAAAAAABFsaXZlX3VudGlsX2xlZGdlcgAAAAAAAAQAAAAAAAAAAg==",
-        "AAAABQAAACpFdmVudCBlbWl0dGVkIHdoZW4gb3duZXJzaGlwIGlzIHJlbm91bmNlZC4AAAAAAAAAAAAST3duZXJzaGlwUmVub3VuY2VkAAAAAAABAAAAE293bmVyc2hpcF9yZW5vdW5jZWQAAAAAAQAAAAAAAAAJb2xkX293bmVyAAAAAAAAEwAAAAAAAAAC",
-        "AAAABQAAADZFdmVudCBlbWl0dGVkIHdoZW4gYW4gb3duZXJzaGlwIHRyYW5zZmVyIGlzIGNvbXBsZXRlZC4AAAAAAAAAAAAaT3duZXJzaGlwVHJhbnNmZXJDb21wbGV0ZWQAAAAAAAEAAAAcb3duZXJzaGlwX3RyYW5zZmVyX2NvbXBsZXRlZAAAAAEAAAAAAAAACW5ld19vd25lcgAAAAAAABMAAAAAAAAAAg==",
-        "AAAAAgAAACNTdG9yYWdlIGtleXMgZm9yIGBPd25hYmxlYCB1dGlsaXR5LgAAAAAAAAAAEU93bmFibGVTdG9yYWdlS2V5AAAAAAAAAgAAAAAAAAAAAAAABU93bmVyAAAAAAAAAAAAAAAAAAAMUGVuZGluZ093bmVy",
+        "AAAAAAAAAAAAAAAPcmVxdWVzdF9kZXBvc2l0AAAAAAIAAAAAAAAABW93bmVyAAAAAAAAEwAAAAAAAAAGYXNzZXRzAAAAAAALAAAAAQAAAAY=",
+        "AAAAAAAAAAAAAAAScmVxdWVzdF93aXRoZHJhd2FsAAAAAAACAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAABnNoYXJlcwAAAAAACwAAAAEAAAAG",
+        "AAAAAAAAAAAAAAAXbmV4dF9yZXF1ZXN0X3RvX3Jlc29sdmUAAAAAAAAAAAEAAAAG",
         "AAAAAQAAAAAAAAAAAAAACExwQ29uZmlnAAAAAwAAAAAAAAAQbHBfcmVxdWVzdF9kZWxheQAAAAYAAAAAAAAAHG1heF93aXRoZHJhd191dGlsaXphdGlvbl9icHMAAAAEAAAAAAAAABptaW5fZGVwb3NpdF9uYXZfZmFjdG9yX2JwcwAAAAAABA==",
         "AAAAAQAAADVSZXByZXNlbnRzIGEgc2luZ2xlIHRyYWRlcidzIG9wZW4gbGV2ZXJhZ2VkIHBvc2l0aW9uLgAAAAAAAAAAAAAIUG9zaXRpb24AAAAQAAAAG0Fzc2V0IHVuaXRzIGF0IGBQUkVDSVNJT05gLgAAAAANYmFzZV9leHBvc3VyZQAAAAAAAAsAAAAAAAAAC2JvcnJvd19kZWJ0AAAAAAsAAAAqVHJhZGVyLW93bmVkIGNvbGxhdGVyYWwgaGVsZCBieSB0aGUgdmF1bHQuAAAAAAAKY29sbGF0ZXJhbAAAAAAACwAAAClDYXNoIG93bmVkIGJ5IGFuIG9wdGlvbmFsLW9yZGVyIGV4ZWN1dG9yLgAAAAAAABBleGVjdXRpb25fYnVkZ2V0AAAACwAAAAAAAAAYZnVuZGluZ19wYWlkX3RvX2xwc19kZWJ0AAAACwAAAAAAAAAeZnVuZGluZ19wYWlkX3RvX3JlY2VpdmVyc19kZWJ0AAAAAAALAAAAAAAAABVmdW5kaW5nX3JlY2VpdmVkX2RlYnQAAAAAAAALAAAAAAAAAAJpZAAAAAAABgAAAAAAAAAHaXNfbG9uZwAAAAABAAAAAAAAABNsYXN0X2luY3JlYXNlZF90aW1lAAAAAAYAAAAAAAAABm1hcmtldAAAAAAAEQAAAAAAAAAFb3duZXIAAAAAAAATAAAALkZpeGVkIGdyb3NzIGNhcGFjaXR5IGFzc2lnbmVkIHdoZW4gcmlzayBvcGVucy4AAAAAAApyaXNrX3VuaXRzAAAAAAALAAAAHFVTRCBub3Rpb25hbCBhdCBgUFJFQ0lTSU9OYC4AAAAEc2l6ZQAAAAsAAAAAAAAACXN0b3BfbG9zcwAAAAAAAAsAAAAAAAAAC3Rha2VfcHJvZml0AAAAAAs=",
         "AAAAAQAAAAAAAAAAAAAACUxwUmVxdWVzdAAAAAAAAAcAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANZXhlY3V0ZV9hZnRlcgAAAAAAAAYAAAAAAAAAAmlkAAAAAAAGAAAAAAAAAARraW5kAAAH0AAAAA1McFJlcXVlc3RLaW5kAAAAAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAADHJlcXVlc3RfdGltZQAAAAYAAAAAAAAABnN0YXR1cwAAAAAH0AAAAA9McFJlcXVlc3RTdGF0dXMA",
@@ -583,17 +461,12 @@ export class Client extends ContractClient {
   public readonly fromJSON = {
     migrate: this.txFromJSON<null>,
         upgrade: this.txFromJSON<null>,
-        has_role: this.txFromJSON<boolean>,
-        grant_role: this.txFromJSON<null>,
-        revoke_role: this.txFromJSON<null>,
-        accept_admin: this.txFromJSON<null>,
-        propose_admin: this.txFromJSON<null>,
+        get_request: this.txFromJSON<LpRequest>,
+        resolve_next: this.txFromJSON<SettlementResult>,
         cancel_upgrade: this.txFromJSON<null>,
         propose_upgrade: this.txFromJSON<null>,
-        bump_config_state: this.txFromJSON<null>,
-        get_pending_admin: this.txFromJSON<Option<string>>,
-        get_upgrade_timelock: this.txFromJSON<u64>,
-        set_upgrade_timelock: this.txFromJSON<null>,
-        cancel_admin_proposal: this.txFromJSON<null>
+        request_deposit: this.txFromJSON<u64>,
+        request_withdrawal: this.txFromJSON<u64>,
+        next_request_to_resolve: this.txFromJSON<u64>
   }
 }

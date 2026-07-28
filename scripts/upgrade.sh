@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # upgrade.sh — Push new WASM bytecode to already-deployed contracts.
 #
-# For each upgradeable contract (vault, position-manager, oracle, oracle-router,
-# config-manager) we:
+# For each upgradeable contract (vault, request-router, position-manager,
+# oracle, oracle-router, config-manager) we:
 #   1. install the freshly-built WASM and capture its hash
 #   2. invoke `upgrade(operator, new_wasm_hash)` using `admin` as operator
 #
@@ -55,6 +55,16 @@ if ! stellar keys address "$UPGRADE_SOURCE" >/dev/null 2>&1; then
 fi
 ADMIN_ADDR=$(stellar keys address "$UPGRADE_SOURCE")
 
+# The fee/vault rewrite changes economic storage layouts and has no legacy
+# migration. An address set without RequestRouter belongs to the old
+# deployment and must be replaced with a fresh deploy.
+REQUEST_ROUTER_ID=$(jq -r --arg n "$NETWORK_KEY" \
+  '.[$n].contracts.requestRouter.address // ""' "$ADDRESSES_FILE")
+if [[ -z "$REQUEST_ROUTER_ID" ]]; then
+  echo "❌ '$NETWORK_KEY' is a pre-rewrite deployment. Run a fresh deploy; do not upgrade it in place."
+  exit 1
+fi
+
 # Map of upgradeable contract → (wasm filename, addresses.json key).
 # These contracts derive UpgradeableMigratable, which generates the
 # `upgrade(operator, new_wasm_hash)` entrypoint.
@@ -70,6 +80,7 @@ DEFAULT_CONTRACTS=(
   "oracle-router:oracleRouter"
   "oracle:oracle"
   "vault:vault"
+  "request-router:requestRouter"
   "position-manager:positionManager"
 )
 if [[ -n "${CONTRACTS:-}" ]]; then

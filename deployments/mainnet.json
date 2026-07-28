@@ -11,6 +11,10 @@
       "address": "",
       "startLedger": 0
     },
+    "requestRouter": {
+      "address": "",
+      "startLedger": 0
+    },
     "positionManager": {
       "address": "",
       "startLedger": 0

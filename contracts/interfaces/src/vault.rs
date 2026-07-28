@@ -1,73 +1,47 @@
-use soroban_sdk::{contractclient, Address, Env};
+use soroban_sdk::{contractclient, Address, BytesN, Env};
 
-/// Vault contract interface.
-/// SEP-41 LP token + USDC treasury for the perpetual DEX.
+use crate::types::{AccountingSnapshot, LpConfig, OracleRound, SettlementResult};
+
 #[contractclient(name = "VaultClient")]
 pub trait VaultInterface {
-    // Initialization is the contract `__constructor(asset, config_manager,
-    // position_manager)` — atomic with deploy, closing the first-caller
-    // front-running window that would have let an attacker bind a malicious
-    // `position_manager` and drain the vault. Not a trait method (Soroban
-    // constructors are inherent).
+    fn set_request_router(env: Env, caller: Address, request_router: Address);
 
-    fn pay_profit(env: Env, caller: Address, trader: Address, amount: i128);
-
-    fn reserve_liquidity(env: Env, caller: Address, amount: i128);
-
-    fn release_liquidity(env: Env, caller: Address, amount: i128);
-
-    /// Partial PM sync after one market was repriced. Updates the liability
-    /// amount, but does not refresh the full-book timestamp used by LP exits.
-    fn update_net_pnl(env: Env, caller: Address, pnl: i128);
-
-    /// Full PM sync after every open-interest market was repriced. LP exits
-    /// require this timestamp to be fresh while positions are open.
-    fn update_net_pnl_full_sync(env: Env, caller: Address, pnl: i128);
-
-    /// Notify the vault that PM transferred `amount` USDC into the vault.
-    /// `pre_balance` is the vault's USDC balance immediately BEFORE the
-    /// transfer — `record_absorbed_collateral` verifies `post - pre == amount`
-    /// to detect PM↔Vault state divergence.
-    fn record_absorbed_collateral(
+    fn receive_collateral(env: Env, caller: Address, from: Address, amount: i128);
+    fn transfer_claim(
         env: Env,
         caller: Address,
-        trader: Address,
+        recipient: Address,
         amount: i128,
-        pre_balance: i128,
+        claims_after: i128,
     );
+    fn transfer_safety_claim(env: Env, caller: Address, recipient: Address, amount: i128);
 
-    fn accrue_fees(env: Env, caller: Address, amount: i128);
+    fn settle_deposit(
+        env: Env,
+        caller: Address,
+        owner: Address,
+        assets: i128,
+        round: OracleRound,
+    ) -> SettlementResult;
+    fn settle_withdrawal(
+        env: Env,
+        caller: Address,
+        owner: Address,
+        shares: i128,
+        round: OracleRound,
+    ) -> SettlementResult;
 
-    /// Total assets minus `unclaimed_fees`, with no PnL deduction. Used by
-    /// PM's utilization gate so that mark-price moves cannot feed back into
-    /// the utilization denominator and bias the gate.
-    fn total_assets_excl_pnl(env: Env) -> i128;
-
-    fn claim_fees(env: Env, caller: Address, recipient: Address);
-
-    fn claim_fees_to(env: Env, caller: Address, recipient: Address, amount: i128);
+    fn set_lp_config(env: Env, caller: Address, config: LpConfig);
+    fn get_lp_config(env: Env) -> LpConfig;
+    fn can_create_lp_request(env: Env) -> bool;
+    fn accounting_snapshot(env: Env, round: OracleRound) -> AccountingSnapshot;
+    fn physical_cash(env: Env) -> i128;
+    fn query_asset(env: Env) -> Address;
+    fn total_share_supply(env: Env) -> i128;
 
     fn pause(env: Env, caller: Address);
-
     fn unpause(env: Env, caller: Address);
-
-    fn free_liquidity(env: Env) -> i128;
-
-    fn reserved_usdc(env: Env) -> i128;
-
-    /// Accrued non-LP revenue awaiting `claim_fees` / `claim_fees_to`. Surfaced
-    /// publicly so tests can reconcile counter movement against token-side
-    /// transfers without inferring via subtraction.
-    fn unclaimed_fees(env: Env) -> i128;
-
-    /// Net unrealized PnL across all open trader positions, as last synced by
-    /// PM via `update_net_pnl`. Realized PnL is intentionally NOT included
-    /// (it has already moved physically) — see ADR-0001 / `pnl_refresh.rs`.
-    fn net_global_trader_pnl(env: Env) -> i128;
-
-    fn query_asset(env: Env) -> Address;
-
-    fn total_assets(env: Env) -> i128;
-
+    fn propose_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>);
+    fn cancel_upgrade(env: Env, caller: Address);
     fn bump_vault_state(env: Env);
 }

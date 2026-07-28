@@ -16,15 +16,22 @@ pub fn is_initialized(env: &Env) -> bool {
 }
 
 pub fn set_initialized(env: &Env) {
-    env.storage().instance().set(&StorageKey::Initialized, &true);
+    env.storage()
+        .instance()
+        .set(&StorageKey::Initialized, &true);
 }
 
 pub fn set_config_manager(env: &Env, addr: &Address) {
-    env.storage().instance().set(&StorageKey::ConfigManager, addr);
+    env.storage()
+        .instance()
+        .set(&StorageKey::ConfigManager, addr);
 }
 
 pub fn get_config_manager(env: &Env) -> Address {
-    env.storage().instance().get(&StorageKey::ConfigManager).unwrap()
+    env.storage()
+        .instance()
+        .get(&StorageKey::ConfigManager)
+        .unwrap()
 }
 
 pub fn set_publisher(env: &Env, addr: &Address) {
@@ -32,19 +39,28 @@ pub fn set_publisher(env: &Env, addr: &Address) {
 }
 
 pub fn get_publisher(env: &Env) -> Address {
-    env.storage().instance().get(&StorageKey::Publisher).unwrap()
+    env.storage()
+        .instance()
+        .get(&StorageKey::Publisher)
+        .unwrap()
 }
 
 pub fn set_price(env: &Env, symbol: &Symbol, price: i128) {
-    env.storage().instance().set(&StorageKey::Price(symbol.clone()), &price);
+    env.storage()
+        .instance()
+        .set(&StorageKey::Price(symbol.clone()), &price);
 }
 
 pub fn get_price(env: &Env, symbol: &Symbol) -> Option<i128> {
-    env.storage().instance().get(&StorageKey::Price(symbol.clone()))
+    env.storage()
+        .instance()
+        .get(&StorageKey::Price(symbol.clone()))
 }
 
 pub fn set_last_update(env: &Env, symbol: &Symbol, ts: u64) {
-    env.storage().instance().set(&StorageKey::LastUpdate(symbol.clone()), &ts);
+    env.storage()
+        .instance()
+        .set(&StorageKey::LastUpdate(symbol.clone()), &ts);
 }
 
 pub fn get_last_update(env: &Env, symbol: &Symbol) -> u64 {

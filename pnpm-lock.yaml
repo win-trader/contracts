@@ -86,6 +86,19 @@ importers:
         specifier: ^5.6.2
         version: 5.9.3
 
+  packages/bindings/request-router:
+    dependencies:
+      '@stellar/stellar-sdk':
+        specifier: ^14.5.0
+        version: 14.6.1
+      buffer:
+        specifier: 6.0.3
+        version: 6.0.3
+    devDependencies:
+      typescript:
+        specifier: ^5.6.2
+        version: 5.9.3
+
   packages/bindings/vault:
     dependencies:
       '@stellar/stellar-sdk':

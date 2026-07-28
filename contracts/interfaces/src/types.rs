@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, BytesN};
+use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
 /// Global safety thresholds for price validation.
 #[contracttype]
@@ -26,46 +26,189 @@ pub struct OracleConfig {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Position {
-    /// USDC collateral deposited by the trader.
-    pub collateral: i128,
-    /// Notional size of the position in USDC.
-    pub size: i128,
-    /// Oracle price at the time the position was opened (scaled by 1e7).
-    pub entry_price: i128,
-    /// Global borrow accumulator index at position open (for lazy fee calc).
-    pub entry_borrow_index: i128,
-    /// Global funding accumulator index at position open (for lazy fee calc).
-    pub entry_funding_index: i128,
-    /// True for a long position, false for a short.
+    pub id: u64,
+    pub owner: Address,
+    pub market: Symbol,
     pub is_long: bool,
-    /// Block timestamp when the position was last increased (anti-front-running lock).
+    /// USD notional at `PRECISION`.
+    pub size: i128,
+    /// Asset units at `PRECISION`.
+    pub base_exposure: i128,
+    /// Trader-owned collateral held by the vault.
+    pub collateral: i128,
+    /// Fixed gross capacity assigned when risk opens.
+    pub risk_units: i128,
+    pub borrow_debt: i128,
+    pub funding_paid_to_receivers_debt: i128,
+    pub funding_paid_to_lps_debt: i128,
+    pub funding_received_debt: i128,
+    /// Cash owned by an optional-order executor.
+    pub execution_budget: i128,
     pub last_increased_time: u64,
-    /// Take-profit price (scaled by 1e7). 0 = not set.
     pub take_profit: i128,
-    /// Stop-loss price (scaled by 1e7). 0 = not set.
     pub stop_loss: i128,
-    /// Flat USDC fee escrowed when TP or SL is set. Paid to executor on trigger, refunded on user close / ADL, forfeited to revenue on liquidation.
-    pub execution_fee_escrow: i128,
 }
 
-/// Global market state for a single tradeable asset symbol.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RiskState {
+    Normal,
+    Warning,
+    Adl,
+    HardCap,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MarketSide {
+    pub size_open_interest: i128,
+    pub base_exposure: i128,
+    pub stored_collateral_total: i128,
+    pub risk_units: i128,
+    pub risk_state: RiskState,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MarketConfig {
+    pub open_fee_low_bps: u32,
+    pub open_fee_high_bps: u32,
+    pub max_funding_rate_bps_day: i128,
+    pub market_risk_factor_bps: u32,
+    pub max_long_size_open_interest: i128,
+    pub max_short_size_open_interest: i128,
+    pub max_long_base_exposure: i128,
+    pub max_short_base_exposure: i128,
+    pub recovery_pnl_factor_bps: u32,
+    pub warning_pnl_factor_bps: u32,
+    pub adl_pnl_factor_bps: u32,
+    pub hard_cap_pnl_factor_bps: u32,
+    pub maintenance_margin_bps: u32,
+    pub liquidation_reward_bps: u32,
+    pub adl_reward_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GlobalConfig {
+    pub min_collateral: i128,
+    pub min_position_lifetime: u64,
+    pub risk_capacity_limit_bps: u32,
+    pub base_borrow_rate_bps_day: i128,
+    pub max_variable_borrow_bps_day: i128,
+    pub lp_revenue_share_bps: u32,
+    pub risk_keeper_revenue_share_bps: u32,
+    pub hard_cap_factor_limit_bps: u32,
+    pub max_adl_reward: i128,
+    pub max_insolvent_touch_reward: i128,
+    pub max_active_markets: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LpConfig {
+    pub max_withdraw_utilization_bps: u32,
+    pub min_deposit_nav_factor_bps: u32,
+    pub lp_request_delay: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct MarketInfo {
-    /// Volume-weighted average entry price of all active long positions.
-    pub global_long_avg_price: i128,
-    /// Volume-weighted average entry price of all active short positions.
-    pub global_short_avg_price: i128,
-    /// Total notional size of all open long positions.
-    pub long_open_interest: i128,
-    /// Total notional size of all open short positions.
-    pub short_open_interest: i128,
-    /// Cumulative borrow fee index (grows monotonically with time).
-    pub acc_borrow_index: i128,
-    /// Cumulative funding rate index (signed; positive = longs pay shorts).
-    pub acc_funding_index: i128,
-    /// Timestamp of the last keeper index update.
-    pub last_index_update: u64,
+    pub long: MarketSide,
+    pub short: MarketSide,
+    pub recv_payer_index_long: i128,
+    pub recv_payer_index_short: i128,
+    pub lp_backed_payer_index_long: i128,
+    pub lp_backed_payer_index_short: i128,
+    pub receiver_index_long: i128,
+    pub receiver_index_short: i128,
+    /// 1 = long pays, -1 = short pays, 0 = no payer.
+    pub current_payer_side: i32,
+    pub current_payer_rate: i128,
+    pub receiver_flow_per_second: i128,
+    pub current_lp_flow_per_second: i128,
+    pub last_funding_checkpoint: u64,
+    pub receiver_payer_remainder: i128,
+    pub lp_payer_remainder: i128,
+    pub receiver_index_remainder: i128,
+    pub receiver_flow_remainder: i128,
+    pub config: MarketConfig,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AccountingSnapshot {
+    pub physical_cash: i128,
+    pub non_lp_claims: i128,
+    pub cash_lp_equity: i128,
+    pub cash_shortfall: i128,
+    pub required_risk_backing: i128,
+    pub free_lp_capital: i128,
+    pub vault_nav: i128,
+    pub total_risk_units: i128,
+    pub open_position_count: u64,
+    pub lp_blocked_side_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RoundPrice {
+    pub symbol: Symbol,
+    pub price: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct OracleRound {
+    pub id: u64,
+    pub timestamp: u64,
+    pub previous_id: u64,
+    pub previous_timestamp: u64,
+    pub prices: Vec<RoundPrice>,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LpRequestKind {
+    Deposit,
+    Withdrawal,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LpRequestStatus {
+    Pending,
+    Settled,
+    Failed,
+    Expired,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LpRequest {
+    pub id: u64,
+    pub owner: Address,
+    pub kind: LpRequestKind,
+    pub amount: i128,
+    pub request_time: u64,
+    pub execute_after: u64,
+    pub status: LpRequestStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettlementStatus {
+    Settled,
+    Failed,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SettlementResult {
+    pub status: SettlementStatus,
+    /// Shares minted for a deposit or assets paid for a withdrawal.
+    pub amount: i128,
 }
 
 /// Data required during a WASM migration. Single definition for all contracts.
@@ -76,7 +219,7 @@ pub struct MigrationData {
 
 /// Pending WASM upgrade — set by `propose_upgrade`, consumed by `upgrade`
 /// (cleared atomically on a successful install), or cleared by `cancel_upgrade`.
-/// Single shape across every protocol contract; all four contracts store it at
+/// Single shape across every protocol contract. Contracts store it at
 /// the shared `pending_upgrade` Symbol key in their own instance storage (see
 /// `interfaces::upgrade::pending_upgrade_key`). `upgrade` refuses to install
 /// unless `pending.wasm_hash` matches the supplied hash and `now >= eta`.

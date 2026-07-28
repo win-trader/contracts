@@ -13,9 +13,8 @@ This is one of four repos:
 
 ## Layout
 
-- `contracts/` — Rust workspace: `vault`, `position-manager`, `config-manager`, `oracle-router`, `oracle`, `shared`, `interfaces`
+- `contracts/` — Rust workspace: `vault`, `request-router`, `position-manager`, `config-manager`, `oracle-router`, `oracle`, `shared`, `interfaces`
 - `mocks/` — `mock-token`, `mock-oracle` (test-only contracts)
-- `test-suites/` — integration + fuzz tests
 - `packages/bindings/` — `@win-trader/bindings`: generated TS clients (one per contract), produced by `make bind`
 - `packages/protocol-math/` — `@win-trader/protocol-math`: pure TS mirror of on-chain math (quotes, fees, PnL, liquidation price), no network calls
 - `packages/protocol-clients/` — `@win-trader/protocol-clients`: helpers to instantiate a binding against a network + signer
@@ -33,7 +32,7 @@ Contracts (Rust):
 
 - `make build` — compile contracts to WASM
 - `make optimize` — optimize the WASM with `stellar contract optimize`
-- `make test` — run the Rust test suite
+- `make check` — type-check the Rust workspace
 - `make bind` — `optimize` + generate and build the TS bindings into `packages/bindings/`
 
 TS packages:
@@ -49,6 +48,9 @@ Local network + deploy:
 - `make cex-oracles-testnet` — deploy and wire Binance/KuCoin oracle contracts on testnet
 - `make deploy-testnet-full` — provision testnet keys, deploy core contracts, then deploy/wire CEX oracles
 - `make upgrade-local` / `make upgrade-testnet`, `make grant-keepers`, `make add-market`
+
+The fee and vault rewrite requires a fresh deployment. Its economic state is
+not compatible with contracts deployed before the request router was added.
 
 ## Publishing
 

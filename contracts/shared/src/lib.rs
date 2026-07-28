@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contractclient, Address, Env, Symbol};
 
 pub mod constants;
 
@@ -34,55 +34,4 @@ pub trait AccessControlInterface {
 /// the source contract via its error code.
 pub fn has_role(env: &Env, config_manager: &Address, role: &str, caller: &Address) -> bool {
     AccessControlClient::new(env, config_manager).has_role(&Symbol::new(env, role), caller)
-}
-
-// ---------------------------------------------------------------------------
-// Protocol-wide types (single source of truth — used by ConfigManager,
-// PositionManager, Vault, and tests)
-// ---------------------------------------------------------------------------
-
-/// Defines how protocol revenue is split between parties.
-/// All values are in basis points (bps). Must sum to 10_000.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct FeeSplits {
-    pub lp_bps: u32,
-    pub dev_bps: u32,
-    pub staker_bps: u32,
-}
-
-/// Execution-bounty and open-fee parameters charged to traders.
-/// `open_fee_bps` and `liquidation_bounty_bps` are in basis points;
-/// `tp_sl_execution_fee` is a flat USDC amount at PRECISION scale.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct FeeConfig {
-    pub open_fee_bps: u32,
-    pub liquidation_bounty_bps: u32,
-    pub tp_sl_execution_fee: i128,
-}
-
-/// Global protocol risk and timing parameters.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct ProtocolLimits {
-    pub min_collateral: i128,
-    pub cooldown_duration: u64,
-    pub min_position_lifetime: u64,
-    pub max_utilization_ratio: i128,
-    pub funding_cut_bps: u32,
-    pub adl_pnl_bps: u32,
-    pub adl_utilization_bps: u32,
-    pub liquidation_threshold_bps: u32,
-}
-
-/// Borrow rate kink curve and funding rate parameters (all in basis points).
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct BorrowRateConfig {
-    pub base_borrow_rate_bps: i128,
-    pub slope1_bps: i128,
-    pub slope2_bps: i128,
-    pub optimal_utilization_bps: i128,
-    pub base_funding_rate_bps: i128,
 }

@@ -11,6 +11,10 @@
       "address": "CDD5XIW6WHZBMLOC32JQVGR7VY25JZMZ63N22EVHQ2MMOGQLDLXWZB6E",
       "startLedger": 3711992
     },
+    "requestRouter": {
+      "address": "",
+      "startLedger": 0
+    },
     "positionManager": {
       "address": "CCAOHCVCVK6NXACJ5DMUT2NJVIVD6SGNLND5ASWS6QJ64LDMT5ZICVGU",
       "startLedger": 3711990

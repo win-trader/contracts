@@ -1,17 +1,18 @@
-CONTRACTS = vault position-manager config-manager oracle oracle-router mock-oracle mock-token
+CONTRACTS = vault request-router position-manager config-manager oracle oracle-router mock-oracle mock-token
 WASM_DIR  = target/wasm32v1-none/release
 
 # Local network
 RPC_URL       ?= http://localhost:8000/soroban/rpc
 PASSPHRASE    ?= Standalone Network ; February 2017
 SOURCE        ?= admin
-DEPLOY_CONTRACTS = config-manager oracle-router vault position-manager
+DEPLOY_CONTRACTS = config-manager oracle-router vault request-router position-manager
 
-.PHONY: build optimize bind test clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-local upgrade-testnet grant-keepers add-market cex-oracles cex-oracles-testnet local
+.PHONY: build optimize bind check clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-local upgrade-testnet grant-keepers add-market cex-oracles cex-oracles-testnet local
 
 build:
 	cargo build --target wasm32v1-none --release \
 		-p vault \
+		-p request-router \
 		-p position-manager \
 		-p config-manager \
 		-p oracle \
@@ -29,8 +30,8 @@ optimize: build
 bind: optimize
 	bash scripts/gen-bindings.sh
 
-test:
-	cargo test
+check:
+	cargo check --workspace
 
 clean:
 	cargo clean
@@ -83,7 +84,7 @@ upgrade-testnet: build
 grant-keepers:
 	bash scripts/grant-keepers.sh
 
-# Incrementally add a market (oracle source + max leverage) to a live
+# Incrementally add a market (oracle sources + risk configuration) to a live
 # deployment, no redeploy. Usage: `make add-market SYMBOL=XLMUSD`.
 add-market:
 	@if [ -z "$(SYMBOL)" ]; then echo "usage: make add-market SYMBOL=XLMUSD"; exit 1; fi

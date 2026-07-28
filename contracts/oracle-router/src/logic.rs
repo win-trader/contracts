@@ -2,7 +2,7 @@ use interfaces::OracleClient;
 use shared::bump_instance_ttl;
 use shared::constants::{
     BPS, MAX_DEVIATION_BPS_CEILING, MAX_ORACLE_SOURCES, MIN_REQUIRED_SOURCES_FLOOR, PRICE_DECIMALS,
-    ROLE_ADMIN, ROLE_PAUSER, ROLE_UPGRADER,
+    ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER,
 };
 use soroban_sdk::{panic_with_error, Address, Env, Symbol, Vec};
 
@@ -25,6 +25,10 @@ fn require_role_or_panic(env: &Env, caller: &Address, role: &str) {
 /// Require that `caller` holds the "ADMIN" role in the linked ConfigManager.
 pub fn require_oracle_admin(env: &Env, caller: &Address) {
     require_role_or_panic(env, caller, ROLE_ADMIN);
+}
+
+pub fn require_keeper(env: &Env, caller: &Address) {
+    require_role_or_panic(env, caller, ROLE_KEEPER);
 }
 
 /// Require that `caller` holds the "UPGRADER" role in the linked ConfigManager.

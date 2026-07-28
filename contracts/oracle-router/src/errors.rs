@@ -36,4 +36,7 @@ pub enum OracleRouterError {
     InvalidSourceDecimals = 15,
     /// Even-count median averaging would overflow on the supplied prices.
     MedianOverflow = 16,
+    PositionManagerAlreadySet = 17,
+    PositionManagerNotSet = 18,
+    RoundNotFound = 19,
 }
