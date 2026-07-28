@@ -91,8 +91,7 @@ By surface area rather than tier — useful when adding a feature, to ask
 - **Indexer** (`packages/indexer`)
   - **No automated tests** today. Behavior is implicitly tested by the
     live-stack sim (DB rows materialize when scenarios run) and by the
-    backend tests reading those tables. See `docs/adr/0002-indexer-event-types-per-handler-casts.md`
-    for why we deferred typed events / handler-level tests.
+    backend tests reading those tables.
   - Gap to revisit when a second event consumer ships.
 
 - **Keeper** (`packages/keeper`)
@@ -145,7 +144,7 @@ Rough order-of-magnitude (post-Deliverable-6 baseline):
 
 ## Known gaps (tracked, not blockers)
 
-- Indexer event handlers have no unit/integration tests — see ADR-0002.
+- Indexer event handlers have no unit/integration tests.
 - Keeper has no automated tests — would benefit from pure-logic unit
   tests on the scan-and-trigger decision.
 - Oracle publishers have no automated tests — CEX adapters validated via

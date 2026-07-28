@@ -12,13 +12,13 @@
 // Math / time (mirror of on-chain shared::constants)
 // ---------------------------------------------------------------------------
 
-// Mirror of shared::constants::BPS — see docs/adr/0004
+// Mirror of shared::constants::BPS.
 export const BPS_DENOMINATOR = 10_000;
-// Mirror of shared::constants::SECONDS_PER_YEAR — see docs/adr/0004
+// Off-chain annualization constant. On-chain fee rates use SECONDS_PER_DAY.
 export const SECONDS_PER_YEAR = 31_536_000;
-// Mirror of shared::constants::SECONDS_PER_LEDGER — see docs/adr/0004
+// Mirror of shared::constants::SECONDS_PER_LEDGER.
 export const SECONDS_PER_LEDGER = 5;
-// Mirror of shared::constants::PRECISION (1e7 on-chain price scale) — see docs/adr/0004
+// Mirror of shared::constants::PRECISION (1e7 on-chain price scale).
 export const PRECISION = 10_000_000n;
 
 // ---------------------------------------------------------------------------
