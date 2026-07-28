@@ -25,7 +25,7 @@ mod abi {
         pub is_long: bool,
         pub size: i128,
         pub base_exposure: i128,
-        pub collateral: i128,
+        pub stored_collateral: i128,
         pub risk_units: i128,
         pub borrow_debt: i128,
         pub funding_paid_to_receivers_debt: i128,
@@ -101,20 +101,28 @@ mod abi {
     }
 
     #[contracttype]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PayerSide {
+        None,
+        Long,
+        Short,
+    }
+
+    #[contracttype]
     #[derive(Clone, Debug)]
-    pub struct MarketInfo {
+    pub struct Market {
         pub long: MarketSide,
         pub short: MarketSide,
-        pub recv_payer_index_long: i128,
-        pub recv_payer_index_short: i128,
-        pub lp_backed_payer_index_long: i128,
-        pub lp_backed_payer_index_short: i128,
+        pub receiver_backed_index_long: i128,
+        pub receiver_backed_index_short: i128,
+        pub lp_backed_index_long: i128,
+        pub lp_backed_index_short: i128,
         pub receiver_index_long: i128,
         pub receiver_index_short: i128,
-        pub current_payer_side: i32,
+        pub current_payer_side: PayerSide,
         pub current_payer_rate: i128,
         pub receiver_flow_per_second: i128,
-        pub current_lp_flow_per_second: i128,
+        pub lp_flow_per_second: i128,
         pub last_funding_checkpoint: u64,
         pub receiver_payer_remainder: i128,
         pub lp_payer_remainder: i128,
@@ -242,7 +250,7 @@ mod abi {
         fn update_indices(env: Env, caller: Address, market: Symbol);
         fn set_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
         fn get_position(env: Env, position_id: u64) -> Position;
-        fn get_market(env: Env, market: Symbol) -> MarketInfo;
+        fn get_market(env: Env, market: Symbol) -> Market;
         fn pending_receiver_funding_total(env: Env) -> i128;
     }
 
@@ -586,7 +594,7 @@ fn opening_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
     let long_id = p.open(&p.trader_a, true, 10_000 * UNIT, 2_000 * UNIT);
     let long = manager.get_position(&long_id);
     let high_fee = 30 * UNIT;
-    assert_eq!(long.collateral, 2_000 * UNIT - high_fee);
+    assert_eq!(long.stored_collateral, 2_000 * UNIT - high_fee);
 
     let after_long = p.snapshot();
     assert_eq!(
@@ -597,16 +605,19 @@ fn opening_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
     let short_id = p.open(&p.trader_b, false, 5_000 * UNIT, 1_000 * UNIT);
     let short = manager.get_position(&short_id);
     let low_fee = 5 * UNIT;
-    assert_eq!(short.collateral, 1_000 * UNIT - low_fee);
+    assert_eq!(short.stored_collateral, 1_000 * UNIT - low_fee);
 
     let market = manager.get_market(&p.market);
     assert_eq!(market.long.size_open_interest, 10_000 * UNIT);
     assert_eq!(market.short.size_open_interest, 5_000 * UNIT);
     assert_eq!(
         market.long.stored_collateral_total,
-        manager.get_position(&long_id).collateral
+        manager.get_position(&long_id).stored_collateral
     );
-    assert_eq!(market.short.stored_collateral_total, short.collateral);
+    assert_eq!(
+        market.short.stored_collateral_total,
+        short.stored_collateral
+    );
 }
 
 #[test]
@@ -618,12 +629,12 @@ fn funding_is_split_by_counter_exposure_and_same_time_checkpoint_is_idempotent()
 
     let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
     let flow = manager.get_market(&p.market);
-    assert_eq!(flow.current_payer_side, 1);
+    assert_eq!(flow.current_payer_side, abi::PayerSide::Long);
     assert!(flow.current_payer_rate > 0);
     assert!(flow.receiver_flow_per_second > 0);
-    assert!(flow.current_lp_flow_per_second > 0);
+    assert!(flow.lp_flow_per_second > 0);
 
-    let complete_flow = flow.receiver_flow_per_second + flow.current_lp_flow_per_second;
+    let complete_flow = flow.receiver_flow_per_second + flow.lp_flow_per_second;
     assert!(
         (flow.receiver_flow_per_second * 4 - complete_flow).abs() <= 2,
         "the 1:4 receiver allocation may differ only by carried integer dust"
@@ -633,21 +644,18 @@ fn funding_is_split_by_counter_exposure_and_same_time_checkpoint_is_idempotent()
     manager.update_indices(&p.keeper, &p.market);
     let accrued = manager.get_market(&p.market);
     let receiver_claim = manager.pending_receiver_funding_total();
-    assert!(accrued.recv_payer_index_long > 0);
-    assert!(accrued.lp_backed_payer_index_long > 0);
+    assert!(accrued.receiver_backed_index_long > 0);
+    assert!(accrued.lp_backed_index_long > 0);
     assert!(accrued.receiver_index_short > 0);
     assert!(receiver_claim > 0);
 
     manager.update_indices(&p.keeper, &p.market);
     let repeated = manager.get_market(&p.market);
     assert_eq!(
-        repeated.recv_payer_index_long,
-        accrued.recv_payer_index_long
+        repeated.receiver_backed_index_long,
+        accrued.receiver_backed_index_long
     );
-    assert_eq!(
-        repeated.lp_backed_payer_index_long,
-        accrued.lp_backed_payer_index_long
-    );
+    assert_eq!(repeated.lp_backed_index_long, accrued.lp_backed_index_long);
     assert_eq!(repeated.receiver_index_short, accrued.receiver_index_short);
     assert_eq!(manager.pending_receiver_funding_total(), receiver_claim);
 }
@@ -663,13 +671,13 @@ fn funding_parameter_change_applies_old_rate_before_new_rate() {
     let before = manager.get_market(&p.market);
     manager.set_market_config(&p.admin, &p.market, &Protocol::market_config(200));
     let at_change = manager.get_market(&p.market);
-    let first_delta = at_change.lp_backed_payer_index_long - before.lp_backed_payer_index_long;
+    let first_delta = at_change.lp_backed_index_long - before.lp_backed_index_long;
     assert!(first_delta > 0);
 
     p.advance(DAY / 2);
     manager.update_indices(&p.keeper, &p.market);
     let after = manager.get_market(&p.market);
-    let second_delta = after.lp_backed_payer_index_long - at_change.lp_backed_payer_index_long;
+    let second_delta = after.lp_backed_index_long - at_change.lp_backed_index_long;
 
     assert!(
         (second_delta - first_delta * 2).abs() <= 2,
@@ -794,7 +802,7 @@ fn partial_then_final_close_telescopes_all_market_aggregates_to_zero() {
     assert_eq!(side.size_open_interest, remaining.size);
     assert_eq!(side.base_exposure, remaining.base_exposure);
     assert_eq!(side.risk_units, remaining.risk_units);
-    assert_eq!(side.stored_collateral_total, remaining.collateral);
+    assert_eq!(side.stored_collateral_total, remaining.stored_collateral);
 
     manager.decrease_position(&position_id, &remaining.size, &0, &(100 * UNIT));
     let terminal = manager.get_market(&p.market).long;

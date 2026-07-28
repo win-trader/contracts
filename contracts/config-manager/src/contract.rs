@@ -9,7 +9,6 @@ use crate::logic::{
     load_admin, require_admin_with_auth, revoke_role_internal, rotate_admin,
 };
 use crate::storage;
-use crate::types::roles;
 
 #[contract]
 pub struct ConfigManagerContract;
@@ -22,7 +21,7 @@ fn require_local_role(env: &Env, caller: &Address, role: &str) {
 }
 
 fn require_upgrader(env: &Env, caller: &Address) {
-    require_local_role(env, caller, roles::UPGRADER);
+    require_local_role(env, caller, shared::constants::ROLE_UPGRADER);
 }
 
 #[contractimpl]
@@ -191,7 +190,7 @@ impl TimelockedUpgradeable for ConfigManagerContract {
         require_upgrader(env, caller);
     }
     fn _require_canceller(env: &Env, caller: &Address) {
-        require_local_role(env, caller, roles::PAUSER);
+        require_local_role(env, caller, shared::constants::ROLE_PAUSER);
     }
     fn _timelock_seconds(env: &Env) -> u64 {
         storage::load_upgrade_timelock(env)

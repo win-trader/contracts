@@ -13,7 +13,7 @@ pub trait Oracle {
     // publisher binding keeps each source's signing key independent, so one
     // compromised key cannot move every source's price in lockstep.
 
-    /// Set the price for `symbol` (scaled by `shared::constants::PRECISION`).
+    /// Set the price for `symbol` (scaled by `shared::constants::PRICE_PRECISION`).
     /// Authorized to the stored per-instance publisher only.
     fn set_price(env: Env, caller: Address, symbol: Symbol, price: i128);
 

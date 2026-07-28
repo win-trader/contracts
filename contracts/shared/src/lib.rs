@@ -3,6 +3,7 @@
 pub mod config_manager;
 pub mod constants;
 pub mod events;
+pub mod math;
 pub mod oracle;
 pub mod oracle_router;
 pub mod position_manager;
@@ -20,9 +21,9 @@ pub use oracle_router::{OracleRouter, OracleRouterClient};
 pub use position_manager::{PositionManager, PositionManagerClient};
 pub use request_router::{RequestRouter, RequestRouterClient};
 pub use types::{
-    AccountingSnapshot, GlobalConfig, LpConfig, LpRequest, LpRequestKind, LpRequestStatus,
-    MarketConfig, MarketInfo, MarketSide, MigrationData, OracleConfig, OracleRound, PendingUpgrade,
-    Position, RiskState, RoundPrice, SettlementResult, SettlementStatus,
+    AccountingSnapshot, FundingIndices, GlobalConfig, LpConfig, LpRequest, LpRequestKind,
+    LpRequestStatus, Market, MarketConfig, MarketSide, MigrationData, OracleConfig, OracleRound,
+    PayerSide, PendingUpgrade, Position, RiskState, RoundPrice, SettlementResult, SettlementStatus,
 };
 pub use upgrade::{TimelockedUpgradeable, UpgradeFailure};
 pub use vault::{VaultClient, VaultInterface};

@@ -3,13 +3,12 @@ use shared::constants::{
     BPS, MAX_DEVIATION_BPS_CEILING, MAX_ORACLE_SOURCES, MIN_REQUIRED_SOURCES_FLOOR, PRICE_DECIMALS,
     ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER,
 };
-use shared::OracleClient;
+use shared::{OracleClient, OracleConfig};
 use soroban_sdk::{panic_with_error, Address, Env, Symbol, Vec};
 
 use crate::errors::OracleRouterError;
 use crate::events;
 use crate::storage;
-use crate::types::OracleConfig;
 
 /// Require `caller` to be authenticated and hold `role` in the linked
 /// ConfigManager. Panics with `OracleRouterError::Unauthorized` (code 3) on
@@ -107,7 +106,7 @@ pub fn query_sources(
             continue;
         }
         // Reject prices large enough to overflow the deviation math downstream
-        // (`(max - median) * BPS`). A genuine price scaled by PRECISION is many
+        // (`(max - median) * BPS`). A genuine price scaled by PRICE_PRECISION is many
         // orders of magnitude below this bound, so a source returning one is
         // malfunctioning or hostile — drop it as an invalid response rather
         // than letting one source abort the whole fetch for every other.

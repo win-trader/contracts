@@ -15,7 +15,7 @@ use stellar_tokens::{
 };
 
 use crate::errors::VaultError;
-use crate::storage;
+use crate::{events, storage};
 
 const VIRTUAL_ASSETS: i128 = 1;
 const VIRTUAL_SHARES: i128 = 1_000_000;
@@ -66,23 +66,12 @@ fn cash(env: &Env) -> i128 {
 }
 
 fn mul_div_floor(env: &Env, a: i128, b: i128, d: i128) -> i128 {
-    if a < 0 || b < 0 || d <= 0 {
-        panic_with_error!(env, VaultError::ArithmeticError);
-    }
-    a.checked_mul(b)
-        .and_then(|v| v.checked_div(d))
+    shared::math::mul_div_floor(a, b, d)
         .unwrap_or_else(|| panic_with_error!(env, VaultError::ArithmeticError))
 }
 
 fn mul_div_ceil(env: &Env, a: i128, b: i128, d: i128) -> i128 {
-    if a == 0 {
-        return 0;
-    }
-    let p = a
-        .checked_mul(b)
-        .unwrap_or_else(|| panic_with_error!(env, VaultError::ArithmeticError));
-    p.checked_add(d - 1)
-        .and_then(|v| v.checked_div(d))
+    shared::math::mul_div_ceil(a, b, d)
         .unwrap_or_else(|| panic_with_error!(env, VaultError::ArithmeticError))
 }
 
@@ -243,6 +232,12 @@ impl VaultInterface for VaultContract {
         let new_cash = cash(&env);
         PositionManagerClient::new(&env, &storage::position_manager(&env))
             .refresh_borrow_rate(&env.current_contract_address(), &new_cash);
+        events::DepositSettled {
+            owner,
+            assets,
+            shares,
+        }
+        .publish(&env);
         SettlementResult {
             status: SettlementStatus::Settled,
             amount: shares,
@@ -308,6 +303,12 @@ impl VaultInterface for VaultContract {
         let new_cash = cash(&env);
         PositionManagerClient::new(&env, &storage::position_manager(&env))
             .refresh_borrow_rate(&env.current_contract_address(), &new_cash);
+        events::WithdrawalSettled {
+            owner,
+            shares,
+            assets,
+        }
+        .publish(&env);
         SettlementResult {
             status: SettlementStatus::Settled,
             amount: assets,
@@ -318,6 +319,7 @@ impl VaultInterface for VaultContract {
         require_role(&env, &caller, ROLE_ADMIN);
         validate_config(&env, &config);
         storage::set(&env, &storage::Key::LpConfig, &config);
+        events::LpConfigUpdated { config }.publish(&env);
     }
 
     fn get_lp_config(env: Env) -> LpConfig {
@@ -349,11 +351,13 @@ impl VaultInterface for VaultContract {
     fn pause(env: Env, caller: Address) {
         require_role(&env, &caller, ROLE_PAUSER);
         storage::set(&env, &storage::Key::Paused, &true);
+        events::PauseChanged { paused: true }.publish(&env);
     }
 
     fn unpause(env: Env, caller: Address) {
         require_role(&env, &caller, ROLE_PAUSER);
         storage::set(&env, &storage::Key::Paused, &false);
+        events::PauseChanged { paused: false }.publish(&env);
     }
 
     fn propose_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>) {
@@ -396,7 +400,17 @@ impl TimelockedUpgradeable for VaultContract {
     fn _timelock_seconds(env: &Env) -> u64 {
         ConfigManagerClient::new(env, &storage::config_manager(env)).get_upgrade_timelock()
     }
-    fn _panic_with_upgrade_error(env: &Env, _: UpgradeFailure) -> ! {
-        panic_with_error!(env, VaultError::InvalidCaller)
+    fn _panic_with_upgrade_error(env: &Env, failure: UpgradeFailure) -> ! {
+        match failure {
+            UpgradeFailure::NoPendingUpgrade => {
+                panic_with_error!(env, VaultError::UpgradeNoPending)
+            }
+            UpgradeFailure::TimelockNotElapsed => {
+                panic_with_error!(env, VaultError::UpgradeTimelockNotElapsed)
+            }
+            UpgradeFailure::HashMismatch => {
+                panic_with_error!(env, VaultError::UpgradeHashMismatch)
+            }
+        }
     }
 }

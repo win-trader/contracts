@@ -5,7 +5,6 @@ mod errors;
 mod events;
 mod logic;
 mod storage;
-mod types;
 
 pub use contract::ConfigManagerContract;
 pub use errors::ConfigManagerError;

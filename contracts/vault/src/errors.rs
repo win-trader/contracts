@@ -13,4 +13,10 @@ pub enum VaultError {
     InsufficientCash = 7,
     InvalidCaller = 8,
     ArithmeticError = 9,
+    /// `upgrade` called with no pending proposal.
+    UpgradeNoPending = 10,
+    /// `upgrade` called before the proposal's timelock eta.
+    UpgradeTimelockNotElapsed = 11,
+    /// `upgrade` called with a hash that differs from the proposal.
+    UpgradeHashMismatch = 12,
 }

@@ -31,13 +31,36 @@ pub const SHARED_BUMP_SECONDS: u64 = (SHARED_BUMP as u64) * SECONDS_PER_LEDGER;
 // Math precision (used by PositionManager + tests)
 // ---------------------------------------------------------------------------
 
-/// 1e7 — price precision. All on-chain prices are scaled by this.
-pub const PRECISION: i128 = 10_000_000;
-/// Protocol-wide price scale, expressed as a decimal exponent: `PRECISION ==
-/// 10^PRICE_DECIMALS`. Every SEP-40 source the OracleRouter aggregates must
-/// report this scale, or its prices would skew the median.
+/// 1e7 — price precision. All on-chain prices, USD notionals, and base
+/// exposures are scaled by this.
+///
+/// Scale mapping against the design doc's numerical model
+/// (`docs/design/2026-07-fee-vault-contract-mechanics-ste100.md` §3). The doc
+/// specifies idealized 10^30 precisions; the implementation picks smaller
+/// scales so every intermediate product fits i128 (a size × index product at
+/// 10^30 would overflow at ~1.7 units):
+///
+/// | doc name          | code name         | scale              |
+/// |-------------------|-------------------|--------------------|
+/// | `PRICE_PRECISION` | `PRICE_PRECISION` | 1e7                |
+/// | `INDEX_PRECISION` | `INDEX_PRECISION` | 1e14               |
+/// | `RATE_PRECISION`  | `INDEX_PRECISION` | 1e14 (one scale for rates and indices) |
+/// | `FACTOR_PRECISION`| bps (`BPS`)       | 1e4                |
+/// | `SHARE_PRECISION` | vault decimals offset | asset decimals + 6 |
+/// | `ASSET_PRECISION` | token decimals    | collateral-token native |
+///
+/// PnL numerators (§7.2) carry one extra `PRICE_PRECISION` factor and are
+/// converted to cash exactly once at the final step.
+pub const PRICE_PRECISION: i128 = 10_000_000;
+/// Protocol-wide price scale, expressed as a decimal exponent:
+/// `PRICE_PRECISION == 10^PRICE_DECIMALS`. Every SEP-40 source the
+/// OracleRouter aggregates must report this scale, or its prices would skew
+/// the median.
 pub const PRICE_DECIMALS: u32 = 7;
-/// 1e14 — borrow/funding index accumulator precision.
+/// 1e14 — borrow/funding index accumulator precision. Also the scale for
+/// stored rates (the doc's `RATE_PRECISION`): bps/day rates are stored
+/// multiplied by this so fractional per-second accrual never rounds to zero
+/// before the remainder carry.
 pub const INDEX_PRECISION: i128 = 100_000_000_000_000;
 /// 10_000 — basis-point denominator. Single source of truth.
 pub const BPS: i128 = 10_000;

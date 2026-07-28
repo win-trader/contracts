@@ -1,6 +1,17 @@
+//! Storage layout.
+//!
+//! Instance storage holds the wiring addresses, configs, pause flag, and the
+//! one `Ledger` aggregate (all global accounting lives inside it — business
+//! logic never reads a bare accounting key). Positions and markets are
+//! persistent entries with explicit TTL extension; anyone can re-extend a
+//! position via `bump_position`.
+
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
-use shared::{GlobalConfig, MarketInfo, Position};
-use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
+use shared::{GlobalConfig, Market, Position};
+use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol, Vec};
+
+use crate::errors::PositionManagerError;
+use crate::ledger::Ledger;
 
 #[contracttype]
 #[derive(Clone)]
@@ -13,23 +24,11 @@ pub enum Key {
     Paused,
     NextPositionId,
     ActiveMarkets,
+    Ledger,
+    Version,
     Position(u64),
     Market(Symbol),
     MarketDisabled(Symbol),
-    BorrowIndex,
-    BorrowIndexRemainder,
-    CurrentBorrowRate,
-    GlobalReceiverFlow,
-    GlobalReceiverRemainder,
-    LastGlobalCheckpoint,
-    StoredCollateralTotal,
-    PendingReceiverFundingTotal,
-    ExecutionBudgetTotal,
-    ProtocolClaimableTotal,
-    RiskKeeperReserveTotal,
-    TotalRiskUnits,
-    OpenPositionCount,
-    LpBlockedSideCount,
 }
 
 pub fn set<T: soroban_sdk::IntoVal<Env, soroban_sdk::Val> + Clone>(
@@ -44,16 +43,21 @@ pub fn get<T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(env: &Env, key: &K
     env.storage().instance().get(key)
 }
 
-pub fn get_i128(env: &Env, key: &Key) -> i128 {
-    get(env, key).unwrap_or(0)
+pub fn ledger(env: &Env) -> Ledger {
+    get(env, &Key::Ledger)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
-pub fn get_u64(env: &Env, key: &Key) -> u64 {
-    get(env, key).unwrap_or(0)
+pub fn save_ledger(env: &Env, ledger: &Ledger) {
+    set(env, &Key::Ledger, ledger);
 }
 
-pub fn get_u32(env: &Env, key: &Key) -> u32 {
-    get(env, key).unwrap_or(0)
+pub fn is_paused(env: &Env) -> bool {
+    get(env, &Key::Paused).unwrap_or(false)
+}
+
+pub fn is_market_disabled(env: &Env, market: &Symbol) -> bool {
+    get(env, &Key::MarketDisabled(market.clone())).unwrap_or(false)
 }
 
 pub fn position(env: &Env, id: u64) -> Option<Position> {
@@ -73,11 +77,11 @@ pub fn remove_position(env: &Env, id: u64) {
     env.storage().persistent().remove(&Key::Position(id));
 }
 
-pub fn market(env: &Env, symbol: &Symbol) -> Option<MarketInfo> {
+pub fn market(env: &Env, symbol: &Symbol) -> Option<Market> {
     env.storage().persistent().get(&Key::Market(symbol.clone()))
 }
 
-pub fn save_market(env: &Env, symbol: &Symbol, market: &MarketInfo) {
+pub fn save_market(env: &Env, symbol: &Symbol, market: &Market) {
     let key = Key::Market(symbol.clone());
     env.storage().persistent().set(&key, market);
     env.storage()
@@ -86,21 +90,29 @@ pub fn save_market(env: &Env, symbol: &Symbol, market: &MarketInfo) {
 }
 
 pub fn config_manager(env: &Env) -> Address {
-    get(env, &Key::ConfigManager).unwrap()
+    get(env, &Key::ConfigManager)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
 pub fn oracle_router(env: &Env) -> Address {
-    get(env, &Key::OracleRouter).unwrap()
+    get(env, &Key::OracleRouter)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
 pub fn vault(env: &Env) -> Address {
-    get(env, &Key::Vault).unwrap()
+    get(env, &Key::Vault)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
 pub fn global_config(env: &Env) -> GlobalConfig {
-    get(env, &Key::GlobalConfig).unwrap()
+    get(env, &Key::GlobalConfig)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
 pub fn active_markets(env: &Env) -> Vec<Symbol> {
     get(env, &Key::ActiveMarkets).unwrap_or(Vec::new(env))
+}
+
+pub fn save_version(env: &Env, version: u32) {
+    set(env, &Key::Version, &version);
 }

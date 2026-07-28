@@ -2,8 +2,7 @@ use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
 use soroban_sdk::{contracttype, panic_with_error, vec, Address, Env, Symbol, Vec};
 
 use crate::errors::OracleRouterError;
-use crate::types::OracleConfig;
-use shared::OracleRound;
+use shared::{OracleConfig, OracleRound};
 
 /// Cached aggregated median price for a symbol. `fetched_at` bounds router
 /// cache duration; `oldest_source_update` ensures the cached median is not

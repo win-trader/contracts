@@ -5,7 +5,7 @@ use stellar_access::access_control::{
     set_admin as oz_set_admin,
 };
 
-use crate::{errors::ConfigManagerError, types::roles};
+use crate::errors::ConfigManagerError;
 
 pub use shared::bump_instance_ttl;
 
@@ -28,7 +28,7 @@ pub fn require_admin_with_auth(env: &Env, caller: &Address) {
 
 /// Build the admin role `Symbol` for this environment.
 pub fn admin_role_symbol(env: &Env) -> Symbol {
-    Symbol::new(env, roles::DEFAULT_ADMIN)
+    Symbol::new(env, shared::constants::ROLE_ADMIN)
 }
 
 /// Persist the admin address via OZ AccessControl. Constructor-only.
