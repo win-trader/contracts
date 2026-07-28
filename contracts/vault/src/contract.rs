@@ -236,6 +236,8 @@ impl VaultInterface for VaultContract {
             owner,
             assets,
             shares,
+            share_supply: supply + shares,
+            vault_nav: s.vault_nav + assets,
         }
         .publish(&env);
         SettlementResult {
@@ -307,6 +309,8 @@ impl VaultInterface for VaultContract {
             owner,
             shares,
             assets,
+            share_supply: supply - shares,
+            vault_nav: s.vault_nav - assets,
         }
         .publish(&env);
         SettlementResult {

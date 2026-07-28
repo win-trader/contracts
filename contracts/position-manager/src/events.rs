@@ -8,7 +8,7 @@
 
 use soroban_sdk::{contractevent, contracttype, Address, Symbol};
 
-use shared::{GlobalConfig, MarketConfig};
+use shared::{GlobalConfig, MarketConfig, PayerSide};
 
 /// Why a position left the book.
 #[contracttype]
@@ -39,6 +39,9 @@ pub struct PositionOpened {
     pub execution_budget: i128,
     pub price: i128,
     pub opening_fee: i128,
+    /// Zero means no trigger set.
+    pub take_profit: i128,
+    pub stop_loss: i128,
 }
 
 #[contractevent(topics = ["posinc"], data_format = "map")]
@@ -46,6 +49,8 @@ pub struct PositionOpened {
 pub struct PositionIncreased {
     #[topic]
     pub position_id: u64,
+    pub owner: Address,
+    pub market: Symbol,
     pub size_added: i128,
     pub base_added: i128,
     pub collateral_added: i128,
@@ -63,6 +68,8 @@ pub struct PositionIncreased {
 pub struct PositionDecreased {
     #[topic]
     pub position_id: u64,
+    pub owner: Address,
+    pub market: Symbol,
     pub size_removed: i128,
     pub price: i128,
     pub raw_pnl: i128,
@@ -99,6 +106,19 @@ pub struct PositionClosed {
     pub lp_funding_paid: i128,
     pub borrow_paid: i128,
     pub funding_received: i128,
+}
+
+/// Take-profit / stop-loss triggers changed on an open position. Zero means
+/// no trigger set.
+#[contractevent(topics = ["tpsl"], data_format = "map")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TpSlUpdated {
+    #[topic]
+    pub position_id: u64,
+    pub owner: Address,
+    pub market: Symbol,
+    pub take_profit: i128,
+    pub stop_loss: i128,
 }
 
 #[contractevent(topics = ["baddebt"], data_format = "vec")]
@@ -149,6 +169,27 @@ pub struct ExecutionBudgetWithdrawn {
     pub amount: i128,
 }
 
+/// Which collection routed revenue through the split (§13).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeeSource {
+    Opening,
+    Borrow,
+}
+
+/// A collected fee split into its revenue shares. `lp_share` stays in the
+/// vault as LP cash; the other two accrue to their claim totals.
+#[contractevent(topics = ["revsplit"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevenueSplit {
+    pub position_id: u64,
+    pub source: FeeSource,
+    pub collected: i128,
+    pub keeper_share: i128,
+    pub lp_share: i128,
+    pub protocol_share: i128,
+}
+
 #[contractevent(topics = ["protclaim"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolClaimed {
@@ -162,6 +203,29 @@ pub struct ProtocolClaimed {
 pub struct Recapitalized {
     pub contributor: Address,
     pub amount: i128,
+}
+
+/// Funding/borrow indices and current rates after a keeper checkpoint
+/// (`update_indices`). The off-chain fee projection and staleness monitors
+/// key on this event.
+#[contractevent(topics = ["mktchk"], data_format = "map")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketCheckpoint {
+    #[topic]
+    pub market: Symbol,
+    pub receiver_backed_index_long: i128,
+    pub receiver_backed_index_short: i128,
+    pub lp_backed_index_long: i128,
+    pub lp_backed_index_short: i128,
+    pub receiver_index_long: i128,
+    pub receiver_index_short: i128,
+    pub current_payer_side: PayerSide,
+    pub current_payer_rate: i128,
+    pub receiver_flow_per_second: i128,
+    pub lp_flow_per_second: i128,
+    pub borrow_index: i128,
+    pub current_borrow_rate: i128,
+    pub timestamp: u64,
 }
 
 #[contractevent(topics = ["cfgglobal"], data_format = "map")]

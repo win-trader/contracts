@@ -72,6 +72,12 @@ impl OracleRouter for OracleRouterContract {
         };
         storage::save_round(&env, &round);
         shared::bump_instance_ttl(&env);
+        events::RoundPublished {
+            id,
+            timestamp: round.timestamp,
+            previous_id,
+        }
+        .publish(&env);
         id
     }
 

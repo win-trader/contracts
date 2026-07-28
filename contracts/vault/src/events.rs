@@ -5,23 +5,28 @@ use soroban_sdk::{contractevent, Address};
 use shared::LpConfig;
 
 /// A queued deposit settled: `assets` entered the vault, `shares` minted to
-/// `owner` (§13.5).
-#[contractevent(topics = ["lpdep"], data_format = "vec")]
+/// `owner` (§13.5). `share_supply` and `vault_nav` are the post-settlement
+/// totals, so the indexer can track share pricing without a separate read.
+#[contractevent(topics = ["lpdep"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DepositSettled {
     pub owner: Address,
     pub assets: i128,
     pub shares: i128,
+    pub share_supply: i128,
+    pub vault_nav: i128,
 }
 
 /// A queued withdrawal settled: `shares` burned, `assets` paid to `owner`
-/// (§13.6).
-#[contractevent(topics = ["lpwd"], data_format = "vec")]
+/// (§13.6). `share_supply` and `vault_nav` are the post-settlement totals.
+#[contractevent(topics = ["lpwd"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalSettled {
     pub owner: Address,
     pub shares: i128,
     pub assets: i128,
+    pub share_supply: i128,
+    pub vault_nav: i128,
 }
 
 #[contractevent(topics = ["cfglp"], data_format = "map")]

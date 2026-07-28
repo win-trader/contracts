@@ -11,6 +11,7 @@ use shared::constants::BPS;
 use shared::{Market, Position};
 
 use crate::errors::PositionManagerError;
+use crate::events::{FeeSource, RevenueSplit};
 use crate::funding;
 use crate::ledger::{self, Ledger};
 use crate::{math, storage};
@@ -36,7 +37,13 @@ pub struct CollectedFees {
 
 /// §11.4 — split a collected opening or borrow fee between the risk-keeper
 /// reserve, protocol claimable revenue, and (implicitly) residual LP cash.
-pub fn split_revenue(env: &Env, ledger: &mut Ledger, collected: i128) {
+pub fn split_revenue(
+    env: &Env,
+    ledger: &mut Ledger,
+    collected: i128,
+    source: FeeSource,
+    position_id: u64,
+) {
     if collected == 0 {
         return;
     }
@@ -51,6 +58,15 @@ pub fn split_revenue(env: &Env, ledger: &mut Ledger, collected: i128) {
     let protocol = math::sub(env, math::sub(env, collected, keeper), lp);
     ledger.risk_keeper_reserve_total = math::add(env, ledger.risk_keeper_reserve_total, keeper);
     ledger.protocol_claimable_total = math::add(env, ledger.protocol_claimable_total, protocol);
+    RevenueSplit {
+        position_id,
+        source,
+        collected,
+        keeper_share: keeper,
+        lp_share: lp,
+        protocol_share: protocol,
+    }
+    .publish(env);
 }
 
 /// §11.4 — capitalize all accrued amounts plus `negative_pnl` against the
@@ -104,7 +120,7 @@ pub fn capitalize(
         )
     };
 
-    split_revenue(env, ledger, borrow_collected);
+    split_revenue(env, ledger, borrow_collected, FeeSource::Borrow, position.id);
     funding::reset_debts(env, ledger, position, market);
 
     let guaranteed_and_loss = math::add(
@@ -177,5 +193,5 @@ pub fn apply_opening_fee(
     if collected != fee {
         panic_with_error!(env, PositionManagerError::InsufficientCollateral);
     }
-    split_revenue(env, ledger, collected);
+    split_revenue(env, ledger, collected, FeeSource::Opening, position.id);
 }

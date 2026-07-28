@@ -30,6 +30,16 @@ pub struct OracleSourcesUpdate {
     pub sources: Vec<Address>,
 }
 
+/// Emitted by `publish_round` — the push signal for anything waiting on a
+/// canonical round (the FIFO LP request queue in particular).
+#[contractevent(topics = ["roundpub"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoundPublished {
+    pub id: u64,
+    pub timestamp: u64,
+    pub previous_id: u64,
+}
+
 // Upgrade events live in `shared::events` — the
 // `TimelockedUpgradeable` trait's default methods emit them, so no
 // per-contract definition is needed here.

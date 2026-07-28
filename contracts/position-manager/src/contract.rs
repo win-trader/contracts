@@ -227,6 +227,8 @@ impl PositionManager for PositionManagerContract {
             execution_budget,
             price,
             opening_fee,
+            take_profit,
+            stop_loss,
         }
         .publish(&env);
         id
@@ -322,6 +324,8 @@ impl PositionManager for PositionManagerContract {
         storage::save_ledger(&env, &ledger);
         events::PositionIncreased {
             position_id,
+            owner: position.owner.clone(),
+            market: position.market.clone(),
             size_added,
             base_added: base,
             collateral_added,
@@ -380,6 +384,8 @@ impl PositionManager for PositionManagerContract {
         } else {
             events::PositionDecreased {
                 position_id,
+                owner: summary.owner.clone(),
+                market: summary.market.clone(),
                 size_removed,
                 price,
                 raw_pnl: summary.raw_pnl,
@@ -588,6 +594,14 @@ impl PositionManager for PositionManagerContract {
         position.take_profit = take_profit;
         position.stop_loss = stop_loss;
         storage::save_position(&env, &position);
+        events::TpSlUpdated {
+            position_id,
+            owner: position.owner.clone(),
+            market: position.market.clone(),
+            take_profit,
+            stop_loss,
+        }
+        .publish(&env);
     }
 
     fn fund_execution_budget(env: Env, position_id: u64, amount: i128) {
@@ -652,8 +666,26 @@ impl PositionManager for PositionManagerContract {
         let mut market = load_market(&env, &market_symbol);
         checkpoint::checkpoint_market(&env, &mut market, now);
         storage::save_market(&env, &market_symbol, &market);
-        risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
+        let physical = ledger::physical_cash(&env);
+        risk::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
+        events::MarketCheckpoint {
+            market: market_symbol,
+            receiver_backed_index_long: market.receiver_backed_index_long,
+            receiver_backed_index_short: market.receiver_backed_index_short,
+            lp_backed_index_long: market.lp_backed_index_long,
+            lp_backed_index_short: market.lp_backed_index_short,
+            receiver_index_long: market.receiver_index_long,
+            receiver_index_short: market.receiver_index_short,
+            current_payer_side: market.current_payer_side,
+            current_payer_rate: market.current_payer_rate,
+            receiver_flow_per_second: market.receiver_flow_per_second,
+            lp_flow_per_second: market.lp_flow_per_second,
+            borrow_index: ledger.borrow_index,
+            current_borrow_rate: ledger.current_borrow_rate,
+            timestamp: now,
+        }
+        .publish(&env);
     }
 
     fn set_global_config(env: Env, caller: Address, config: GlobalConfig) {
