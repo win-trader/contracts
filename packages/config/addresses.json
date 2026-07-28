@@ -56,44 +56,44 @@
     ],
     "contracts": {
       "vault": {
-        "address": "CDD5XIW6WHZBMLOC32JQVGR7VY25JZMZ63N22EVHQ2MMOGQLDLXWZB6E",
-        "startLedger": 3711992
+        "address": "CCUMUMBK3HIW4RQN46DJUCG2PDCVBHVKZRW6FNMODESXCBSMIQLLJDR3",
+        "startLedger": 3852252
       },
       "requestRouter": {
-        "address": "",
-        "startLedger": 0
+        "address": "CAIWHUJ2VLO2UFRAVJM5QSTO4AV6VXZ4WSXS2YBZVX7OZXQEQKQWESDG",
+        "startLedger": 3852254
       },
       "positionManager": {
-        "address": "CCAOHCVCVK6NXACJ5DMUT2NJVIVD6SGNLND5ASWS6QJ64LDMT5ZICVGU",
-        "startLedger": 3711990
+        "address": "CD6DD6PAFVCRKVIQRFNAWG74D6ADFRG6GQRWVMK47JNBZSANG6FCXQ5Q",
+        "startLedger": 3852249
       },
       "configManager": {
-        "address": "CCVRVMCVKSDEY67IXZRMLCSTLUFH55RHCPKKGWDVTABSCWRRQQUWY54C",
-        "startLedger": 3711979
+        "address": "CCW7DZCASFYAR2OJ3XNFDLDKTWT7KZCE3CSGL7JW3WXUX353HQKKCWII",
+        "startLedger": 3852238
       },
       "oracleRouter": {
-        "address": "CBKZ532SQR2S2MBQZ6VPRJLOSYWGS4CVJ3BSFECJ3RTULST44E2FTLCF",
-        "startLedger": 3711981
+        "address": "CCDXMM5RRKEI4EUYSAFS2MEYVBGMKJQVJDYRLXYOWXQM7ZXRMBLAQTUD",
+        "startLedger": 3852241
       },
       "oracle": {
-        "address": "CAERTCV2VGPRTQ6C4ZCJ7XK5OQD7YKXUA4WQ4NWO7OYTVOZ57SFUX2BH",
-        "startLedger": 3711982
+        "address": "CARWDO62EVSWGHAR2LT5ELRRN2TNPZT2BYXY4BDJXIQDQJHYA2CMGL7C",
+        "startLedger": 3852244
       },
       "binanceOracle": {
-        "address": "CAIUPVK4E6VQD46VUF7ENRXHG2YCYKXXBABFVJWZI4R5AH4LHSU66QCP",
-        "startLedger": 3712018
+        "address": "CBHEHY3DGJP7QYHHKNV5EYP7FLD3UAJCRJUAMFQBTAPPV5SYLTKXHIGQ",
+        "startLedger": 3852273
       },
       "kucoinOracle": {
-        "address": "CBMD5P4N7TDSP262C26WLBDVJ3KKOBS32EK44WBXXUWC6CERVJBYCM5H",
-        "startLedger": 3712020
+        "address": "CB2ARXR2YA62LBN777TGQAPYPHZYZYJQ2GZG6DNCA5KKNH7KYO4FW4HZ",
+        "startLedger": 3852274
       },
       "mockToken": {
-        "address": "CBKRNYRXOQGNKJW5LYYUWIRBPGSOWWRDX7S3JRC447XOSWE4DRWJKZ62",
-        "startLedger": 3711986
+        "address": "CDPU7SQHBOFYESE3UL4N45ULTFCEIVGCRHMEBGTWQQQN52CXO5NP327S",
+        "startLedger": 3852246
       },
       "oracle2": {
-        "address": "CBBVDBL6ARUXVAHHAHKX6RYTTQRDG6SRC3PHZGVKQT4SB7RTZNMIG4ID",
-        "startLedger": 3711984
+        "address": "CBC6JZUGCNSH7FD6NLIJP6N6YH6GPO6I5YORYGLXYOYWNEMV7BZ27W4E",
+        "startLedger": 3852245
       }
     }
   },
