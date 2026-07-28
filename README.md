@@ -13,7 +13,7 @@ This is one of four repos:
 
 ## Layout
 
-- `contracts/` — Rust workspace: `vault`, `request-router`, `position-manager`, `config-manager`, `oracle-router`, `oracle`, `shared`, `interfaces`
+- `contracts/` — Rust workspace: protocol contracts plus one `shared` crate for constants, types, events, and contract interfaces
 - `mocks/` — `mock-token`, `mock-oracle` (test-only contracts)
 - `packages/bindings/` — `@win-trader/bindings`: generated TS clients (one per contract), produced by `make bind`
 - `packages/protocol-math/` — `@win-trader/protocol-math`: pure TS mirror of on-chain math (quotes, fees, PnL, liquidation price), no network calls

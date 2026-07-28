@@ -1,12 +1,12 @@
 #![no_std]
 
-use interfaces::{
+use shared::constants::{ROLE_PAUSER, ROLE_UPGRADER};
+use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
+use shared::{
     ConfigManagerClient, LpRequest, LpRequestKind, LpRequestStatus, MigrationData,
     OracleRouterClient, RequestRouter, SettlementResult, SettlementStatus, TimelockedUpgradeable,
     UpgradeFailure, VaultClient,
 };
-use shared::constants::{ROLE_PAUSER, ROLE_UPGRADER};
-use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contracterror, contractimpl, contracttype, panic_with_error,
@@ -95,7 +95,7 @@ fn transfer(env: &Env, token: &Address, from: &Address, to: &Address, amount: i1
     TokenClient::new(env, token).transfer(from, to, &amount);
 }
 
-fn latest_valid_round(env: &Env) -> interfaces::OracleRound {
+fn latest_valid_round(env: &Env) -> shared::OracleRound {
     let client = OracleRouterClient::new(env, &oracle(env));
     let latest = client.latest_round_id();
     if latest == 0 {

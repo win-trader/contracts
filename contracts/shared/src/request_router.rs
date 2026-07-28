@@ -1,3 +1,5 @@
+//! Shared RequestRouter contract interface.
+
 use soroban_sdk::{contractclient, Address, BytesN, Env};
 
 use crate::types::{LpRequest, SettlementResult};

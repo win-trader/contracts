@@ -1,5 +1,5 @@
-use interfaces::{GlobalConfig, MarketInfo, Position};
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
+use shared::{GlobalConfig, MarketInfo, Position};
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 #[contracttype]

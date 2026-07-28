@@ -30,6 +30,6 @@ pub struct OracleSourcesUpdate {
     pub sources: Vec<Address>,
 }
 
-// Upgrade events live in `interfaces::events` — the
+// Upgrade events live in `shared::events` — the
 // `TimelockedUpgradeable` trait's default methods emit them, so no
 // per-contract definition is needed here.

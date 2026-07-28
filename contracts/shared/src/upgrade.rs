@@ -1,4 +1,4 @@
-//! `TimelockedUpgradeable` — the propose / execute / cancel flow used by
+//! Shared `TimelockedUpgradeable` propose / execute / cancel flow used by
 //! every protocol contract. Mirrors OZ's `Upgradeable` + `UpgradeableInternal`
 //! split: three explicit auth hooks (proposer/executor/canceller) plus a
 //! `_timelock_seconds` hook supply the contract-specific bits; the default

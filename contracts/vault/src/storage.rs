@@ -1,4 +1,4 @@
-use interfaces::LpConfig;
+use shared::LpConfig;
 use soroban_sdk::{contracttype, Address, Env};
 
 #[contracttype]

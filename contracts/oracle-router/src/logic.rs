@@ -1,9 +1,9 @@
-use interfaces::OracleClient;
 use shared::bump_instance_ttl;
 use shared::constants::{
     BPS, MAX_DEVIATION_BPS_CEILING, MAX_ORACLE_SOURCES, MIN_REQUIRED_SOURCES_FLOOR, PRICE_DECIMALS,
     ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER,
 };
+use shared::OracleClient;
 use soroban_sdk::{panic_with_error, Address, Env, Symbol, Vec};
 
 use crate::errors::OracleRouterError;
@@ -45,7 +45,7 @@ pub fn require_pauser_for_upgrade(env: &Env, caller: &Address) {
 
 /// Bounds-validation surface for OracleConfig, mirroring the `Validate`
 /// pattern used in `config-manager/src/validate.rs`. Implemented locally —
-/// orphan rule prevents adding `impl` blocks on `interfaces::OracleConfig`
+/// orphan rule prevents adding `impl` blocks on `shared::OracleConfig`
 /// directly.
 pub trait Validate {
     /// Panics with `OracleRouterError::InvalidConfig` on failure; returns

@@ -1,3 +1,5 @@
+//! Shared OracleRouter contract interface.
+
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
 use crate::types::{OracleConfig, OracleRound};

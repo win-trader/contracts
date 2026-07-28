@@ -10,5 +10,4 @@ doctest = false
 [dependencies]
 soroban-sdk = { workspace = true }
 shared = { workspace = true }
-interfaces = { workspace = true }
 stellar-contract-utils = { workspace = true }

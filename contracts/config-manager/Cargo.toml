@@ -16,7 +16,6 @@ stellar-access = { workspace = true }
 stellar-contract-utils = { workspace = true }
 stellar-macros = { workspace = true }
 shared = { workspace = true }
-interfaces = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -1,9 +1,9 @@
-use interfaces::{
+use shared::constants::{BPS, ROLE_ADMIN, ROLE_PAUSER, ROLE_UPGRADER};
+use shared::{
     AccountingSnapshot, ConfigManagerClient, LpConfig, MigrationData, OracleRound,
     PositionManagerClient, SettlementResult, SettlementStatus, TimelockedUpgradeable,
     UpgradeFailure, VaultInterface,
 };
-use shared::constants::{BPS, ROLE_ADMIN, ROLE_PAUSER, ROLE_UPGRADER};
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, token::Client as TokenClient, Address, BytesN, Env,
     MuxedAddress, String,

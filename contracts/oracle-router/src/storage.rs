@@ -3,7 +3,7 @@ use soroban_sdk::{contracttype, panic_with_error, vec, Address, Env, Symbol, Vec
 
 use crate::errors::OracleRouterError;
 use crate::types::OracleConfig;
-use interfaces::OracleRound;
+use shared::OracleRound;
 
 /// Cached aggregated median price for a symbol. `fetched_at` bounds router
 /// cache duration; `oldest_source_update` ensures the cached median is not
@@ -247,5 +247,5 @@ pub fn save_version(env: &Env, version: u32) {
     env.storage().instance().set(&StorageKey::Version, &version);
 }
 
-// Pending upgrade storage now lives in `interfaces::upgrade` under a shared
+// Pending upgrade storage lives in `shared::upgrade` under a common
 // Symbol key — used by the `TimelockedUpgradeable` trait's default methods.

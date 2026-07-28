@@ -1,9 +1,9 @@
-use interfaces::{
+use shared::bump_instance_ttl;
+use shared::constants::MAX_ORACLE_SOURCES;
+use shared::{
     ConfigManagerClient, MigrationData, OracleConfig, OracleRound, OracleRouter,
     PositionManagerClient, RoundPrice, TimelockedUpgradeable, UpgradeFailure,
 };
-use shared::bump_instance_ttl;
-use shared::constants::MAX_ORACLE_SOURCES;
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
 

@@ -1,10 +1,31 @@
 #![no_std]
 
-use soroban_sdk::{contractclient, Address, Env, Symbol};
-
+pub mod config_manager;
 pub mod constants;
+pub mod events;
+pub mod oracle;
+pub mod oracle_router;
+pub mod position_manager;
+pub mod request_router;
+pub mod types;
+pub mod upgrade;
+pub mod vault;
 
 use constants::{INSTANCE_BUMP, INSTANCE_THRESHOLD};
+use soroban_sdk::{contractclient, Address, Env, Symbol};
+
+pub use config_manager::{ConfigManager, ConfigManagerClient};
+pub use oracle::{Oracle, OracleClient};
+pub use oracle_router::{OracleRouter, OracleRouterClient};
+pub use position_manager::{PositionManager, PositionManagerClient};
+pub use request_router::{RequestRouter, RequestRouterClient};
+pub use types::{
+    AccountingSnapshot, GlobalConfig, LpConfig, LpRequest, LpRequestKind, LpRequestStatus,
+    MarketConfig, MarketInfo, MarketSide, MigrationData, OracleConfig, OracleRound, PendingUpgrade,
+    Position, RiskState, RoundPrice, SettlementResult, SettlementStatus,
+};
+pub use upgrade::{TimelockedUpgradeable, UpgradeFailure};
+pub use vault::{VaultClient, VaultInterface};
 
 /// Extend instance storage TTL to prevent archival.
 pub fn bump_instance_ttl(env: &Env) {
@@ -16,8 +37,8 @@ pub fn bump_instance_ttl(env: &Env) {
 // ---------------------------------------------------------------------------
 // Access control — cross-contract role checking via ConfigManager
 //
-// Uses a minimal contractclient trait (NOT the full config-manager crate) so
-// shared has zero dependency on any protocol contract, preventing circular deps.
+// Uses a minimal client surface to avoid coupling role checks to the full
+// ConfigManager interface.
 // ---------------------------------------------------------------------------
 
 /// Minimal ConfigManager interface — only the has_role selector is needed.

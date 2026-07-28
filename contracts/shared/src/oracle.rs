@@ -1,3 +1,5 @@
+//! Shared oracle contract interface.
+
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol};
 
 /// SEP-40 price oracle interface.

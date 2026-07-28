@@ -1,11 +1,11 @@
-use interfaces::{
-    AccountingSnapshot, ConfigManagerClient, GlobalConfig, MarketConfig, MarketInfo, MarketSide,
-    MigrationData, OracleRound, OracleRouterClient, Position, PositionManager, RiskState,
-    TimelockedUpgradeable, UpgradeFailure, VaultClient,
-};
 use shared::constants::{
     BPS, INDEX_PRECISION, PRECISION, ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER,
     SECONDS_PER_DAY,
+};
+use shared::{
+    AccountingSnapshot, ConfigManagerClient, GlobalConfig, MarketConfig, MarketInfo, MarketSide,
+    MigrationData, OracleRound, OracleRouterClient, Position, PositionManager, RiskState,
+    TimelockedUpgradeable, UpgradeFailure, VaultClient,
 };
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};

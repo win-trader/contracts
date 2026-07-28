@@ -5,7 +5,7 @@ use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 #[derive(Clone, Debug)]
 pub struct OracleConfig {
     /// Maximum allowed spread between oracle sources in basis points
-    /// (e.g., 100 = 1%). Bounded at `shared::constants::MAX_DEVIATION_BPS_CEILING`.
+    /// (e.g., 100 = 1%). Bounded at `crate::constants::MAX_DEVIATION_BPS_CEILING`.
     pub max_deviation_bps: i128,
     /// Maximum age of an external SEP-40 price feed before it is rejected
     /// as stale (in seconds).
@@ -17,8 +17,8 @@ pub struct OracleConfig {
     pub cache_duration: u64,
     /// Minimum number of source responses that must agree within
     /// `max_deviation_bps` for OracleRouter to return a price. Floored at
-    /// `shared::constants::MIN_REQUIRED_SOURCES_FLOOR`, ceilinged at
-    /// `shared::constants::MAX_ORACLE_SOURCES`.
+    /// `crate::constants::MIN_REQUIRED_SOURCES_FLOOR`, ceilinged at
+    /// `crate::constants::MAX_ORACLE_SOURCES`.
     pub min_required_sources: u32,
 }
 
@@ -221,7 +221,7 @@ pub struct MigrationData {
 /// (cleared atomically on a successful install), or cleared by `cancel_upgrade`.
 /// Single shape across every protocol contract. Contracts store it at
 /// the shared `pending_upgrade` Symbol key in their own instance storage (see
-/// `interfaces::upgrade::pending_upgrade_key`). `upgrade` refuses to install
+/// `crate::upgrade::pending_upgrade_key`). `upgrade` refuses to install
 /// unless `pending.wasm_hash` matches the supplied hash and `now >= eta`.
 #[contracttype]
 #[derive(Clone, Debug)]

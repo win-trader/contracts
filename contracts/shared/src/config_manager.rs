@@ -1,3 +1,5 @@
+//! Shared ConfigManager contract interface.
+
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol};
 
 /// Protocol role authority and upgrade-timelock owner.

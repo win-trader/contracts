@@ -12,5 +12,5 @@ pub mod tests;
 
 pub use contract::OracleRouterContract;
 pub use errors::OracleRouterError;
-pub use interfaces::{MigrationData, OracleRouterClient};
+pub use shared::{MigrationData, OracleRouterClient};
 pub use types::OracleConfig;

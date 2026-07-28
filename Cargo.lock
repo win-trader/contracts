@@ -250,7 +250,6 @@ dependencies = [
 name = "config-manager"
 version = "0.1.0"
 dependencies = [
- "interfaces",
  "shared",
  "soroban-sdk",
  "stellar-access",
@@ -793,15 +792,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 
 [[package]]
-name = "interfaces"
-version = "0.1.0"
-dependencies = [
- "shared",
- "soroban-sdk",
- "stellar-contract-utils",
-]
-
-[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -953,7 +943,6 @@ name = "oracle"
 version = "0.1.0"
 dependencies = [
  "config-manager",
- "interfaces",
  "shared",
  "soroban-sdk",
  "stellar-contract-utils",
@@ -965,7 +954,6 @@ name = "oracle-router"
 version = "0.1.0"
 dependencies = [
  "config-manager",
- "interfaces",
  "mock-oracle",
  "shared",
  "soroban-sdk",
@@ -1007,7 +995,6 @@ name = "position-manager"
 version = "0.1.0"
 dependencies = [
  "config-manager",
- "interfaces",
  "mock-oracle",
  "mock-token",
  "oracle-router",
@@ -1125,7 +1112,6 @@ dependencies = [
 name = "request-router"
 version = "0.1.0"
 dependencies = [
- "interfaces",
  "shared",
  "soroban-sdk",
  "stellar-contract-utils",
@@ -1311,6 +1297,7 @@ name = "shared"
 version = "0.1.0"
 dependencies = [
  "soroban-sdk",
+ "stellar-contract-utils",
 ]
 
 [[package]]
@@ -1735,7 +1722,6 @@ name = "vault"
 version = "0.1.0"
 dependencies = [
  "config-manager",
- "interfaces",
  "mock-token",
  "shared",
  "soroban-sdk",

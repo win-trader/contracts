@@ -6,4 +6,4 @@ mod storage;
 
 pub use contract::OracleContract;
 pub use errors::OracleError;
-pub use interfaces::{MigrationData, Oracle, OracleClient};
+pub use shared::{MigrationData, Oracle, OracleClient};

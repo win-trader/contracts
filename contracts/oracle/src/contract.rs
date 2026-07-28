@@ -1,4 +1,4 @@
-use interfaces::{MigrationData, Oracle, TimelockedUpgradeable, UpgradeFailure};
+use shared::{MigrationData, Oracle, TimelockedUpgradeable, UpgradeFailure};
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
 
@@ -142,7 +142,7 @@ impl TimelockedUpgradeable for OracleContract {
     }
     fn _timelock_seconds(env: &Env) -> u64 {
         let config_mgr = storage::get_config_manager(env);
-        interfaces::ConfigManagerClient::new(env, &config_mgr).get_upgrade_timelock()
+        shared::ConfigManagerClient::new(env, &config_mgr).get_upgrade_timelock()
     }
     fn _panic_with_upgrade_error(env: &Env, err: UpgradeFailure) -> ! {
         match err {

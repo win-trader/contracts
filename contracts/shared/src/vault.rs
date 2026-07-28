@@ -1,3 +1,5 @@
+//! Shared vault contract interface.
+
 use soroban_sdk::{contractclient, Address, BytesN, Env};
 
 use crate::types::{AccountingSnapshot, LpConfig, OracleRound, SettlementResult};

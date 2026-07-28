@@ -242,7 +242,7 @@ export interface MigrationData {
  * (cleared atomically on a successful install), or cleared by `cancel_upgrade`.
  * Single shape across every protocol contract. Contracts store it at
  * the shared `pending_upgrade` Symbol key in their own instance storage (see
- * `interfaces::upgrade::pending_upgrade_key`). `upgrade` refuses to install
+ * `shared::upgrade::pending_upgrade_key`). `upgrade` refuses to install
  * unless `pending.wasm_hash` matches the supplied hash and `now >= eta`.
  */
 export interface PendingUpgrade {

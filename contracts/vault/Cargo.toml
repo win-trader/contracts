@@ -13,7 +13,6 @@ testutils = ["soroban-sdk/testutils"]
 [dependencies]
 soroban-sdk = { workspace = true }
 shared = { workspace = true }
-interfaces = { workspace = true }
 stellar-tokens = { workspace = true }
 stellar-contract-utils = { workspace = true }
 stellar-macros = { workspace = true }

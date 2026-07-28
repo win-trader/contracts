@@ -9,4 +9,4 @@ mod types;
 
 pub use contract::ConfigManagerContract;
 pub use errors::ConfigManagerError;
-pub use interfaces::{ConfigManager, ConfigManagerClient, MigrationData};
+pub use shared::{ConfigManager, ConfigManagerClient, MigrationData};
