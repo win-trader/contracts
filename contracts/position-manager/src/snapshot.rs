@@ -104,7 +104,7 @@ pub fn build_snapshot(
         );
 
         if mutate_risk {
-            risk::evaluate_market_risk(env, ledger, &mut market, price, equity);
+            risk::evaluate_market_risk(env, ledger, &symbol, &mut market, price, equity);
             storage::save_market(env, &symbol, &market);
         } else {
             market.long.risk_state = risk::risk_state_for(

@@ -149,7 +149,7 @@ pub fn settle_close(
     // evaluation and hard-cap factor below observe the same instant.
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
-    risk::evaluate_market_risk(env, ledger, &mut market, price, equity);
+    risk::evaluate_market_risk(env, ledger, &position.market, &mut market, price, equity);
 
     // §12.2 steps 4-6: removed exposure, raw PnL, emergency payout factor.
     let removed = removed_exposure(env, &position, size_removed);
@@ -333,7 +333,7 @@ pub fn settle_close(
     funding::recompute_market_flow(env, ledger, &mut market);
     let physical_after = ledger::physical_cash(env);
     let equity_after = ledger.cash_lp_equity(env, physical_after);
-    risk::evaluate_market_risk(env, ledger, &mut market, price, equity_after);
+    risk::evaluate_market_risk(env, ledger, &position.market, &mut market, price, equity_after);
 
     // §8.3 — with no open positions and no receiver flow, aggregate
     // conservation makes every market size zero: release the unassigned

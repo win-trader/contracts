@@ -8,7 +8,7 @@
 
 use soroban_sdk::{contractevent, contracttype, Address, Symbol};
 
-use shared::{GlobalConfig, MarketConfig, PayerSide};
+use shared::{GlobalConfig, MarketConfig, PayerSide, RiskState};
 
 /// Why a position left the book.
 #[contracttype]
@@ -58,6 +58,12 @@ pub struct PositionIncreased {
     pub opening_fee: i128,
     /// Stored collateral after fees and capitalization.
     pub stored_collateral: i128,
+    /// Accrued amounts the increase capitalized before adding new size —
+    /// the same decomposition the decrease/close events carry.
+    pub receiver_funding_paid: i128,
+    pub lp_funding_paid: i128,
+    pub borrow_paid: i128,
+    pub funding_received: i128,
 }
 
 /// A partial close (§12.2). Fee fields are the amounts actually collected in
@@ -106,6 +112,9 @@ pub struct PositionClosed {
     pub lp_funding_paid: i128,
     pub borrow_paid: i128,
     pub funding_received: i128,
+    /// Negative price PnL collected from collateral; with `bad_debt` this
+    /// disambiguates the loss-vs-funding split of the waterfall.
+    pub loss_collected: i128,
 }
 
 /// Take-profit / stop-loss triggers changed on an open position. Zero means
@@ -207,7 +216,9 @@ pub struct Recapitalized {
 
 /// Funding/borrow indices and current rates after a keeper checkpoint
 /// (`update_indices`). The off-chain fee projection and staleness monitors
-/// key on this event.
+/// key on this event. Values are exact at `timestamp`; position actions
+/// between keeper runs change flows and rates without emitting one, so
+/// projections carry keeper-cadence staleness.
 #[contractevent(topics = ["mktchk"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketCheckpoint {
@@ -240,6 +251,16 @@ pub struct MarketConfigUpdated {
     #[topic]
     pub market: Symbol,
     pub config: MarketConfig,
+}
+
+/// A side entered or left a restricted risk state (§14). Emitted only on
+/// actual transitions — the keeper's push signal for ADL/hard-cap duty.
+#[contractevent(topics = ["riskstate"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RiskStateChanged {
+    pub market: Symbol,
+    pub is_long: bool,
+    pub state: RiskState,
 }
 
 #[contractevent(topics = ["mktstatus"], data_format = "vec")]

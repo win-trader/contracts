@@ -78,6 +78,7 @@ fn emit_close(env: &Env, summary: &CloseSummary, reason: CloseReason) {
         lp_funding_paid: summary.fees.lp_funding_paid,
         borrow_paid: summary.fees.borrow_paid,
         funding_received: summary.fees.receiver_credit,
+        loss_collected: summary.fees.loss_collected,
     }
     .publish(env);
 }
@@ -196,7 +197,7 @@ impl PositionManager for PositionManagerContract {
         }
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &mut market, price, equity);
+        risk::evaluate_market_risk(&env, &mut ledger, &market_symbol, &mut market, price, equity);
         if market.side(is_long).risk_state != RiskState::Normal {
             panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
         }
@@ -273,7 +274,8 @@ impl PositionManager for PositionManagerContract {
                 collateral_added,
             );
         }
-        if fees::capitalize(&env, &mut ledger, &mut position, &mut market, 0).unpaid > 0 {
+        let collected = fees::capitalize(&env, &mut ledger, &mut position, &mut market, 0);
+        if collected.unpaid > 0 {
             panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
         }
         let base = math::base_added(&env, size_added, price);
@@ -283,7 +285,7 @@ impl PositionManager for PositionManagerContract {
         fees::apply_opening_fee(&env, &mut ledger, &mut position, &mut market, opening_fee);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &mut market, price, equity);
+        risk::evaluate_market_risk(&env, &mut ledger, &position.market, &mut market, price, equity);
         if size_added > 0 && market.side(position.is_long).risk_state != RiskState::Normal {
             panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
         }
@@ -332,6 +334,10 @@ impl PositionManager for PositionManagerContract {
             price,
             opening_fee,
             stored_collateral: position.stored_collateral,
+            receiver_funding_paid: collected.receiver_funding_paid,
+            lp_funding_paid: collected.lp_funding_paid,
+            borrow_paid: collected.borrow_paid,
+            funding_received: collected.receiver_credit,
         }
         .publish(&env);
     }
@@ -414,7 +420,7 @@ impl PositionManager for PositionManagerContract {
         let price = snapshot::authenticated_price(&env, &position.market);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &mut market, price, equity);
+        risk::evaluate_market_risk(&env, &mut ledger, &position.market, &mut market, price, equity);
         let pending = funding::pending_fees(&env, &ledger, &position, &market);
         let payable = settle::payable_price_pnl(
             &env,
@@ -495,7 +501,7 @@ impl PositionManager for PositionManagerContract {
         let price = snapshot::authenticated_price(&env, &position.market);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &mut market, price, equity);
+        risk::evaluate_market_risk(&env, &mut ledger, &position.market, &mut market, price, equity);
         let side_state = market.side(position.is_long).risk_state;
         if side_state != RiskState::Adl && side_state != RiskState::HardCap {
             panic_with_error!(&env, PositionManagerError::RiskStateBlocked);

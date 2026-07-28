@@ -7,6 +7,7 @@ use shared::constants::BPS;
 use shared::{Market, MarketConfig, RiskState};
 
 use crate::errors::PositionManagerError;
+use crate::events::RiskStateChanged;
 use crate::ledger::Ledger;
 use crate::{math, storage};
 
@@ -113,10 +114,12 @@ pub fn update_blocked_count(ledger: &mut Ledger, old: RiskState, new: RiskState)
 }
 
 /// §14 — evaluate both sides' risk states at `price` and apply the
-/// transitions to the market and the blocked-side count.
+/// transitions to the market and the blocked-side count, emitting an event
+/// per side that actually changed state.
 pub fn evaluate_market_risk(
     env: &Env,
     ledger: &mut Ledger,
+    symbol: &Symbol,
     market: &mut Market,
     price: i128,
     equity: i128,
@@ -157,6 +160,22 @@ pub fn evaluate_market_risk(
     );
     update_blocked_count(ledger, market.long.risk_state, long_new);
     update_blocked_count(ledger, market.short.risk_state, short_new);
+    if long_new != market.long.risk_state {
+        RiskStateChanged {
+            market: symbol.clone(),
+            is_long: true,
+            state: long_new,
+        }
+        .publish(env);
+    }
+    if short_new != market.short.risk_state {
+        RiskStateChanged {
+            market: symbol.clone(),
+            is_long: false,
+            state: short_new,
+        }
+        .publish(env);
+    }
     market.long.risk_state = long_new;
     market.short.risk_state = short_new;
 }

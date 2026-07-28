@@ -414,7 +414,16 @@ Each keeper checkpoint must emit the updated indices and current rates.
 Each revenue split must emit the collected amount and each share.
 Each LP settlement event must carry the post-settlement supply and NAV.
 Each canonical round publication must emit the round identifier.
-An off-chain consumer must be able to rebuild this table from the events.
+Each risk-state transition must emit the market, the side, and the new
+state.
+
+An off-chain consumer must be able to rebuild each row of this table from
+the events.
+Flow and rate values are exact at each checkpoint event.
+A position action can change flows and rates between checkpoint events
+without an event.
+A consumer must treat accrual projections between checkpoint events as
+estimates with keeper-cadence staleness.
 
 ## 7. Price exposure and PnL
 
