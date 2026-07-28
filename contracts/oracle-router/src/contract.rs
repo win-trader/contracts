@@ -50,7 +50,9 @@ impl OracleRouter for OracleRouterContract {
         let mut i = 0u32;
         while i < markets.len() {
             let symbol = markets.get(i).unwrap();
-            let price = logic::fetch_and_validate_price(&env, symbol.clone());
+            // Fresh aggregation, never the cache: round prices are
+            // observations at the round timestamp (§13.2 cutoff semantics).
+            let price = logic::fetch_fresh_price(&env, symbol.clone());
             prices.push_back(RoundPrice { symbol, price });
             i += 1;
         }

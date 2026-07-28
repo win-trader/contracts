@@ -1192,6 +1192,10 @@ Do not use a separate NAV price.
 For LP settlement, get one synchronized oracle snapshot.
 The snapshot must contain each active-market price.
 The snapshot must have a unique monotonic round identifier.
+Each round price must be a fresh source aggregation at the round timestamp.
+A round must not contain a cached observation.
+A cached observation can predate the request cutoff while the round
+timestamp passes it.
 
 Calculate NAV in the vault.
 Use the authenticated prices and stored aggregates.

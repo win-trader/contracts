@@ -2868,6 +2868,34 @@ fn r16_receiver_liability_floors_with_carried_remainder() {
     );
 }
 
+/// §13.2 cutoff semantics: a canonical round's prices are observations AT
+/// the round timestamp — publish_round must aggregate fresh from sources,
+/// never serve the router cache. Otherwise the permissionless get_price
+/// cache write lets anyone pin a pre-cutoff observation into a post-cutoff
+/// round and defeat the delayed-LP-settlement guarantee.
+#[test]
+fn i13_2_round_prices_aggregate_fresh_never_cached() {
+    let p = Protocol::new();
+    // seed_lp publishes a round at 100 UNIT, which also writes the router
+    // cache at that price.
+    p.seed_lp();
+
+    // Sources move 5s later — well inside the 30s cache window, so a cached
+    // fetch would still return the old price.
+    p.advance(5);
+    p.set_price(120 * UNIT);
+    let id = p.publish_round();
+
+    let router = oracle_router::Client::new(&p.env, &p.oracle_router_id);
+    let round = router.get_round(&id);
+    assert_eq!(round.timestamp, p.env.ledger().timestamp());
+    assert_eq!(
+        round.prices.get(0).unwrap().price,
+        120 * UNIT,
+        "a round must carry the fresh source aggregate, not the cache"
+    );
+}
+
 /// P15 for position mutations: a skew-changing open checkpoints the market
 /// first, so time before the mutation accrues at the old rate and the
 /// steeper post-mutation rate applies only afterwards. (The config-change

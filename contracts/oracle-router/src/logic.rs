@@ -148,13 +148,37 @@ pub fn fetch_and_validate_price(env: &Env, symbol: Symbol) -> i128 {
         }
     }
 
+    aggregate_and_cache(env, symbol, &config, current_time)
+}
+
+/// Fresh price fetch for canonical rounds: never serves the cache. A round
+/// stamps its prices with the round timestamp, and the delayed-LP-settlement
+/// cutoff (§13.2) compares round timestamps — so a round price must be an
+/// observation AT that timestamp. Serving a cache hit here would let anyone
+/// pin a pre-cutoff observation into a post-cutoff round through the
+/// permissionless `get_price` cache write.
+pub fn fetch_fresh_price(env: &Env, symbol: Symbol) -> i128 {
+    let config = storage::load_oracle_config(env);
+    let current_time = env.ledger().timestamp();
+    storage::bump_symbol_ttl(env, &symbol);
+    aggregate_and_cache(env, symbol, &config, current_time)
+}
+
+/// Query every source, require ≥ `min_required_sources` valid responses,
+/// compute and validate the median, write cache, emit, return.
+fn aggregate_and_cache(
+    env: &Env,
+    symbol: Symbol,
+    config: &OracleConfig,
+    current_time: u64,
+) -> i128 {
     let sources = storage::load_sources(env, &symbol);
     if sources.is_empty() {
         panic_with_error!(env, OracleRouterError::NoPriceSources);
     }
 
     let (valid_prices, oldest_source_update) =
-        query_sources(env, &sources, &symbol, &config, current_time);
+        query_sources(env, &sources, &symbol, config, current_time);
 
     // No valid responses at all → StalePrice (every source was stale, broken,
     // future-dated, or returned a non-positive price). This is distinct from
