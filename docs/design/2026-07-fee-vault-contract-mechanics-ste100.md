@@ -409,6 +409,13 @@ An accounting label must not create cash.
 A cash transfer must have an ownership effect.
 Use this table to test each state transition.
 
+Each settlement entry point must emit one event with the amounts it moved.
+Each keeper checkpoint must emit the updated indices and current rates.
+Each revenue split must emit the collected amount and each share.
+Each LP settlement event must carry the post-settlement supply and NAV.
+Each canonical round publication must emit the round identifier.
+An off-chain consumer must be able to rebuild this table from the events.
+
 ## 7. Price exposure and PnL
 
 ### 7.1 Base exposure
@@ -1180,6 +1187,15 @@ The snapshot must have a unique monotonic round identifier.
 Calculate NAV in the vault.
 Use the authenticated prices and stored aggregates.
 Do not accept a supplied NAV.
+
+The read-only accounting snapshot is a quote function.
+The snapshot validates the round structure: the price count, the symbol
+order, and positive prices.
+The snapshot does not validate the round provenance.
+The settlement path enforces provenance: only the request router starts a
+settlement, and the request router reads the round from the oracle router.
+An off-chain consumer must read rounds from the oracle router and must not
+trust a snapshot computed from any other round.
 
 ### 13.2 Delayed requests
 
