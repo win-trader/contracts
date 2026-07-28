@@ -2344,3 +2344,573 @@ fn r16_clean_final_redemption_pays_all_lp_cash() {
     assert_eq!(p.vault().physical_cash(), 0, "no stranded dust");
     assert_eq!(p.vault().total_share_supply(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Insolvency, NAV floor, recovery, and complexity guards
+// ---------------------------------------------------------------------------
+
+/// R16 "loss up, but never above available value" + the C13 insolvent edge +
+/// I18.1 under stress: when the raw loss dwarfs the position's value, the
+/// trader's payout clamps at exactly zero, LP equity gains exactly the stored
+/// collateral (all there was), and the cash-ownership identity holds. Both
+/// exit paths — voluntary close and liquidation — must agree.
+#[test]
+fn r16_underwater_loss_collects_only_available_value() {
+    let scenario = |liquidate: bool| {
+        let p = Protocol::new();
+        p.disable_borrow();
+        p.disable_funding();
+        p.seed_lp();
+        let manager = p.manager();
+        let id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+        let stored = manager.get_position(&id).stored_collateral;
+
+        // Crash 100 -> 10: raw loss = 100 units × 90 = 9_000 UNIT, three
+        // times the ~2_970-UNIT stored collateral.
+        p.advance(31);
+        p.set_price(10 * UNIT);
+        p.publish_round();
+        let before = p.snapshot();
+
+        let trader_before = p.token().balance(&p.trader_a);
+        let keeper_before = p.token().balance(&p.keeper);
+        if liquidate {
+            manager.liquidate_position(&p.keeper, &id);
+        } else {
+            p.close(id);
+        }
+        let after = p.snapshot();
+
+        assert_eq!(
+            p.token().balance(&p.trader_a),
+            trader_before,
+            "the payout must clamp at exactly zero, never go negative"
+        );
+        // Any insolvency-touch reward is paid from the risk-keeper reserve
+        // claim, so it lowers cash and claims equally and never LP equity.
+        let keeper_reward = p.token().balance(&p.keeper) - keeper_before;
+
+        assert_eq!(
+            after.cash_lp_equity - before.cash_lp_equity,
+            stored,
+            "collected loss is exactly the available stored collateral"
+        );
+        assert_eq!(
+            before.non_lp_claims - after.non_lp_claims,
+            stored + keeper_reward
+        );
+        assert_eq!(before.physical_cash - after.physical_cash, keeper_reward);
+        // I18.1 with unpaid obligations outstanding.
+        assert_eq!(
+            after.physical_cash,
+            after.cash_lp_equity + after.non_lp_claims
+        );
+
+        // I18.2: the aggregates telescope to zero with the position gone.
+        let side = manager.get_market(&p.market).long;
+        assert_eq!(side.size_open_interest, 0);
+        assert_eq!(side.base_exposure, 0);
+        assert_eq!(side.risk_units, 0);
+        assert_eq!(side.stored_collateral_total, 0);
+        assert_eq!(after.open_position_count, 0);
+        assert_eq!(
+            after.vault_nav, after.cash_lp_equity,
+            "no open positions: NAV equals cash equity"
+        );
+    };
+    scenario(false);
+    scenario(true);
+}
+
+/// I18.6 "nav = max(equity − recognized PnL, 0)": when recognized trader
+/// profit exceeds all LP equity the marked NAV floors at exactly zero — a
+/// negative NAV would corrupt every share-pricing computation downstream.
+#[test]
+fn i18_6_marked_nav_floors_at_zero_when_profit_exceeds_equity() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
+    p.deposit(&p.lp, 10_000 * UNIT);
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+
+    // Equity is price-independent, so the seed round is a valid basis.
+    let entry = p.snapshot();
+
+    // 100 -> 250: recognized profit = 100 units × 150 = 15_000 UNIT against
+    // ~10_021 UNIT of equity (10_000 seed + 21 LP fee share).
+    p.advance(31);
+    p.set_price(250 * UNIT);
+    p.publish_round();
+    let mooned = p.snapshot();
+
+    assert!(
+        15_000 * UNIT > mooned.cash_lp_equity,
+        "vector must drive recognized profit past equity"
+    );
+    assert_eq!(mooned.cash_lp_equity, entry.cash_lp_equity);
+    assert_eq!(
+        mooned.vault_nav, 0,
+        "I18.6: NAV floors at zero, it never goes negative"
+    );
+}
+
+/// I18.8 "the blocked-side count equals the number of restricted sides" —
+/// the recovery half. Entering warning is covered by p26; here the price
+/// reverts and the side must actually unblock: the freshly-evaluated count
+/// returns to zero, and after the next mutating action the stored counter
+/// follows, reopening the LP pipeline end to end.
+#[test]
+fn i18_8_blocked_side_count_recovers_and_lp_pipeline_reopens() {
+    let p = Protocol::new();
+    p.seed_lp();
+    let router = p.router();
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+
+    // Enter warning exactly as p26 does: a settlement at the pumped price
+    // evaluates the risk state and persists the blocked count.
+    router.request_deposit(&p.trader_b, &(1_000 * UNIT));
+    p.advance(REQUEST_DELAY);
+    p.set_price(450 * UNIT);
+    p.publish_round();
+    let result = router.resolve_next(&p.keeper);
+    assert_eq!(result.status, request_router::SettlementStatus::Failed);
+    assert_eq!(p.snapshot().lp_blocked_side_count, 1);
+    assert!(!p.vault().can_create_lp_request());
+
+    // Price reverts below the recovery factor (profit 0 < 2_000 bps latch).
+    p.advance(31);
+    p.set_price(PRICE_100);
+    p.publish_round();
+
+    // The non-mutating snapshot re-evaluates and already reports recovery;
+    // the stored counter (which gates request creation) updates only on the
+    // next mutating path — pin both halves of that behavior.
+    assert_eq!(p.snapshot().lp_blocked_side_count, 0);
+    assert!(!p.vault().can_create_lp_request());
+
+    // Any position mutation re-evaluates market risk and unlatches.
+    p.open(&p.trader_b, false, 100 * UNIT, 50 * UNIT);
+    assert!(p.vault().can_create_lp_request());
+
+    // The LP pipeline works end to end again.
+    p.advance(1);
+    p.deposit(&p.trader_b, 1_000 * UNIT);
+}
+
+/// P23: an LP settlement reads per-market aggregates, never the position
+/// book — its metered cost must not grow with the number of open positions.
+/// This is the only guard against an O(positions) regression that would
+/// brick LP exits at scale.
+#[test]
+fn p23_lp_settlement_cost_independent_of_open_positions() {
+    let instructions_with = |position_count: u32| -> i64 {
+        let p = Protocol::new();
+        p.seed_lp();
+        for i in 0..position_count {
+            let long = i % 2 == 0;
+            let owner = if long { &p.trader_a } else { &p.trader_b };
+            p.open(owner, long, 100 * UNIT, 60 * UNIT);
+        }
+        let router = p.router();
+        router.request_deposit(&p.lp, &(1_000 * UNIT));
+        p.advance(REQUEST_DELAY);
+        p.refresh_price();
+        p.publish_round();
+        let result = router.resolve_next(&p.keeper);
+        assert_eq!(result.status, request_router::SettlementStatus::Settled);
+        // Metered resources of the last top-level invocation: resolve_next.
+        p.env.cost_estimate().resources().instructions
+    };
+
+    let one = instructions_with(1);
+    let fifty = instructions_with(50);
+    assert!(
+        fifty <= one + one / 10,
+        "settlement cost must not grow with the position book: \
+         1 position = {one} instructions, 50 positions = {fifty}"
+    );
+}
+
+/// R16 "borrow obligation rounds up", pinned strictly. p10 verifies the
+/// quadratic curve with a ±1 baseline tolerance a floor implementation could
+/// hide inside; this vector zeroes the baseline residue (open at 864s: the
+/// pre-open index is exactly 1e10, divisible by risk/PRECISION) and makes
+/// the close-side product indivisible, so ceil and floor differ by exactly
+/// one stroop and only ceil passes.
+#[test]
+fn r16_borrow_obligation_rounds_up_exact_vector() {
+    let p = Protocol::new();
+    p.disable_funding();
+    // Post-open equity = 99_979 + 70% of the 30-UNIT opening fee = 100_000,
+    // making utilization exactly 500 bps (p10's construction).
+    p.deposit(&p.lp, 99_979 * UNIT);
+
+    // Ledger t0 = fixture start; the deposit consumed REQUEST_DELAY = 60s.
+    // Open at t0 + 864s: pre-open index = 100×1e14×864 / (1e4×86_400) = 1e10
+    // exactly, with zero carried remainder.
+    p.advance(804);
+    let size = 10_000 * UNIT;
+    let collateral = 3_000 * UNIT;
+    let fee = ceil_div(size * 30, BPS);
+    let id = p.open(&p.trader_a, true, size, collateral);
+
+    let risk = 5_000 * UNIT;
+    let seconds_per_day = DAY as i128;
+    let denominator = BPS * seconds_per_day;
+    let index_open = 100 * INDEX_PRECISION * 864 / denominator;
+    assert_eq!(index_open, 10_000_000_000);
+    assert_eq!(100 * INDEX_PRECISION * 864 % denominator, 0, "no carry");
+    let baseline = ceil_div(risk * index_open, INDEX_PRECISION);
+    assert_eq!(
+        risk * index_open % INDEX_PRECISION,
+        0,
+        "the baseline must not round, so the close-side ceil is isolated"
+    );
+
+    // rate = 100 + 900 × (500/BPS)² = 102.25 bps/day at the stored scale.
+    let rate = 100 * INDEX_PRECISION + 900 * INDEX_PRECISION * 500 * 500 / (BPS * BPS);
+    let elapsed = 500i128;
+    let index_close = index_open + rate * elapsed / denominator;
+    assert!(
+        risk * index_close % INDEX_PRECISION != 0,
+        "vector must exercise the rounding boundary"
+    );
+    let expected = ceil_div(risk * index_close, INDEX_PRECISION) - baseline;
+    // One stroop above the floor result — the assertion a floor
+    // implementation cannot pass.
+    assert_eq!(expected, 2_958_623);
+
+    p.advance(elapsed as u64);
+    p.refresh_price();
+    let balance_before = p.token().balance(&p.trader_a);
+    p.close(id);
+    let payout = p.token().balance(&p.trader_a) - balance_before;
+    assert_eq!(
+        (collateral - fee) - payout,
+        expected,
+        "borrow collection must ceil with zero tolerance"
+    );
+}
+
+/// P21 / I18.6 trust boundary: `accounting_snapshot` validates the round's
+/// structure (price count, symbol order, positive prices) but deliberately
+/// trusts the caller for provenance — it is a quote-at-these-prices view.
+/// Settlement provenance is enforced by the router-gated call chain instead.
+/// Pin both halves so a change to either is a conscious decision.
+#[test]
+fn p21_snapshot_validates_round_structure_but_trusts_caller_prices() {
+    let p = Protocol::new();
+    p.seed_lp();
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+
+    p.advance(31);
+    p.set_price(50 * UNIT);
+    p.publish_round();
+    let genuine = p.latest_round_for_vault();
+    let vault = p.vault();
+
+    // Structural rejections: wrong price count, wrong symbol, non-positive
+    // price all panic with InvalidOracleRound.
+    let mut empty = genuine.clone();
+    empty.prices = Vec::new(&p.env);
+    assert!(vault.try_accounting_snapshot(&empty).is_err());
+
+    let mut wrong_symbol = genuine.clone();
+    wrong_symbol.prices = vec![
+        &p.env,
+        vault::RoundPrice {
+            symbol: symbol_short!("ETH"),
+            price: 50 * UNIT,
+        },
+    ];
+    assert!(vault.try_accounting_snapshot(&wrong_symbol).is_err());
+
+    let mut zero_price = genuine.clone();
+    zero_price.prices = vec![
+        &p.env,
+        vault::RoundPrice {
+            symbol: p.market.clone(),
+            price: 0,
+        },
+    ];
+    assert!(vault.try_accounting_snapshot(&zero_price).is_err());
+
+    // Provenance is NOT checked: a forged id/timestamp/price is accepted and
+    // the snapshot is computed at the supplied price. At the genuine crashed
+    // price NAV recognizes the (capped) loss; the forged entry-price round
+    // reports NAV = equity. Off-chain consumers must source rounds from the
+    // oracle router.
+    let genuine_snapshot = vault.accounting_snapshot(&genuine);
+    let mut forged = genuine.clone();
+    forged.id += 1_000;
+    forged.timestamp += 999_999;
+    forged.prices = vec![
+        &p.env,
+        vault::RoundPrice {
+            symbol: p.market.clone(),
+            price: PRICE_100,
+        },
+    ];
+    let forged_snapshot = vault.accounting_snapshot(&forged);
+    assert_eq!(forged_snapshot.vault_nav, forged_snapshot.cash_lp_equity);
+    assert!(
+        genuine_snapshot.vault_nav > genuine_snapshot.cash_lp_equity,
+        "the genuine crashed round recognizes the trader loss"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tail hygiene: proportionality, monotonicity, and boundary pins
+// ---------------------------------------------------------------------------
+
+/// P3: light-side traders receive funding in proportion to their own
+/// counter-exposure — two simultaneous receivers of different sizes each get
+/// exactly floor(size × receiver_index / INDEX_PRECISION), so the larger
+/// receives its pro-rata share, not the whole stream.
+#[test]
+fn p03_two_receivers_credited_in_proportion_to_exposure() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+
+    // All three opened at the same timestamp: every funding baseline is 0.
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    let big = p.open(&p.trader_b, false, 2_000 * UNIT, 600 * UNIT);
+    let small = p.open(&p.trader_b, false, 1_000 * UNIT, 300 * UNIT);
+    let stored_big = manager.get_position(&big).stored_collateral;
+    let stored_small = manager.get_position(&small).stored_collateral;
+
+    p.advance(DAY);
+    p.refresh_price();
+
+    // Both closes at one timestamp share one receiver index; price is
+    // unchanged and the shorts pay nothing (the long side is the payer), so
+    // each payout is stored collateral plus exactly the receiver credit.
+    let before_big = p.token().balance(&p.trader_b);
+    p.close(big);
+    let credit_big = p.token().balance(&p.trader_b) - before_big - stored_big;
+    let before_small = p.token().balance(&p.trader_b);
+    p.close(small);
+    let credit_small = p.token().balance(&p.trader_b) - before_small - stored_small;
+
+    let index = manager.get_market(&p.market).receiver_index_short;
+    assert!(index > 0, "a day of one-sided funding must accrue");
+    assert_eq!(
+        credit_big,
+        floor_div(2_000 * UNIT * index, INDEX_PRECISION),
+        "credit is the per-position floor formula, not a stream share"
+    );
+    assert_eq!(
+        credit_small,
+        floor_div(1_000 * UNIT * index, INDEX_PRECISION)
+    );
+    // The doc's proportionality claim, within floor dust.
+    assert!((credit_big - 2 * credit_small).abs() <= 2);
+}
+
+/// I18.4 "an index never decreases": swept across opens on both sides, a
+/// funding-rate config change, closes, and keeper checkpoints — every one of
+/// the six market indices must be monotone non-decreasing at every step.
+#[test]
+fn i18_4_indices_are_monotone_across_lifecycle() {
+    let p = Protocol::new();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let indices = || -> [i128; 6] {
+        let m = manager.get_market(&p.market);
+        [
+            m.receiver_backed_index_long,
+            m.receiver_backed_index_short,
+            m.lp_backed_index_long,
+            m.lp_backed_index_short,
+            m.receiver_index_long,
+            m.receiver_index_short,
+        ]
+    };
+    let mut previous = indices();
+    let mut step = |label: &str| {
+        let current = indices();
+        for (i, (now, before)) in current.iter().zip(previous.iter()).enumerate() {
+            assert!(
+                now >= before,
+                "index {i} decreased after {label}: {before} -> {now}"
+            );
+        }
+        previous = current;
+    };
+
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    let short_a = p.open(&p.trader_b, false, 4_000 * UNIT, 1_200 * UNIT);
+    step("both sides opened");
+
+    p.advance(1_000);
+    manager.update_indices(&p.keeper, &p.market);
+    step("first keeper checkpoint");
+
+    p.advance(500);
+    p.open(&p.trader_b, false, 2_000 * UNIT, 600 * UNIT);
+    step("second short opened");
+
+    p.advance(700);
+    manager.update_indices(&p.keeper, &p.market);
+    step("second keeper checkpoint");
+
+    // A rate change checkpoints with the old rate before applying the new.
+    manager.set_market_config(&p.admin, &p.market, &Protocol::market_config(37));
+    step("funding rate reconfigured");
+
+    p.advance(900);
+    manager.update_indices(&p.keeper, &p.market);
+    step("checkpoint at the new rate");
+
+    p.advance(31);
+    p.refresh_price();
+    p.close(short_a);
+    step("receiver closed");
+
+    p.advance(600);
+    manager.update_indices(&p.keeper, &p.market);
+    step("final checkpoint");
+}
+
+/// P13 boundary: the global capacity gate accepts new risk exactly at the
+/// limit and rejects one stroop past it, mutating nothing on rejection.
+/// Equity is tuned so required backing = ceil(risk × BPS / capacity_bps)
+/// lands exactly on it: size 128_000 -> risk 64_000 -> backing 80_000 UNIT.
+#[test]
+fn p13_capacity_gate_boundary_accept_and_reject() {
+    // Post-open equity = deposit + 70% of the 384-UNIT opening fee.
+    let lp_fee_share = 384 * UNIT * 7_000 / BPS;
+    let boundary_deposit = 80_000 * UNIT - lp_fee_share;
+
+    let attempt = |deposit: i128| -> (Protocol, bool) {
+        let p = Protocol::new();
+        p.deposit(&p.lp, deposit);
+        let accepted = p
+            .manager()
+            .try_open_position(
+                &p.trader_a,
+                &p.market,
+                &true,
+                &(128_000 * UNIT),
+                &(7_000 * UNIT),
+                &0,
+                &0,
+                &0,
+                &0,
+            )
+            .is_ok();
+        (p, accepted)
+    };
+
+    let (at_limit, accepted) = attempt(boundary_deposit);
+    assert!(accepted, "risk exactly at the capacity limit is accepted");
+    assert_eq!(
+        at_limit.snapshot().required_risk_backing,
+        80_000 * UNIT,
+        "vector must land exactly on the boundary"
+    );
+
+    let (past_limit, accepted) = attempt(boundary_deposit - 1);
+    assert!(accepted == false, "one stroop past the limit is rejected");
+    let market = past_limit.manager().get_market(&past_limit.market);
+    assert_eq!(market.long.size_open_interest, 0, "rejection must not mutate");
+    assert_eq!(market.long.risk_units, 0);
+    assert_eq!(past_limit.snapshot().total_risk_units, 0);
+}
+
+/// R16 "aggregate receiver liability rounds down, remainder carried": the
+/// pending receiver total advances by exactly floor(flow × dt / PRECISION)
+/// with the sub-stroop remainder carried into the next interval — pinned
+/// against the observable per-second flow, over two intervals.
+#[test]
+fn r16_receiver_liability_floors_with_carried_remainder() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+
+    // One-sided-enough market so the receiver flow is nonzero.
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.open(&p.trader_b, false, 3_000 * UNIT, 900 * UNIT);
+    let flow = manager.get_market(&p.market).receiver_flow_per_second;
+    assert!(flow > 0);
+
+    // An interval whose remainder is nonzero AND at least half the
+    // precision, so doubling it provably rolls one extra stroop into the
+    // second interval.
+    let dt: i128 = (990..1_200)
+        .find(|dt| {
+            let remainder = flow * dt % INDEX_PRECISION;
+            remainder != 0 && 2 * remainder >= INDEX_PRECISION
+        })
+        .expect("some interval in range must leave a carrying remainder");
+
+    let start = manager.pending_receiver_funding_total();
+    p.advance(dt as u64);
+    manager.update_indices(&p.keeper, &p.market);
+    let first = manager.pending_receiver_funding_total() - start;
+    assert_eq!(first, floor_div(flow * dt, INDEX_PRECISION), "floor, never round");
+
+    // Second interval: the carried remainder joins the new accrual, so the
+    // two intervals telescope to the single-interval total exactly — one
+    // stroop more than doubling the floored first interval.
+    p.advance(dt as u64);
+    manager.update_indices(&p.keeper, &p.market);
+    let total = manager.pending_receiver_funding_total() - start;
+    assert_eq!(total, floor_div(flow * 2 * dt, INDEX_PRECISION));
+    assert_eq!(
+        total,
+        2 * first + 1,
+        "the carried remainder must surface in the second interval"
+    );
+}
+
+/// P15 for position mutations: a skew-changing open checkpoints the market
+/// first, so time before the mutation accrues at the old rate and the
+/// steeper post-mutation rate applies only afterwards. (The config-change
+/// variant lives in the original suite.)
+#[test]
+fn p15_skew_mutation_reprices_only_forward() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+
+    // Long is the payer side throughout: 10_000 vs 8_000, then 18_000.
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.open(&p.trader_b, false, 8_000 * UNIT, 2_400 * UNIT);
+    let payer_index = || {
+        let m = manager.get_market(&p.market);
+        (
+            m.receiver_backed_index_long + m.lp_backed_index_long,
+            m.current_payer_rate,
+        )
+    };
+    let (i0, rate_before) = payer_index();
+
+    // The mutation: a second long steepens the skew mid-stream. Its open
+    // checkpoints [t0, t1] with the OLD flows before recomputing.
+    p.advance(1_000);
+    p.open(&p.trader_a, true, 8_000 * UNIT, 2_400 * UNIT);
+    let (i1, rate_after) = payer_index();
+    assert!(
+        rate_after > rate_before,
+        "the mutation must actually raise the payer rate"
+    );
+
+    p.advance(1_000);
+    manager.update_indices(&p.keeper, &p.market);
+    let (i2, _) = payer_index();
+
+    assert!(i1 > i0);
+    assert!(
+        i2 - i1 > i1 - i0,
+        "equal intervals: the pre-mutation interval must have accrued at the \
+         shallower old rate ({} vs {})",
+        i1 - i0,
+        i2 - i1
+    );
+}
