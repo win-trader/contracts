@@ -11,6 +11,7 @@ members = [
     "contracts/request-router",
     "mocks/mock-token",
     "mocks/mock-oracle",
+    "test-suites",
 ]
 
 [workspace.dependencies]
