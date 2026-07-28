@@ -892,12 +892,20 @@ fn test_get_price_cache_is_keyed_per_symbol() {
     oracle.set_oracle_sources(
         &admin,
         &eth,
-        &vec![&env, eth_oracle_a.address.clone(), eth_oracle_b.address.clone()],
+        &vec![
+            &env,
+            eth_oracle_a.address.clone(),
+            eth_oracle_b.address.clone(),
+        ],
     );
     oracle.set_oracle_sources(
         &admin,
         &btc,
-        &vec![&env, btc_oracle_a.address.clone(), btc_oracle_b.address.clone()],
+        &vec![
+            &env,
+            btc_oracle_a.address.clone(),
+            btc_oracle_b.address.clone(),
+        ],
     );
 
     assert_eq!(

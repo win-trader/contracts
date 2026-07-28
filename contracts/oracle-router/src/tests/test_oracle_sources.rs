@@ -419,10 +419,7 @@ fn test_set_oracle_sources_revoked_admin_is_unauthorized_after_transfer() {
     // original_admin no longer holds the ADMIN role — must be rejected now.
     let attacker_primary = vec![&env, mock_source(&env)];
 
-    let result = oracle.try_set_oracle_sources(
-        &original_admin,
-        &symbol,
-        &attacker_primary);
+    let result = oracle.try_set_oracle_sources(&original_admin, &symbol, &attacker_primary);
 
     assert!(
         result.is_err(),

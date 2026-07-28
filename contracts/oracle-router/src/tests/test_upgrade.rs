@@ -19,7 +19,7 @@ use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, IntoVal, Symbol
 use stellar_contract_utils::upgradeable::enable_migration;
 
 use crate::storage::StorageKey;
-use crate::{OracleRouterContract, OracleRouterError, MigrationData};
+use crate::{MigrationData, OracleRouterContract, OracleRouterError};
 
 use super::helpers::{deploy_with_config_manager, deploy_with_upgrader};
 
@@ -277,10 +277,7 @@ fn test_migrate_without_prior_upgrade_errors_non_unauthorized() {
         (migration_data, admin).into_val(&env),
     );
 
-    assert!(
-        result.is_err(),
-        "migrate without prior upgrade must fail"
-    );
+    assert!(result.is_err(), "migrate without prior upgrade must fail");
     // The error must NOT be Unauthorized — the upgrader passed auth successfully,
     // but the MIGRATING flag is absent, so a different error fires.
     if let Err(Ok(contract_err)) = result {
