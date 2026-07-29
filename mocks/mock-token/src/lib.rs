@@ -51,7 +51,7 @@ impl MockToken {
     }
 
     /// Public faucet mint. Once protocol restrictions are activated, each
-    /// address can mint at most 5,000 test USDC cumulatively.
+    /// address gets one mint of up to 5,000 test USDC.
     pub fn mint(env: Env, to: Address, amount: i128) {
         if restrictions_active(&env) {
             to.require_auth();
@@ -185,14 +185,13 @@ fn public_mint_cap(env: &Env) -> i128 {
 }
 
 fn add_public_mint(env: &Env, account: &Address, amount: i128) {
-    let minted = public_minted(env, account);
-    let new_minted = minted
-        .checked_add(amount)
-        .unwrap_or_else(|| panic_with_error!(env, MockTokenError::MintCapExceeded));
-    if new_minted > public_mint_cap(env) {
+    // `PublicMinted` doubles as the one-shot claim marker. Checking the stored
+    // amount preserves the claimed state for addresses that minted under an
+    // earlier contract version, without adding a storage migration.
+    if amount <= 0 || amount > public_mint_cap(env) || public_minted(env, account) > 0 {
         panic_with_error!(env, MockTokenError::MintCapExceeded);
     }
-    set_public_minted(env, account, new_minted);
+    set_public_minted(env, account, amount);
 }
 
 #[cfg(test)]
@@ -237,19 +236,40 @@ mod tests {
     }
 
     #[test]
-    fn public_mint_is_capped_per_address() {
+    fn public_mint_is_one_shot_per_address() {
         let (_env, token, _admin, _vault, _pm, user) = setup();
         let cap = token.public_mint_cap();
+        let first_mint = cap / 5;
 
-        token.mint(&user, &cap);
-        assert_eq!(token.balance(&user), cap);
-        assert_eq!(token.public_minted(&user), cap);
+        token.mint(&user, &first_mint);
+        assert_eq!(token.balance(&user), first_mint);
+        assert_eq!(token.public_minted(&user), first_mint);
 
-        let err = token.try_mint(&user, &1).unwrap_err().unwrap();
+        let err = token
+            .try_mint(&user, &(cap - first_mint))
+            .unwrap_err()
+            .unwrap();
         assert_eq!(
             err,
             soroban_sdk::Error::from_contract_error(MockTokenError::MintCapExceeded as u32)
         );
+    }
+
+    #[test]
+    fn rejected_amount_does_not_spend_the_one_shot_claim() {
+        let (_env, token, _admin, _vault, _pm, user) = setup();
+        let cap = token.public_mint_cap();
+
+        let err = token.try_mint(&user, &(cap + 1)).unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            soroban_sdk::Error::from_contract_error(MockTokenError::MintCapExceeded as u32)
+        );
+        assert_eq!(token.public_minted(&user), 0);
+
+        token.mint(&user, &cap);
+        assert_eq!(token.balance(&user), cap);
+        assert_eq!(token.public_minted(&user), cap);
     }
 
     #[test]
@@ -287,5 +307,28 @@ mod tests {
 
         token.transfer(&user, &pm, &50);
         assert_eq!(token.balance(&pm), 50);
+    }
+
+    #[test]
+    fn delegated_transfer_also_requires_a_protocol_endpoint() {
+        let (env, token, admin, vault, _pm, user) = setup();
+        let spender = Address::generate(&env);
+        let other = Address::generate(&env);
+
+        token.admin_mint(&admin, &user, &1_000);
+        token.approve(&user, &spender, &1_000, &100);
+
+        let err = token
+            .try_transfer_from(&spender, &user, &other, &100)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(
+            err,
+            soroban_sdk::Error::from_contract_error(MockTokenError::TransferRestricted as u32)
+        );
+
+        token.transfer_from(&spender, &user, &vault, &100);
+        assert_eq!(token.balance(&vault), 100);
+        assert_eq!(token.balance(&user), 900);
     }
 }
