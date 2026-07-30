@@ -621,6 +621,32 @@ fn opening_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
 }
 
 #[test]
+fn opening_fee_is_deducted_from_collateral_instead_of_added_to_the_wallet_debit() {
+    let p = Protocol::new();
+    p.seed_lp();
+    let token = soroban_sdk::token::Client::new(&p.env, &p.token_id);
+    let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
+
+    let collateral = 100 * UNIT;
+    let size = 1_000 * UNIT;
+    let opening_fee = 3 * UNIT;
+    let balance_before = token.balance(&p.trader_a);
+
+    let position_id = p.open(&p.trader_a, true, size, collateral);
+
+    assert_eq!(
+        balance_before - token.balance(&p.trader_a),
+        collateral,
+        "the collateral argument is the trader's complete wallet debit"
+    );
+    assert_eq!(
+        manager.get_position(&position_id).stored_collateral,
+        collateral - opening_fee,
+        "the opening fee starts the position below the amount paid"
+    );
+}
+
+#[test]
 fn funding_is_split_by_counter_exposure_and_same_time_checkpoint_is_idempotent() {
     let p = Protocol::new();
     p.seed_lp();
