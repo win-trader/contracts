@@ -68,9 +68,19 @@ pub fn enforce_market_limits(env: &Env, market: &Market, is_long: bool) {
     }
 }
 
-/// §12.3 — maintenance margin requirement for a position of `size`.
+/// §12.3 — margin requirement for a position of `size` at `margin_bps`.
+pub fn margin_requirement(env: &Env, size: i128, margin_bps: u32) -> i128 {
+    math::mul_div_ceil(env, size, margin_bps as i128, BPS)
+}
+
+/// §12.3 — the floor below which a position of `size` is liquidatable.
 pub fn maintenance_requirement(env: &Env, size: i128, config: &MarketConfig) -> i128 {
-    math::mul_div_ceil(env, size, config.maintenance_margin_bps as i128, BPS)
+    margin_requirement(env, size, config.maintenance_margin_bps)
+}
+
+/// §12.3 — the margin a position of `size` needs to open or add risk.
+pub fn initial_requirement(env: &Env, size: i128, config: &MarketConfig) -> i128 {
+    margin_requirement(env, size, config.initial_margin_bps)
 }
 
 /// §14 — the risk state a side belongs in given its positive PnL factor.

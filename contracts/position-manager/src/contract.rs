@@ -190,14 +190,20 @@ impl PositionManager for PositionManagerContract {
         let opening_fee = fees::tiered_opening_fee(&env, &market, is_long, base, size);
         fees::apply_opening_fee(&env, &mut ledger, &mut position, &mut market, opening_fee);
         if position.stored_collateral < storage::global_config(&env).min_collateral
-            || position.stored_collateral
-                < risk::maintenance_requirement(&env, size, &market.config)
+            || position.stored_collateral < risk::initial_requirement(&env, size, &market.config)
         {
             panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
         }
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &market_symbol, &mut market, price, equity);
+        risk::evaluate_market_risk(
+            &env,
+            &mut ledger,
+            &market_symbol,
+            &mut market,
+            price,
+            equity,
+        );
         if market.side(is_long).risk_state != RiskState::Normal {
             panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
         }
@@ -285,7 +291,14 @@ impl PositionManager for PositionManagerContract {
         fees::apply_opening_fee(&env, &mut ledger, &mut position, &mut market, opening_fee);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &position.market, &mut market, price, equity);
+        risk::evaluate_market_risk(
+            &env,
+            &mut ledger,
+            &position.market,
+            &mut market,
+            price,
+            equity,
+        );
         if size_added > 0 && market.side(position.is_long).risk_state != RiskState::Normal {
             panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
         }
@@ -315,7 +328,14 @@ impl PositionManager for PositionManagerContract {
                 price,
             ),
         );
-        if health < risk::maintenance_requirement(&env, position.size, &market.config) {
+        // Adding size is held to the initial margin; a pure collateral top-up
+        // only de-risks and must clear just the maintenance floor (§12.3).
+        let required = if size_added > 0 {
+            risk::initial_requirement(&env, position.size, &market.config)
+        } else {
+            risk::maintenance_requirement(&env, position.size, &market.config)
+        };
+        if health < required {
             panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
         }
         funding::reset_debts(&env, &ledger, &mut position, &market);
@@ -420,7 +440,14 @@ impl PositionManager for PositionManagerContract {
         let price = snapshot::authenticated_price(&env, &position.market);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &position.market, &mut market, price, equity);
+        risk::evaluate_market_risk(
+            &env,
+            &mut ledger,
+            &position.market,
+            &mut market,
+            price,
+            equity,
+        );
         let pending = funding::pending_fees(&env, &ledger, &position, &market);
         let payable = settle::payable_price_pnl(
             &env,
@@ -501,7 +528,14 @@ impl PositionManager for PositionManagerContract {
         let price = snapshot::authenticated_price(&env, &position.market);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
-        risk::evaluate_market_risk(&env, &mut ledger, &position.market, &mut market, price, equity);
+        risk::evaluate_market_risk(
+            &env,
+            &mut ledger,
+            &position.market,
+            &mut market,
+            price,
+            equity,
+        );
         let side_state = market.side(position.is_long).risk_state;
         if side_state != RiskState::Adl && side_state != RiskState::HardCap {
             panic_with_error!(&env, PositionManagerError::RiskStateBlocked);

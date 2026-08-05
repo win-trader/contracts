@@ -115,6 +115,11 @@ pub struct MarketConfig {
     pub warning_pnl_factor_bps: u32,
     pub adl_pnl_factor_bps: u32,
     pub hard_cap_pnl_factor_bps: u32,
+    /// Margin required to open or add risk (§12.3). Divides max leverage:
+    /// a position may not be created closer to liquidation than this.
+    pub initial_margin_bps: u32,
+    /// Margin below which the position is liquidatable (§12.3). Must not
+    /// exceed `initial_margin_bps`; the gap is the entry buffer.
     pub maintenance_margin_bps: u32,
     pub liquidation_reward_bps: u32,
     pub adl_reward_bps: u32,

@@ -321,7 +321,15 @@ pub fn settle_close(
                 price,
             ),
         );
-        if health < risk::maintenance_requirement(env, removed.new_size, &market.config) {
+        // Shrinking the position de-risks, so the maintenance floor is
+        // enough; a pure collateral withdrawal raises leverage and must
+        // leave the position back above the initial margin (§12.3).
+        let required = if size_removed > 0 {
+            risk::maintenance_requirement(env, removed.new_size, &market.config)
+        } else {
+            risk::initial_requirement(env, removed.new_size, &market.config)
+        };
+        if health < required {
             panic_with_error!(env, PositionManagerError::InsufficientCollateral);
         }
         funding::reset_debts(env, ledger, &mut position, &market);

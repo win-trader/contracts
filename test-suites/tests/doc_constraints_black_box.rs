@@ -90,6 +90,7 @@ mod abi {
         pub warning_pnl_factor_bps: u32,
         pub adl_pnl_factor_bps: u32,
         pub hard_cap_pnl_factor_bps: u32,
+        pub initial_margin_bps: u32,
         pub maintenance_margin_bps: u32,
         pub liquidation_reward_bps: u32,
         pub adl_reward_bps: u32,
@@ -544,7 +545,8 @@ impl Protocol {
             warning_pnl_factor_bps: 3_000,
             adl_pnl_factor_bps: 4_000,
             hard_cap_pnl_factor_bps: 5_000,
-            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            maintenance_margin_bps: 250,
             liquidation_reward_bps: 100,
             adl_reward_bps: 50,
         }
@@ -1370,8 +1372,9 @@ fn p18_accrued_fees_make_position_liquidatable_without_price_move() {
     p.seed_lp();
     let manager = p.manager();
 
-    // size 10_000, maintenance 5% = 500. Collateral after the 30-UNIT
-    // opening fee is 570 — healthy by 70 UNIT.
+    // size 10_000: initial margin 5% = 500, maintenance 2.5% = 250.
+    // Collateral after the 30-UNIT opening fee is 570 — the open clears the
+    // initial margin by 70 and sits 320 above the maintenance floor.
     let id = p.open(&p.trader_a, true, 10_000 * UNIT, 600 * UNIT);
     assert!(
         manager.try_liquidate_position(&p.keeper, &id).is_err(),
@@ -1379,8 +1382,8 @@ fn p18_accrued_fees_make_position_liquidatable_without_price_move() {
     );
 
     // One-sided market: funding = 100 bps/day on size (100 UNIT/day) plus
-    // borrow ~51 UNIT/day — far more than the 70-UNIT buffer after one day.
-    p.advance(DAY);
+    // borrow ~51 UNIT/day — three days eat well through the 320-UNIT buffer.
+    p.advance(3 * DAY);
     p.refresh_price();
     manager.liquidate_position(&p.keeper, &id);
     assert!(

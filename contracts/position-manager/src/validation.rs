@@ -39,7 +39,8 @@ pub fn validate_market(env: &Env, c: &MarketConfig) {
         || c.adl_pnl_factor_bps >= c.hard_cap_pnl_factor_bps
         || c.hard_cap_pnl_factor_bps > BPS as u32
         || c.maintenance_margin_bps == 0
-        || c.maintenance_margin_bps > BPS as u32
+        || c.maintenance_margin_bps > c.initial_margin_bps
+        || c.initial_margin_bps > BPS as u32
         || c.liquidation_reward_bps > BPS as u32
         || c.adl_reward_bps > BPS as u32
         || c.max_long_size_open_interest <= 0

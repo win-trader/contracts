@@ -71,6 +71,7 @@ mod abi {
         pub warning_pnl_factor_bps: u32,
         pub adl_pnl_factor_bps: u32,
         pub hard_cap_pnl_factor_bps: u32,
+        pub initial_margin_bps: u32,
         pub maintenance_margin_bps: u32,
         pub liquidation_reward_bps: u32,
         pub adl_reward_bps: u32,
@@ -247,6 +248,7 @@ mod abi {
             collateral_withdrawn: i128,
             acceptable_price: i128,
         );
+        fn liquidate_position(env: Env, caller: Address, position_id: u64);
         fn update_indices(env: Env, caller: Address, market: Symbol);
         fn set_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
         fn get_position(env: Env, position_id: u64) -> Position;
@@ -482,7 +484,8 @@ impl Protocol {
             warning_pnl_factor_bps: 3_000,
             adl_pnl_factor_bps: 4_000,
             hard_cap_pnl_factor_bps: 5_000,
-            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            maintenance_margin_bps: 250,
             liquidation_reward_bps: 100,
             adl_reward_bps: 50,
         }
@@ -643,6 +646,69 @@ fn opening_fee_is_deducted_from_collateral_instead_of_added_to_the_wallet_debit(
         manager.get_position(&position_id).stored_collateral,
         collateral - opening_fee,
         "the opening fee starts the position below the amount paid"
+    );
+}
+
+#[test]
+fn max_leverage_open_is_healthy_until_the_maintenance_floor() {
+    let p = Protocol::new();
+    p.seed_lp();
+    let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
+
+    // Mirror the order ticket: max leverage is BPS / initial_margin_bps
+    // (20× here), sized to the largest notional whose post-fee collateral
+    // still backs that leverage.
+    let debit = 100 * UNIT;
+    let leverage = 20i128;
+    let fee_bps = 30i128; // first long on an empty book worsens skew → high tier
+    let mut low = 0i128;
+    let mut high = debit * leverage;
+    while low < high {
+        let candidate = (low + high + 1) / 2;
+        let fee = (candidate * fee_bps + 9_999) / 10_000;
+        let stored = (debit - fee).max(0);
+        if candidate <= stored * leverage {
+            low = candidate;
+        } else {
+            high = candidate - 1;
+        }
+    }
+    let size = low;
+
+    let position_id = p.open(&p.trader_a, true, size, debit);
+    let position = manager.get_position(&position_id);
+    let initial = (position.size * 500 + 9_999) / 10_000;
+    assert_eq!(
+        position.stored_collateral, initial,
+        "a max-leverage open holds exactly the initial margin"
+    );
+
+    // The initial/maintenance gap is the entry buffer: at the entry price,
+    // and 1% down, the keeper bounces off PositionHealthy.
+    assert!(
+        manager
+            .try_liquidate_position(&p.keeper, &position_id)
+            .is_err(),
+        "healthy at the entry price in the second it was opened"
+    );
+    p.advance(31);
+    p.set_price(99 * UNIT);
+    p.publish_round();
+    assert!(
+        manager
+            .try_liquidate_position(&p.keeper, &position_id)
+            .is_err(),
+        "1% down is still inside the 2.5% buffer"
+    );
+
+    // 3% down crosses the maintenance floor (5% initial − 3% loss < 2.5%).
+    p.advance(31);
+    p.set_price(97 * UNIT);
+    p.publish_round();
+    manager.liquidate_position(&p.keeper, &position_id);
+    assert!(
+        manager.try_get_position(&position_id).is_err(),
+        "below maintenance the position liquidates"
     );
 }
 
@@ -836,4 +902,26 @@ fn partial_then_final_close_telescopes_all_market_aggregates_to_zero() {
     assert_eq!(terminal.base_exposure, 0);
     assert_eq!(terminal.risk_units, 0);
     assert_eq!(terminal.stored_collateral_total, 0);
+}
+
+#[test]
+fn opening_past_max_leverage_is_rejected_by_the_initial_margin() {
+    let p = Protocol::new();
+    p.seed_lp();
+    let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
+
+    // 21× cannot clear the 5% initial margin no matter the fee tier.
+    let debit = 100 * UNIT;
+    let result = manager.try_open_position(
+        &p.trader_a,
+        &p.market,
+        &true,
+        &(debit * 21),
+        &debit,
+        &0,
+        &0,
+        &0,
+        &(100 * UNIT),
+    );
+    assert!(result.is_err(), "past max leverage the open must bounce");
 }
