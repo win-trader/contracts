@@ -62,6 +62,7 @@ mod abi {
         pub close_fee_low_bps: u32,
         pub close_fee_high_bps: u32,
         pub max_funding_rate_bps_day: i128,
+        pub instant_weight_bps: u32,
         pub market_risk_factor_bps: u32,
         pub max_long_size_open_interest: i128,
         pub max_short_size_open_interest: i128,
@@ -82,6 +83,7 @@ mod abi {
     pub struct GlobalConfig {
         pub min_collateral: i128,
         pub min_position_lifetime: u64,
+        pub funding_half_life_seconds: u64,
         pub risk_capacity_limit_bps: u32,
         pub base_borrow_rate_bps_day: i128,
         pub max_variable_borrow_bps_day: i128,
@@ -122,13 +124,12 @@ mod abi {
         pub receiver_index_short: i128,
         pub current_payer_side: PayerSide,
         pub current_payer_rate: i128,
-        pub receiver_flow_per_second: i128,
-        pub lp_flow_per_second: i128,
+        pub skew_ema: i128,
         pub last_funding_checkpoint: u64,
         pub receiver_payer_remainder: i128,
         pub lp_payer_remainder: i128,
         pub receiver_index_remainder: i128,
-        pub receiver_flow_remainder: i128,
+        pub pending_remainder: i128,
         pub config: MarketConfig,
     }
 
@@ -409,6 +410,7 @@ impl Protocol {
                 position_manager::GlobalConfig {
                     min_collateral: 10 * UNIT,
                     min_position_lifetime: 0,
+                    funding_half_life_seconds: 43_200,
                     risk_capacity_limit_bps: 8_000,
                     base_borrow_rate_bps_day: 100,
                     max_variable_borrow_bps_day: 900,
@@ -476,6 +478,8 @@ impl Protocol {
             close_fee_low_bps: 10,
             close_fee_high_bps: 30,
             max_funding_rate_bps_day,
+            // Pure instant skew: the EMA-specific tests override this.
+            instant_weight_bps: 10_000,
             market_risk_factor_bps: 5_000,
             max_long_size_open_interest: 1_000_000 * UNIT,
             max_short_size_open_interest: 1_000_000 * UNIT,
@@ -536,6 +540,7 @@ impl Protocol {
             &position_manager::GlobalConfig {
                 min_collateral: 10 * UNIT,
                 min_position_lifetime: 0,
+                funding_half_life_seconds: 43_200,
                 risk_capacity_limit_bps: 8_000,
                 base_borrow_rate_bps_day: 0,
                 max_variable_borrow_bps_day: 0,
@@ -735,17 +740,9 @@ fn funding_is_split_by_counter_exposure_and_same_time_checkpoint_is_idempotent()
     p.open(&p.trader_b, false, 2_500 * UNIT, 1_000 * UNIT);
 
     let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
-    let flow = manager.get_market(&p.market);
-    assert_eq!(flow.current_payer_side, abi::PayerSide::Long);
-    assert!(flow.current_payer_rate > 0);
-    assert!(flow.receiver_flow_per_second > 0);
-    assert!(flow.lp_flow_per_second > 0);
-
-    let complete_flow = flow.receiver_flow_per_second + flow.lp_flow_per_second;
-    assert!(
-        (flow.receiver_flow_per_second * 4 - complete_flow).abs() <= 2,
-        "the 1:4 receiver allocation may differ only by carried integer dust"
-    );
+    let market = manager.get_market(&p.market);
+    assert_eq!(market.current_payer_side, abi::PayerSide::Long);
+    assert!(market.current_payer_rate > 0);
 
     p.advance(DAY);
     manager.update_indices(&p.keeper, &p.market);
@@ -755,6 +752,14 @@ fn funding_is_split_by_counter_exposure_and_same_time_checkpoint_is_idempotent()
     assert!(accrued.lp_backed_index_long > 0);
     assert!(accrued.receiver_index_short > 0);
     assert!(receiver_claim > 0);
+    // 1:4 receiver:total allocation (light base is a quarter of the payer
+    // base), up to the carried integer dust of each accrual.
+    let receiver_accrued = accrued.receiver_backed_index_long;
+    let complete = receiver_accrued + accrued.lp_backed_index_long;
+    assert!(
+        (receiver_accrued * 4 - complete).abs() <= 4,
+        "the 1:4 receiver allocation may differ only by carried integer dust"
+    );
 
     manager.update_indices(&p.keeper, &p.market);
     let repeated = manager.get_market(&p.market);

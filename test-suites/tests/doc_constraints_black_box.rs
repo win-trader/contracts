@@ -81,6 +81,7 @@ mod abi {
         pub close_fee_low_bps: u32,
         pub close_fee_high_bps: u32,
         pub max_funding_rate_bps_day: i128,
+        pub instant_weight_bps: u32,
         pub market_risk_factor_bps: u32,
         pub max_long_size_open_interest: i128,
         pub max_short_size_open_interest: i128,
@@ -101,6 +102,7 @@ mod abi {
     pub struct GlobalConfig {
         pub min_collateral: i128,
         pub min_position_lifetime: u64,
+        pub funding_half_life_seconds: u64,
         pub risk_capacity_limit_bps: u32,
         pub base_borrow_rate_bps_day: i128,
         pub max_variable_borrow_bps_day: i128,
@@ -141,13 +143,12 @@ mod abi {
         pub receiver_index_short: i128,
         pub current_payer_side: PayerSide,
         pub current_payer_rate: i128,
-        pub receiver_flow_per_second: i128,
-        pub lp_flow_per_second: i128,
+        pub skew_ema: i128,
         pub last_funding_checkpoint: u64,
         pub receiver_payer_remainder: i128,
         pub lp_payer_remainder: i128,
         pub receiver_index_remainder: i128,
-        pub receiver_flow_remainder: i128,
+        pub pending_remainder: i128,
         pub config: MarketConfig,
     }
 
@@ -519,6 +520,7 @@ impl Protocol {
         position_manager::GlobalConfig {
             min_collateral: 10 * UNIT,
             min_position_lifetime: 0,
+            funding_half_life_seconds: 43_200,
             risk_capacity_limit_bps: 8_000,
             base_borrow_rate_bps_day,
             max_variable_borrow_bps_day,
@@ -536,6 +538,8 @@ impl Protocol {
             close_fee_low_bps: 10,
             close_fee_high_bps: 30,
             max_funding_rate_bps_day,
+            // Pure instant skew: the EMA-specific tests override this.
+            instant_weight_bps: 10_000,
             market_risk_factor_bps: 5_000,
             max_long_size_open_interest: 1_000_000 * UNIT,
             max_short_size_open_interest: 1_000_000 * UNIT,
@@ -710,8 +714,7 @@ fn p01_balanced_base_exposure_produces_zero_funding() {
     let market = manager.get_market(&p.market);
     assert_eq!(market.current_payer_side, abi::PayerSide::None);
     assert_eq!(market.current_payer_rate, 0);
-    assert_eq!(market.receiver_flow_per_second, 0);
-    assert_eq!(market.lp_flow_per_second, 0);
+    assert_eq!(market.skew_ema, 0);
 
     p.advance(DAY);
     p.refresh_price();
@@ -773,16 +776,19 @@ fn p04_lps_receive_all_funding_when_light_side_is_zero() {
     let manager = p.manager();
 
     let id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
-    let market = manager.get_market(&p.market);
-    assert_eq!(
-        market.receiver_flow_per_second, 0,
-        "no light side, no receiver flow"
-    );
-    assert!(market.lp_flow_per_second > 0, "all payer flow is LP-backed");
 
     p.advance(DAY);
     p.refresh_price();
     manager.update_indices(&p.keeper, &p.market);
+    let market = manager.get_market(&p.market);
+    assert_eq!(
+        market.receiver_backed_index_long, 0,
+        "no light side, no receiver-backed accrual"
+    );
+    assert!(
+        market.lp_backed_index_long > 0,
+        "all payer accrual is LP-backed"
+    );
     assert_eq!(
         manager.pending_receiver_funding_total(),
         0,
@@ -814,15 +820,18 @@ fn p05_dust_light_side_cannot_redirect_all_funding() {
     p.open(&p.trader_a, true, 100_000 * UNIT, 30_000 * UNIT);
     p.open(&p.trader_b, false, 20 * UNIT, 15 * UNIT);
 
+    p.advance(DAY);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
     let market = manager.get_market(&p.market);
-    let receiver = market.receiver_flow_per_second;
-    let lp = market.lp_flow_per_second;
+    let receiver = market.receiver_backed_index_long;
+    let lp = market.lp_backed_index_long;
     let dominant_base = market.long.base_exposure;
     let light_base = market.short.base_exposure;
     assert!(receiver >= 0);
     assert!(lp > 0, "LPs must keep the unmatched funding");
-    // receiver = payer_flow × light_base / dominant_base (rounded toward
-    // zero), so receiver × dominant_base <= (receiver + lp) × light_base.
+    // receiver accrual = payer accrual × light_base / dominant_base (rounded
+    // toward zero), so receiver × dominant <= (receiver + lp) × light.
     assert!(receiver * dominant_base <= (receiver + lp) * light_base);
     // The dust side offsets 0.02% of the dominant exposure; LPs must receive
     // the overwhelming share.
@@ -927,7 +936,7 @@ fn c05_c06_payer_fee_collection_restores_lp_equity() {
     let long_id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
     p.open(&p.trader_b, false, 2_500 * UNIT, 1_000 * UNIT);
 
-    p.advance(12_345);
+    p.advance(12_347);
     p.refresh_price();
     manager.update_indices(&p.keeper, &p.market);
     let market = manager.get_market(&p.market);
@@ -972,7 +981,7 @@ fn c04_receiver_capitalization_is_label_change_only() {
     p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
     let short_id = p.open(&p.trader_b, false, 2_500 * UNIT, 1_000 * UNIT);
 
-    p.advance(54_321);
+    p.advance(54_323);
     p.refresh_price();
     manager.update_indices(&p.keeper, &p.market);
     let market = manager.get_market(&p.market);
@@ -2886,9 +2895,10 @@ fn p13_capacity_gate_boundary_accept_and_reject() {
 }
 
 /// R16 "aggregate receiver liability rounds down, remainder carried": the
-/// pending receiver total advances by exactly floor(flow × dt / PRECISION)
-/// with the sub-stroop remainder carried into the next interval — pinned
-/// against the observable per-second flow, over two intervals.
+/// pending receiver total advances by exactly
+/// floor(payer_size × receiver_backed_index_delta / PRECISION) with the
+/// sub-stroop remainder carried per market, so split intervals telescope to
+/// the joined total exactly (§8.3).
 #[test]
 fn r16_receiver_liability_floors_with_carried_remainder() {
     let p = Protocol::new();
@@ -2896,40 +2906,37 @@ fn r16_receiver_liability_floors_with_carried_remainder() {
     p.seed_lp();
     let manager = p.manager();
 
-    // One-sided-enough market so the receiver flow is nonzero.
+    // One-sided-enough market so the receiver accrual is nonzero.
     p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
     p.open(&p.trader_b, false, 3_000 * UNIT, 900 * UNIT);
-    let flow = manager.get_market(&p.market).receiver_flow_per_second;
-    assert!(flow > 0);
-
-    // An interval whose remainder is nonzero AND at least half the
-    // precision, so doubling it provably rolls one extra stroop into the
-    // second interval.
-    let dt: i128 = (990..1_200)
-        .find(|dt| {
-            let remainder = flow * dt % INDEX_PRECISION;
-            remainder != 0 && 2 * remainder >= INDEX_PRECISION
-        })
-        .expect("some interval in range must leave a carrying remainder");
-
+    let payer_size = 10_000 * UNIT;
+    let index_start = manager.get_market(&p.market).receiver_backed_index_long;
     let start = manager.pending_receiver_funding_total();
-    p.advance(dt as u64);
-    manager.update_indices(&p.keeper, &p.market);
-    let first = manager.pending_receiver_funding_total() - start;
-    assert_eq!(first, floor_div(flow * dt, INDEX_PRECISION), "floor, never round");
 
-    // Second interval: the carried remainder joins the new accrual, so the
-    // two intervals telescope to the single-interval total exactly — one
-    // stroop more than doubling the floored first interval.
-    p.advance(dt as u64);
+    // Two odd intervals: each advance floors against INDEX_PRECISION and
+    // carries its remainder forward.
+    p.advance(997);
+    p.refresh_price();
     manager.update_indices(&p.keeper, &p.market);
-    let total = manager.pending_receiver_funding_total() - start;
-    assert_eq!(total, floor_div(flow * 2 * dt, INDEX_PRECISION));
+    let first_delta =
+        manager.get_market(&p.market).receiver_backed_index_long - index_start;
+    let first = manager.pending_receiver_funding_total() - start;
+    assert!(first_delta > 0);
     assert_eq!(
-        total,
-        2 * first + 1,
-        "the carried remainder must surface in the second interval"
+        first,
+        floor_div(payer_size * first_delta, INDEX_PRECISION),
+        "floor, never round"
     );
+
+    // The carried remainder joins the second interval, so the two-step total
+    // equals what the joined index delta implies — the split loses nothing.
+    p.advance(1_003);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
+    let total_delta =
+        manager.get_market(&p.market).receiver_backed_index_long - index_start;
+    let total = manager.pending_receiver_funding_total() - start;
+    assert_eq!(total, floor_div(payer_size * total_delta, INDEX_PRECISION));
 }
 
 /// §13.2 cutoff semantics: a canonical round's prices are observations AT
@@ -3004,5 +3011,173 @@ fn p15_skew_mutation_reprices_only_forward() {
          shallower old rate ({} vs {})",
         i1 - i0,
         i2 - i1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §8.1 EMA funding: history-blended skew
+// ---------------------------------------------------------------------------
+
+/// §8.1 EMA: the trader who balances the book keeps receiving for a while.
+/// With the book perfectly balanced the blended integral skew is still
+/// nonzero from history, the old dominant side keeps paying, and the share
+/// cap routes every stroop to the balancers — LPs collect nothing they did
+/// not match.
+#[test]
+fn ema_funding_rewards_the_balancer_after_the_book_levels() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+    let mut config = Protocol::market_config(100);
+    config.instant_weight_bps = 3_000;
+    manager.set_market_config(&p.admin, &p.market, &config);
+
+    // Long-only book for a day: the EMA charges up toward full long skew.
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(DAY);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
+    let charged = manager.get_market(&p.market);
+    assert!(charged.skew_ema > 0, "history remembers the long skew");
+
+    // A short balances the book exactly. Instant skew is zero, but the
+    // blend still points long: longs keep paying.
+    let short_id = p.open(&p.trader_b, false, 10_000 * UNIT, 3_000 * UNIT);
+    let market = manager.get_market(&p.market);
+    assert_eq!(market.current_payer_side, abi::PayerSide::Long);
+    assert!(market.current_payer_rate > 0);
+
+    // Over the next hour the balancer collects real credit, and the LP
+    // index does not move — the whole balanced book matches the payer flow.
+    let balance_before = p.token().balance(&p.trader_b);
+    p.advance(3_600);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
+    let after = manager.get_market(&p.market);
+    assert!(
+        after.receiver_index_short > 0,
+        "the balancer earns credit on a balanced book"
+    );
+    assert_eq!(
+        after.lp_backed_index_long, charged.lp_backed_index_long,
+        "nothing unmatched for LPs while the book is balanced"
+    );
+
+    // The credit is real cash on close (flat price, so no fee, no PnL).
+    p.close(short_id);
+    let payout = p.token().balance(&p.trader_b) - balance_before;
+    assert!(
+        payout > 3_000 * UNIT,
+        "balancing paid: got {payout} back on 3_000 collateral"
+    );
+}
+
+/// §8.1 EMA: after a hard flip the payer can be the *lighter* side. The
+/// receiver share cap keeps the LP slice non-negative — without it this
+/// exact shape drove the LP-backed index backwards, which
+/// `funding::pending_fees` treats as an invariant violation on every later
+/// action (a bricked market).
+#[test]
+fn ema_funding_survives_a_lighter_side_payer() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+    let mut config = Protocol::market_config(100);
+    config.instant_weight_bps = 3_000;
+    manager.set_market_config(&p.admin, &p.market, &config);
+
+    // Longs dominate for a day; the EMA charges long.
+    let long_id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(DAY);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
+
+    // The book flips hard short: instant skew −0.5, memory ≈ +0.75 — the
+    // blend stays long, so the payer is now the lighter side.
+    p.open(&p.trader_b, false, 30_000 * UNIT, 9_000 * UNIT);
+    let market = manager.get_market(&p.market);
+    assert_eq!(
+        market.current_payer_side,
+        abi::PayerSide::Long,
+        "memory outweighs the flip"
+    );
+
+    // An hour of lighter-side paying: payer indices advance, the credit
+    // flows to the heavy side, and the LP index stays exactly flat.
+    let before = manager.get_market(&p.market);
+    p.advance(3_600);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
+    let after = manager.get_market(&p.market);
+    assert!(after.receiver_backed_index_long > before.receiver_backed_index_long);
+    assert!(after.receiver_index_short > before.receiver_index_short);
+    assert_eq!(
+        after.lp_backed_index_long, before.lp_backed_index_long,
+        "the share cap leaves nothing unmatched for LPs"
+    );
+
+    // The market still functions end to end — the negative-flow shape used
+    // to brick every action here.
+    p.close(long_id);
+    assert!(manager.try_get_position(&long_id).is_err());
+}
+
+/// §3 under the EMA: checkpoint frequency cannot change accrued value
+/// beyond the decay table's quantization. Exact equality holds at
+/// `instant_weight = BPS` (`i18_4_split_checkpoints_equal_single_interval`);
+/// at a real blend the split may drift only by cash-invisible index dust
+/// (≈10 stroops at these sizes for the tolerance below).
+#[test]
+fn i18_4_ema_split_checkpoints_match_single_interval_within_tolerance() {
+    let run = |split: bool| -> (i128, i128, i128) {
+        let p = Protocol::new();
+        p.disable_borrow();
+        p.seed_lp();
+        let manager = p.manager();
+        let mut config = Protocol::market_config(100);
+        config.instant_weight_bps = 3_000;
+        manager.set_market_config(&p.admin, &p.market, &config);
+        p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+        p.open(&p.trader_b, false, 2_500 * UNIT, 1_000 * UNIT);
+        let intervals: &[u64] = if split {
+            &[7, 991, 13_337, 85_656]
+        } else {
+            &[99_991]
+        };
+        for dt in intervals {
+            p.advance(*dt);
+            p.refresh_price();
+            manager.update_indices(&p.keeper, &p.market);
+        }
+        let market = manager.get_market(&p.market);
+        (
+            market.receiver_backed_index_long,
+            market.lp_backed_index_long,
+            market.receiver_index_short,
+        )
+    };
+
+    let single = run(false);
+    let split = run(true);
+    const TOL: i128 = 10_000;
+    assert!(
+        (single.0 - split.0).abs() <= TOL,
+        "receiver-backed drift: {} vs {}",
+        single.0,
+        split.0
+    );
+    assert!(
+        (single.1 - split.1).abs() <= TOL,
+        "LP-backed drift: {} vs {}",
+        single.1,
+        split.1
+    );
+    assert!(
+        (single.2 - split.2).abs() <= TOL,
+        "credit drift: {} vs {}",
+        single.2,
+        split.2
     );
 }

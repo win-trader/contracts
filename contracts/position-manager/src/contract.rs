@@ -146,7 +146,7 @@ impl PositionManager for PositionManagerContract {
         let mut ledger = storage::ledger(&env);
         let now = env.ledger().timestamp();
         checkpoint::checkpoint_global(&env, &mut ledger, now);
-        checkpoint::checkpoint_market(&env, &mut market, now);
+        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
         let price = snapshot::authenticated_price(&env, &market_symbol);
         validation::check_slippage(&env, is_long, true, price, acceptable_price);
         validation::validate_orders(&env, is_long, take_profit, stop_loss, price);
@@ -218,7 +218,7 @@ impl PositionManager for PositionManagerContract {
         funding::reset_debts(&env, &ledger, &mut position, &market);
         storage::save_position(&env, &position);
         ledger.open_position_count += 1;
-        funding::recompute_market_flow(&env, &mut ledger, &mut market);
+        funding::refresh_display(&env, &mut market);
         storage::save_market(&env, &market_symbol, &market);
         risk::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
@@ -260,7 +260,7 @@ impl PositionManager for PositionManagerContract {
         let mut ledger = storage::ledger(&env);
         let now = env.ledger().timestamp();
         checkpoint::checkpoint_global(&env, &mut ledger, now);
-        checkpoint::checkpoint_market(&env, &mut market, now);
+        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
         let price = snapshot::authenticated_price(&env, &position.market);
         validation::check_slippage(&env, position.is_long, true, price, acceptable_price);
         if collateral_added > 0 {
@@ -335,7 +335,7 @@ impl PositionManager for PositionManagerContract {
         }
         funding::reset_debts(&env, &ledger, &mut position, &market);
         storage::save_position(&env, &position);
-        funding::recompute_market_flow(&env, &mut ledger, &mut market);
+        funding::refresh_display(&env, &mut market);
         storage::save_market(&env, &position.market, &market);
         risk::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
@@ -385,7 +385,7 @@ impl PositionManager for PositionManagerContract {
         let mut market = load_market(&env, &position.market);
         let mut ledger = storage::ledger(&env);
         checkpoint::checkpoint_global(&env, &mut ledger, now);
-        checkpoint::checkpoint_market(&env, &mut market, now);
+        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
         let price = snapshot::authenticated_price(&env, &position.market);
         validation::check_slippage(&env, position.is_long, false, price, acceptable_price);
         let summary = settle::settle_close(
@@ -431,7 +431,7 @@ impl PositionManager for PositionManagerContract {
         let mut ledger = storage::ledger(&env);
         let now = env.ledger().timestamp();
         checkpoint::checkpoint_global(&env, &mut ledger, now);
-        checkpoint::checkpoint_market(&env, &mut market, now);
+        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
         let price = snapshot::authenticated_price(&env, &position.market);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
@@ -519,7 +519,7 @@ impl PositionManager for PositionManagerContract {
         let mut ledger = storage::ledger(&env);
         let now = env.ledger().timestamp();
         checkpoint::checkpoint_global(&env, &mut ledger, now);
-        checkpoint::checkpoint_market(&env, &mut market, now);
+        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
         let price = snapshot::authenticated_price(&env, &position.market);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
@@ -607,7 +607,7 @@ impl PositionManager for PositionManagerContract {
         let mut market = load_market(&env, &position.market);
         let now = env.ledger().timestamp();
         checkpoint::checkpoint_global(&env, &mut ledger, now);
-        checkpoint::checkpoint_market(&env, &mut market, now);
+        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
         let size = position.size;
         let summary =
             settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
@@ -699,7 +699,7 @@ impl PositionManager for PositionManagerContract {
         let now = env.ledger().timestamp();
         checkpoint::checkpoint_global(&env, &mut ledger, now);
         let mut market = load_market(&env, &market_symbol);
-        checkpoint::checkpoint_market(&env, &mut market, now);
+        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
         storage::save_market(&env, &market_symbol, &market);
         let physical = ledger::physical_cash(&env);
         risk::refresh_rate(&env, &mut ledger, physical);
@@ -714,8 +714,7 @@ impl PositionManager for PositionManagerContract {
             receiver_index_short: market.receiver_index_short,
             current_payer_side: market.current_payer_side,
             current_payer_rate: market.current_payer_rate,
-            receiver_flow_per_second: market.receiver_flow_per_second,
-            lp_flow_per_second: market.lp_flow_per_second,
+            skew_ema: market.skew_ema,
             borrow_index: ledger.borrow_index,
             current_borrow_rate: ledger.current_borrow_rate,
             timestamp: now,
@@ -762,9 +761,9 @@ impl PositionManager for PositionManagerContract {
             panic_with_error!(&env, PositionManagerError::InvalidConfig);
         }
         if let Some(mut market) = existing {
-            checkpoint::checkpoint_market(&env, &mut market, now);
+            checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
             market.config = config.clone();
-            funding::recompute_market_flow(&env, &mut ledger, &mut market);
+            funding::refresh_display(&env, &mut market);
             storage::save_market(&env, &market_symbol, &market);
         } else {
             let mut markets = markets;
@@ -813,7 +812,16 @@ impl PositionManager for PositionManagerContract {
     ) -> AccountingSnapshot {
         require_vault(&env, &caller);
         let mut ledger = storage::ledger(&env);
-        checkpoint::checkpoint_global(&env, &mut ledger, env.ledger().timestamp());
+        let now = env.ledger().timestamp();
+        checkpoint::checkpoint_global(&env, &mut ledger, now);
+        // §8.3 — the receiver liability accrues per-market, so LP pricing
+        // checkpoints every active market (bounded by max_active_markets)
+        // rather than trusting the keeper sweep's cadence.
+        for symbol in storage::active_markets(&env).iter() {
+            let mut market = load_market(&env, &symbol);
+            checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+            storage::save_market(&env, &symbol, &market);
+        }
         let result = snapshot::build_snapshot(&env, &mut ledger, &round, physical, true);
         risk::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);

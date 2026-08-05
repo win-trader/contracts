@@ -23,7 +23,8 @@ use crate::errors::PositionManagerError;
 use crate::{math, storage};
 
 /// §5.1 global state: the five non-LP claim totals, the risk counters, and
-/// the global accrual state (borrow index + receiver-funding flow).
+/// the global borrow accrual. The receiver-funding liability total is fed
+/// per-market by `checkpoint::checkpoint_market` (§8.3).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Ledger {
@@ -42,10 +43,6 @@ pub struct Ledger {
     pub borrow_index_remainder: i128,
     /// `INDEX_PRECISION`-scaled bps/day rate for the current interval.
     pub current_borrow_rate: i128,
-    // -- Global receiver-funding accrual (§8.3). --
-    /// Sum of every market's receiver flow, cash/second at `INDEX_PRECISION`.
-    pub receiver_flow_per_second: i128,
-    pub receiver_accrual_remainder: i128,
     pub last_global_checkpoint: u64,
 }
 
@@ -63,8 +60,6 @@ impl Ledger {
             borrow_index: 0,
             borrow_index_remainder: 0,
             current_borrow_rate: initial_borrow_rate,
-            receiver_flow_per_second: 0,
-            receiver_accrual_remainder: 0,
             last_global_checkpoint: now,
         }
     }

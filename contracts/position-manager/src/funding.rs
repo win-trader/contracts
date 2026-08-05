@@ -1,11 +1,14 @@
 //! Funding mechanics — doc §8.
 //!
-//! Funding prices net directional imbalance. The dominant side pays a
-//! quadratic-in-skew rate on its size open interest; light-side traders
-//! receive the share matched by their counter-exposure and LPs receive the
-//! rest. Receiver funding is guaranteed when it accrues (§5.4 of the theory
-//! doc), which is why the payer flow is split into a receiver-backed index
-//! and an LP-backed index with different collection accounting.
+//! Funding prices net directional imbalance, blended with its history: the
+//! side the §8.1 integral skew points at pays a quadratic rate on its size
+//! open interest; the other side's traders receive the share matched by
+//! their counter-exposure (capped at the whole flow — the payer can be the
+//! lighter side) and LPs receive the rest. Receiver funding is guaranteed
+//! when it accrues (§5.4 of the theory doc), which is why the payer flow is
+//! split into a receiver-backed index and an LP-backed index with different
+//! collection accounting. The accrual itself lives in
+//! `checkpoint::checkpoint_market`.
 
 use soroban_sdk::{panic_with_error, Env};
 
@@ -30,70 +33,28 @@ pub struct PendingFees {
     pub borrow: i128,
 }
 
-/// §8.1 — recompute the market's payer side, rate, and flow split from its
-/// current base exposures, and roll the change into the global receiver-flow
-/// sum (constant-complexity update, §8.3). Call only after the market has
-/// been checkpointed to `now`.
-pub fn recompute_market_flow(env: &Env, ledger: &mut Ledger, market: &mut Market) {
-    let old_receiver = market.receiver_flow_per_second;
-    let long_base = market.long.base_exposure;
-    let short_base = market.short.base_exposure;
-    if long_base == short_base || long_base + short_base == 0 {
-        market.current_payer_side = PayerSide::None;
-        market.current_payer_rate = 0;
-        market.receiver_flow_per_second = 0;
-        market.lp_flow_per_second = 0;
-        if market.long.size_open_interest == 0 && market.short.size_open_interest == 0 {
-            market.receiver_payer_remainder = 0;
-            market.lp_payer_remainder = 0;
-            market.receiver_index_remainder = 0;
-            market.receiver_flow_remainder = 0;
-        }
+/// §8.1 — refresh the market's displayed payer side and rate from the
+/// post-mutation book and EMA, and drop the rounding remainders once the
+/// book is completely empty. Accrual happens in `checkpoint_market`; these
+/// two fields exist for events and off-chain consumers.
+pub fn refresh_display(env: &Env, market: &mut Market) {
+    let skew = math::skew_frac(env, market.long.base_exposure, market.short.base_exposure);
+    let integral = math::integral_skew(env, skew, market.skew_ema, market.config.instant_weight_bps);
+    market.current_payer_side = if integral > 0 {
+        PayerSide::Long
+    } else if integral < 0 {
+        PayerSide::Short
     } else {
-        let skew = math::skew_bps(env, long_base, short_base);
-        let rate = math::funding_rate(env, market.config.max_funding_rate_bps_day, skew);
-        let long_pays = long_base > short_base;
-        let (dominant_size, dominant_base, light_size, light_base) = if long_pays {
-            (
-                market.long.size_open_interest,
-                long_base,
-                market.short.size_open_interest,
-                short_base,
-            )
-        } else {
-            (
-                market.short.size_open_interest,
-                short_base,
-                market.long.size_open_interest,
-                long_base,
-            )
-        };
-        let payer_flow = math::flow_per_second(env, dominant_size, rate);
-        let receiver_flow = if light_size == 0 || light_base == 0 {
-            0
-        } else {
-            let numerator = math::add(
-                env,
-                math::mul(env, payer_flow, light_base),
-                market.receiver_flow_remainder,
-            );
-            market.receiver_flow_remainder = numerator % dominant_base;
-            numerator / dominant_base
-        };
-        market.current_payer_side = if long_pays {
-            PayerSide::Long
-        } else {
-            PayerSide::Short
-        };
-        market.current_payer_rate = rate;
-        market.receiver_flow_per_second = receiver_flow;
-        market.lp_flow_per_second = math::sub(env, payer_flow, receiver_flow);
+        PayerSide::None
+    };
+    market.current_payer_rate =
+        math::rate_from_integral(env, market.config.max_funding_rate_bps_day, integral);
+    if market.long.size_open_interest == 0 && market.short.size_open_interest == 0 {
+        market.receiver_payer_remainder = 0;
+        market.lp_payer_remainder = 0;
+        market.receiver_index_remainder = 0;
+        market.pending_remainder = 0;
     }
-    ledger.receiver_flow_per_second = math::add(
-        env,
-        math::sub(env, ledger.receiver_flow_per_second, old_receiver),
-        market.receiver_flow_per_second,
-    );
 }
 
 /// §11.2 — pending amounts for a position against the current indices.

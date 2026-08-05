@@ -11,6 +11,8 @@ use crate::errors::PositionManagerError;
 pub fn validate_global(env: &Env, c: &GlobalConfig) {
     let split = c.lp_revenue_share_bps as u64 + c.risk_keeper_revenue_share_bps as u64;
     if c.min_collateral <= 0
+        || c.funding_half_life_seconds < 60
+        || c.funding_half_life_seconds > 31_536_000
         || c.risk_capacity_limit_bps == 0
         || c.risk_capacity_limit_bps > BPS as u32
         || c.base_borrow_rate_bps_day < 0
@@ -32,6 +34,7 @@ pub fn validate_market(env: &Env, c: &MarketConfig) {
         || c.close_fee_high_bps > BPS as u32
         || c.max_funding_rate_bps_day < 0
         || c.max_funding_rate_bps_day > BPS
+        || c.instant_weight_bps > BPS as u32
         || c.market_risk_factor_bps == 0
         || c.market_risk_factor_bps > BPS as u32
         || c.recovery_pnl_factor_bps >= c.warning_pnl_factor_bps
@@ -47,6 +50,11 @@ pub fn validate_market(env: &Env, c: &MarketConfig) {
         || c.max_short_size_open_interest <= 0
         || c.max_long_base_exposure <= 0
         || c.max_short_base_exposure <= 0
+        // Ceilings that keep the §8.1 window integral inside i128 headroom.
+        || c.max_long_size_open_interest > 10_000_000_000_000_000
+        || c.max_short_size_open_interest > 10_000_000_000_000_000
+        || c.max_long_base_exposure > 1_000_000_000_000_000_000
+        || c.max_short_base_exposure > 1_000_000_000_000_000_000
     {
         panic_with_error!(env, PositionManagerError::InvalidConfig);
     }

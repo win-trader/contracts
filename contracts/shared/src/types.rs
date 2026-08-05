@@ -90,8 +90,9 @@ impl Default for MarketSide {
     }
 }
 
-/// Which side currently pays funding (§8.1: the side with more base
-/// exposure). `None` when the market is balanced or empty.
+/// Which side currently pays funding (§8.1: the side the blended integral
+/// skew points at — under the EMA this can be the *lighter* side for a
+/// while after the book flips). `None` when the blend is exactly zero.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PayerSide {
@@ -108,6 +109,9 @@ pub struct MarketConfig {
     /// §11.1 closing-fee tier when the close worsens skew.
     pub close_fee_high_bps: u32,
     pub max_funding_rate_bps_day: i128,
+    /// §8.1 weight of the instantaneous skew in the funding blend, in bps;
+    /// the rest is the half-life EMA. `BPS` reproduces pure instant skew.
+    pub instant_weight_bps: u32,
     pub market_risk_factor_bps: u32,
     pub max_long_size_open_interest: i128,
     pub max_short_size_open_interest: i128,
@@ -132,6 +136,9 @@ pub struct MarketConfig {
 pub struct GlobalConfig {
     pub min_collateral: i128,
     pub min_position_lifetime: u64,
+    /// §8.1 half-life of the funding skew EMA, seconds (global: one memory
+    /// horizon for every market).
+    pub funding_half_life_seconds: u64,
     pub risk_capacity_limit_bps: u32,
     pub base_borrow_rate_bps_day: i128,
     pub max_variable_borrow_bps_day: i128,
@@ -152,7 +159,7 @@ pub struct LpConfig {
 }
 
 /// Authoritative per-market state: the side aggregates, the funding indices,
-/// the current funding flows, and the market configuration.
+/// the funding EMA, and the market configuration.
 ///
 /// Soroban limits UDT field names to 30 characters, so where a doc glossary
 /// term is longer the field drops the redundant qualifier and its doc
@@ -175,19 +182,18 @@ pub struct Market {
     pub receiver_index_long: i128,
     pub receiver_index_short: i128,
     pub current_payer_side: PayerSide,
-    /// `INDEX_PRECISION`-scaled bps/day payer rate for the current interval.
+    /// `INDEX_PRECISION`-scaled bps/day payer rate as of the last refresh.
     pub current_payer_rate: i128,
-    /// Receiver-allocated share of the payer flow, cash/second at
-    /// `INDEX_PRECISION` (§8.1).
-    pub receiver_flow_per_second: i128,
-    /// LP-allocated remainder of the payer flow, cash/second at
-    /// `INDEX_PRECISION` (§8.1).
-    pub lp_flow_per_second: i128,
+    /// §8.1 signed EMA of the instantaneous skew: a fraction of one at
+    /// `INDEX_PRECISION` scale, positive when history says longs dominate.
+    /// Decays toward the current skew with the global half-life.
+    pub skew_ema: i128,
     pub last_funding_checkpoint: u64,
     pub receiver_payer_remainder: i128,
     pub lp_payer_remainder: i128,
     pub receiver_index_remainder: i128,
-    pub receiver_flow_remainder: i128,
+    /// Sub-stroop carry of the receiver-liability accrual (§8.3).
+    pub pending_remainder: i128,
     pub config: MarketConfig,
 }
 
@@ -214,13 +220,12 @@ impl Market {
             receiver_index_short: 0,
             current_payer_side: PayerSide::None,
             current_payer_rate: 0,
-            receiver_flow_per_second: 0,
-            lp_flow_per_second: 0,
+            skew_ema: 0,
             last_funding_checkpoint: now,
             receiver_payer_remainder: 0,
             lp_payer_remainder: 0,
             receiver_index_remainder: 0,
-            receiver_flow_remainder: 0,
+            pending_remainder: 0,
             config,
         }
     }

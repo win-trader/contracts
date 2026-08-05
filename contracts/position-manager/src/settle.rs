@@ -361,17 +361,16 @@ pub fn settle_close(
 
     // §10.3 steps 5-7: new flows, fresh risk evaluation against the
     // post-transfer balance, new borrow rate.
-    funding::recompute_market_flow(env, ledger, &mut market);
+    funding::refresh_display(env, &mut market);
     let physical_after = ledger::physical_cash(env);
     let equity_after = ledger.cash_lp_equity(env, physical_after);
     risk::evaluate_market_risk(env, ledger, &position.market, &mut market, price, equity_after);
 
-    // §8.3 — with no open positions and no receiver flow, aggregate
-    // conservation makes every market size zero: release the unassigned
-    // rounding residue to LP residual cash without a market loop.
-    if ledger.open_position_count == 0 && ledger.receiver_flow_per_second == 0 {
+    // §8.3 — with no open positions anywhere, aggregate conservation makes
+    // every market size zero: release the unassigned rounding residue to LP
+    // residual cash without a market loop.
+    if ledger.open_position_count == 0 {
         ledger.pending_receiver_funding_total = 0;
-        ledger.receiver_accrual_remainder = 0;
     }
     storage::save_market(env, &position.market, &market);
     risk::refresh_rate(env, ledger, physical_after);
