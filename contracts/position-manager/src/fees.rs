@@ -5,12 +5,11 @@
 //! PnL, then LP-backed funding, then borrow) so a shortfall lands on the
 //! least-protected claim, then resets the debt baselines.
 
-use soroban_sdk::{panic_with_error, Env};
+use soroban_sdk::Env;
 
 use shared::constants::BPS;
 use shared::{Market, Position};
 
-use crate::errors::PositionManagerError;
 use crate::events::{FeeSource, RevenueSplit};
 use crate::funding;
 use crate::ledger::{self, Ledger};
@@ -147,51 +146,26 @@ pub fn capitalize(
     }
 }
 
-/// §11.1 — the opening fee for adding `base_added`/`size_added` exposure:
-/// low tier when the action improves or preserves base-exposure skew, high
-/// tier when it worsens it. Rounds up (§16).
-pub fn tiered_opening_fee(
-    env: &Env,
-    market: &Market,
-    is_long: bool,
-    base_added: i128,
-    size_added: i128,
-) -> i128 {
+/// §11.1 — the closing-fee tier for removing `base_removed` from the
+/// `is_long` side: low when the removal improves or preserves the book's
+/// base-exposure skew, high when it worsens it.
+pub fn tiered_close_fee_bps(env: &Env, market: &Market, is_long: bool, base_removed: i128) -> u32 {
     let skew_before = math::skew_bps(env, market.long.base_exposure, market.short.base_exposure);
     let (long_after, short_after) = if is_long {
         (
-            math::add(env, market.long.base_exposure, base_added),
+            math::sub(env, market.long.base_exposure, base_removed),
             market.short.base_exposure,
         )
     } else {
         (
             market.long.base_exposure,
-            math::add(env, market.short.base_exposure, base_added),
+            math::sub(env, market.short.base_exposure, base_removed),
         )
     };
     let skew_after = math::skew_bps(env, long_after, short_after);
-    let fee_bps = if skew_after <= skew_before {
-        market.config.open_fee_low_bps
+    if skew_after <= skew_before {
+        market.config.close_fee_low_bps
     } else {
-        market.config.open_fee_high_bps
-    };
-    math::opening_fee(env, size_added, fee_bps)
-}
-
-/// §11.1 — collect the opening fee from stored collateral immediately and
-/// split it. Panics if the position cannot cover it in full.
-pub fn apply_opening_fee(
-    env: &Env,
-    ledger: &mut Ledger,
-    position: &mut Position,
-    market: &mut Market,
-    fee: i128,
-) {
-    let is_long = position.is_long;
-    let collected =
-        ledger::collect_stored_collateral(env, ledger, position, market.side_mut(is_long), fee);
-    if collected != fee {
-        panic_with_error!(env, PositionManagerError::InsufficientCollateral);
+        market.config.close_fee_high_bps
     }
-    split_revenue(env, ledger, collected, FeeSource::Opening, position.id);
 }

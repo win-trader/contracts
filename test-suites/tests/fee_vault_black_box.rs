@@ -59,8 +59,8 @@ mod abi {
     #[contracttype]
     #[derive(Clone, Debug)]
     pub struct MarketConfig {
-        pub open_fee_low_bps: u32,
-        pub open_fee_high_bps: u32,
+        pub close_fee_low_bps: u32,
+        pub close_fee_high_bps: u32,
         pub max_funding_rate_bps_day: i128,
         pub market_risk_factor_bps: u32,
         pub max_long_size_open_interest: i128,
@@ -251,6 +251,7 @@ mod abi {
         fn liquidate_position(env: Env, caller: Address, position_id: u64);
         fn update_indices(env: Env, caller: Address, market: Symbol);
         fn set_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
+        fn set_global_config(env: Env, caller: Address, config: GlobalConfig);
         fn get_position(env: Env, position_id: u64) -> Position;
         fn get_market(env: Env, market: Symbol) -> Market;
         fn pending_receiver_funding_total(env: Env) -> i128;
@@ -472,8 +473,8 @@ impl Protocol {
 
     fn market_config(max_funding_rate_bps_day: i128) -> position_manager::MarketConfig {
         position_manager::MarketConfig {
-            open_fee_low_bps: 10,
-            open_fee_high_bps: 30,
+            close_fee_low_bps: 10,
+            close_fee_high_bps: 30,
             max_funding_rate_bps_day,
             market_risk_factor_bps: 5_000,
             max_long_size_open_interest: 1_000_000 * UNIT,
@@ -524,6 +525,29 @@ impl Protocol {
 
     fn seed_lp(&self) -> i128 {
         self.deposit(&self.lp, 100_000 * UNIT)
+    }
+
+    /// Zero the borrow and funding rates so fee tests observe the closing
+    /// fee alone across elapsed time.
+    fn zero_rates(&self) {
+        let manager = position_manager::Client::new(&self.env, &self.position_manager_id);
+        manager.set_global_config(
+            &self.admin,
+            &position_manager::GlobalConfig {
+                min_collateral: 10 * UNIT,
+                min_position_lifetime: 0,
+                risk_capacity_limit_bps: 8_000,
+                base_borrow_rate_bps_day: 0,
+                max_variable_borrow_bps_day: 0,
+                lp_revenue_share_bps: 7_000,
+                risk_keeper_revenue_share_bps: 1_000,
+                hard_cap_factor_limit_bps: 10_000,
+                max_adl_reward: 100 * UNIT,
+                max_insolvent_touch_reward: 100 * UNIT,
+                max_active_markets: 8,
+            },
+        );
+        manager.set_market_config(&self.admin, &self.market, &Self::market_config(0));
     }
 
     fn open(&self, owner: &Address, is_long: bool, size: i128, collateral: i128) -> u64 {
@@ -588,54 +612,60 @@ fn physical_cash_is_the_source_of_truth_and_donations_belong_to_lps() {
 }
 
 #[test]
-fn opening_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
+fn closing_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
     let p = Protocol::new();
+    p.zero_rates();
     p.seed_lp();
     let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
+    let token = soroban_sdk::token::Client::new(&p.env, &p.token_id);
 
-    let before = p.snapshot();
-    let long_id = p.open(&p.trader_a, true, 10_000 * UNIT, 2_000 * UNIT);
-    let long = manager.get_position(&long_id);
-    let high_fee = 30 * UNIT;
-    assert_eq!(long.stored_collateral, 2_000 * UNIT - high_fee);
-
-    let after_long = p.snapshot();
+    // Opens charge nothing regardless of skew.
+    let long_id = p.open(&p.trader_a, true, 1_000 * UNIT, 300 * UNIT);
+    let short_id = p.open(&p.trader_b, false, 4_000 * UNIT, 1_200 * UNIT);
     assert_eq!(
-        after_long.cash_lp_equity - before.cash_lp_equity,
-        high_fee * 7_000 / 10_000
+        manager.get_position(&long_id).stored_collateral,
+        300 * UNIT
     );
 
-    let short_id = p.open(&p.trader_b, false, 5_000 * UNIT, 1_000 * UNIT);
-    let short = manager.get_position(&short_id);
-    let low_fee = 5 * UNIT;
-    assert_eq!(short.stored_collateral, 1_000 * UNIT - low_fee);
-
-    let market = manager.get_market(&p.market);
-    assert_eq!(market.long.size_open_interest, 10_000 * UNIT);
-    assert_eq!(market.short.size_open_interest, 5_000 * UNIT);
+    // 100 -> 90: the short is in profit. Halving the dominant short side
+    // improves skew 6_000 -> 3_333, so the winner pays the low tier:
+    // fee = 2_000 x 10bps = 2, realized payout = 200 profit - 2.
+    p.advance(31);
+    p.set_price(90 * UNIT);
+    p.publish_round();
+    let before = token.balance(&p.trader_b);
+    manager.decrease_position(&short_id, &(2_000 * UNIT), &0, &0);
     assert_eq!(
-        market.long.stored_collateral_total,
-        manager.get_position(&long_id).stored_collateral
+        token.balance(&p.trader_b) - before,
+        198 * UNIT,
+        "improving close pays the low tier out of profit"
     );
+
+    // 100 -> 110: the long is in profit. Closing the light long side
+    // worsens skew 3_333 -> 10_000, so the winner pays the high tier:
+    // fee = 1_000 x 30bps = 3, payout = 300 collateral + 100 profit - 3.
+    p.advance(31);
+    p.set_price(110 * UNIT);
+    p.publish_round();
+    let before = token.balance(&p.trader_a);
+    manager.decrease_position(&long_id, &(1_000 * UNIT), &0, &0);
     assert_eq!(
-        market.short.stored_collateral_total,
-        short.stored_collateral
+        token.balance(&p.trader_a) - before,
+        397 * UNIT,
+        "worsening close pays the high tier out of profit"
     );
 }
 
 #[test]
-fn opening_fee_is_deducted_from_collateral_instead_of_added_to_the_wallet_debit() {
+fn open_charges_no_fee_and_stores_the_full_collateral() {
     let p = Protocol::new();
     p.seed_lp();
     let token = soroban_sdk::token::Client::new(&p.env, &p.token_id);
     let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
 
     let collateral = 100 * UNIT;
-    let size = 1_000 * UNIT;
-    let opening_fee = 3 * UNIT;
     let balance_before = token.balance(&p.trader_a);
-
-    let position_id = p.open(&p.trader_a, true, size, collateral);
+    let position_id = p.open(&p.trader_a, true, 1_000 * UNIT, collateral);
 
     assert_eq!(
         balance_before - token.balance(&p.trader_a),
@@ -644,8 +674,8 @@ fn opening_fee_is_deducted_from_collateral_instead_of_added_to_the_wallet_debit(
     );
     assert_eq!(
         manager.get_position(&position_id).stored_collateral,
-        collateral - opening_fee,
-        "the opening fee starts the position below the amount paid"
+        collateral,
+        "no fee is taken at open; the closing fee comes out of winnings"
     );
 }
 
@@ -656,24 +686,9 @@ fn max_leverage_open_is_healthy_until_the_maintenance_floor() {
     let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
 
     // Mirror the order ticket: max leverage is BPS / initial_margin_bps
-    // (20× here), sized to the largest notional whose post-fee collateral
-    // still backs that leverage.
+    // (20× here); with no opening fee the sizing is exact.
     let debit = 100 * UNIT;
-    let leverage = 20i128;
-    let fee_bps = 30i128; // first long on an empty book worsens skew → high tier
-    let mut low = 0i128;
-    let mut high = debit * leverage;
-    while low < high {
-        let candidate = (low + high + 1) / 2;
-        let fee = (candidate * fee_bps + 9_999) / 10_000;
-        let stored = (debit - fee).max(0);
-        if candidate <= stored * leverage {
-            low = candidate;
-        } else {
-            high = candidate - 1;
-        }
-    }
-    let size = low;
+    let size = debit * 20;
 
     let position_id = p.open(&p.trader_a, true, size, debit);
     let position = manager.get_position(&position_id);
@@ -924,4 +939,44 @@ fn opening_past_max_leverage_is_rejected_by_the_initial_margin() {
         &(100 * UNIT),
     );
     assert!(result.is_err(), "past max leverage the open must bounce");
+}
+
+#[test]
+fn closing_fee_is_capped_by_profit_and_losers_pay_nothing() {
+    let p = Protocol::new();
+    p.zero_rates();
+    p.seed_lp();
+    let token = soroban_sdk::token::Client::new(&p.env, &p.token_id);
+    let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
+
+    // Winner whose profit is below the notional fee: 10_000 size would owe
+    // 10 UNIT at the low tier, but the 2-UNIT profit caps the fee — the
+    // whole win is consumed and the payout is exactly the collateral.
+    let winner = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(31);
+    p.set_price(100 * UNIT + 200_000); // 100.02
+    p.publish_round();
+    let before = token.balance(&p.trader_a);
+    manager.decrease_position(&winner, &(10_000 * UNIT), &0, &0);
+    assert_eq!(
+        token.balance(&p.trader_a) - before,
+        3_000 * UNIT,
+        "fee = min(notional fee, profit): a tiny win never costs extra"
+    );
+
+    // Loser: no profit, no fee — the payout is collateral minus the loss.
+    p.advance(31);
+    p.set_price(100 * UNIT);
+    p.publish_round();
+    let loser = p.open(&p.trader_b, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(31);
+    p.set_price(99 * UNIT);
+    p.publish_round();
+    let before = token.balance(&p.trader_b);
+    manager.decrease_position(&loser, &(10_000 * UNIT), &0, &0);
+    assert_eq!(
+        token.balance(&p.trader_b) - before,
+        2_900 * UNIT,
+        "losers pay no closing fee"
+    );
 }

@@ -19,6 +19,7 @@ use crate::fees::{self, CollectedFees};
 use crate::funding;
 use crate::ledger::{self, Ledger};
 use crate::risk;
+use crate::events::FeeSource;
 use crate::{events, math, storage};
 
 /// §11.5 — the exposure a decrease removes, pro-rata by size; the final
@@ -111,6 +112,8 @@ pub struct CloseSummary {
     /// Positive PnL actually credited after the §14 payout factor.
     pub payable_pnl: i128,
     pub fees: CollectedFees,
+    /// §11.1 closing fee collected out of the realized winnings.
+    pub closing_fee: i128,
     /// Partial close: realized profit transferred to the owner.
     pub realized_payout: i128,
     /// Partial close: explicit collateral withdrawal transferred.
@@ -192,11 +195,31 @@ pub fn settle_close(
         panic_with_error!(env, PositionManagerError::InsufficientCollateral);
     }
 
-    // Partial close: transfer remaining realized profit to the trader.
-    let mut realized_payout = 0i128;
-    if !removed.full && payable > 0 {
+    // §11.1 — the closing fee comes only out of realized price winnings:
+    // `min(size × tier, payable)`, ranked below every waterfall obligation.
+    // Losers pay nothing, so there is no shortfall path.
+    let mut closing_fee = 0i128;
+    if payable > 0 {
+        let bps = fees::tiered_close_fee_bps(env, &market, position.is_long, removed.base_removed);
         let is_long = position.is_long;
-        realized_payout = core::cmp::min(payable, position.stored_collateral);
+        closing_fee = ledger::collect_stored_collateral(
+            env,
+            ledger,
+            &mut position,
+            market.side_mut(is_long),
+            core::cmp::min(math::closing_fee(env, size_removed, bps), payable),
+        );
+        fees::split_revenue(env, ledger, closing_fee, FeeSource::Closing, position.id);
+    }
+
+    // Partial close: transfer the remaining realized profit to the trader.
+    let mut realized_payout = 0i128;
+    if !removed.full && payable > closing_fee {
+        let is_long = position.is_long;
+        realized_payout = core::cmp::min(
+            math::sub(env, payable, closing_fee),
+            position.stored_collateral,
+        );
         if realized_payout > 0 {
             ledger::collect_stored_collateral(
                 env,
@@ -363,6 +386,7 @@ pub fn settle_close(
         raw_pnl,
         payable_pnl: payable,
         fees: collected,
+        closing_fee,
         realized_payout,
         collateral_withdrawn: if removed.full {
             0

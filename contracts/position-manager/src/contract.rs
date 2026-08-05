@@ -74,6 +74,7 @@ fn emit_close(env: &Env, summary: &CloseSummary, reason: CloseReason) {
         bad_debt: summary.bad_debt,
         liquidation_reward: summary.liquidation_reward,
         execution_budget_refunded: summary.execution_budget_refunded,
+        closing_fee: summary.closing_fee,
         receiver_funding_paid: summary.fees.receiver_funding_paid,
         lp_funding_paid: summary.fees.lp_funding_paid,
         borrow_paid: summary.fees.borrow_paid,
@@ -187,8 +188,6 @@ impl PositionManager for PositionManagerContract {
             market.side_mut(is_long),
             collateral,
         );
-        let opening_fee = fees::tiered_opening_fee(&env, &market, is_long, base, size);
-        fees::apply_opening_fee(&env, &mut ledger, &mut position, &mut market, opening_fee);
         if position.stored_collateral < storage::global_config(&env).min_collateral
             || position.stored_collateral < risk::initial_requirement(&env, size, &market.config)
         {
@@ -233,7 +232,6 @@ impl PositionManager for PositionManagerContract {
             stored_collateral: position.stored_collateral,
             execution_budget,
             price,
-            opening_fee,
             take_profit,
             stop_loss,
         }
@@ -286,9 +284,6 @@ impl PositionManager for PositionManagerContract {
         }
         let base = math::base_added(&env, size_added, price);
         let risk_units = math::risk_added(&env, size_added, market.config.market_risk_factor_bps);
-        let opening_fee =
-            fees::tiered_opening_fee(&env, &market, position.is_long, base, size_added);
-        fees::apply_opening_fee(&env, &mut ledger, &mut position, &mut market, opening_fee);
         let physical = ledger::physical_cash(&env);
         let equity = ledger.cash_lp_equity(&env, physical);
         risk::evaluate_market_risk(
@@ -352,7 +347,6 @@ impl PositionManager for PositionManagerContract {
             base_added: base,
             collateral_added,
             price,
-            opening_fee,
             stored_collateral: position.stored_collateral,
             receiver_funding_paid: collected.receiver_funding_paid,
             lp_funding_paid: collected.lp_funding_paid,
@@ -418,6 +412,7 @@ impl PositionManager for PositionManagerContract {
                 payable_pnl: summary.payable_pnl,
                 realized_payout: summary.realized_payout,
                 collateral_withdrawn: summary.collateral_withdrawn,
+                closing_fee: summary.closing_fee,
                 receiver_funding_paid: summary.fees.receiver_funding_paid,
                 lp_funding_paid: summary.fees.lp_funding_paid,
                 borrow_paid: summary.fees.borrow_paid,

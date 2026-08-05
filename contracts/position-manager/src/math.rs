@@ -118,8 +118,8 @@ pub fn pnl(env: &Env, is_long: bool, size: i128, base: i128, price: i128) -> i12
     }
 }
 
-/// §11.1 — opening fee on added size, rounded up (§16).
-pub fn opening_fee(env: &Env, size: i128, bps: u32) -> i128 {
+/// §11.1 — closing fee on removed size, rounded up (§16).
+pub fn closing_fee(env: &Env, size: i128, bps: u32) -> i128 {
     mul_div_ceil(env, size, bps as i128, BPS)
 }
 
@@ -207,12 +207,12 @@ mod tests {
     }
 
     #[test]
-    fn opening_fee_rounds_up() {
+    fn closing_fee_rounds_up() {
         let e = env();
         // 1 unit at 10 bps → ceil(10_000_000 * 10 / 10_000) = 10_000 exact
-        assert_eq!(opening_fee(&e, UNIT, 10), 10_000);
+        assert_eq!(closing_fee(&e, UNIT, 10), 10_000);
         // 1 stroop at 10 bps → ceil(10/10_000) = 1, never 0
-        assert_eq!(opening_fee(&e, 1, 10), 1);
+        assert_eq!(closing_fee(&e, 1, 10), 1);
     }
 
     #[test]

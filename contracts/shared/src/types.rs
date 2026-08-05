@@ -103,8 +103,10 @@ pub enum PayerSide {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketConfig {
-    pub open_fee_low_bps: u32,
-    pub open_fee_high_bps: u32,
+    /// §11.1 closing-fee tier when the close improves or preserves skew.
+    pub close_fee_low_bps: u32,
+    /// §11.1 closing-fee tier when the close worsens skew.
+    pub close_fee_high_bps: u32,
     pub max_funding_rate_bps_day: i128,
     pub market_risk_factor_bps: u32,
     pub max_long_size_open_interest: i128,

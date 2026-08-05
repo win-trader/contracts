@@ -28,8 +28,8 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
 }
 
 pub fn validate_market(env: &Env, c: &MarketConfig) {
-    if c.open_fee_low_bps > c.open_fee_high_bps
-        || c.open_fee_high_bps > BPS as u32
+    if c.close_fee_low_bps > c.close_fee_high_bps
+        || c.close_fee_high_bps > BPS as u32
         || c.max_funding_rate_bps_day < 0
         || c.max_funding_rate_bps_day > BPS
         || c.market_risk_factor_bps == 0

@@ -34,11 +34,9 @@ pub struct PositionOpened {
     pub is_long: bool,
     pub size: i128,
     pub base_exposure: i128,
-    /// Collateral stored after the opening fee.
     pub stored_collateral: i128,
     pub execution_budget: i128,
     pub price: i128,
-    pub opening_fee: i128,
     /// Zero means no trigger set.
     pub take_profit: i128,
     pub stop_loss: i128,
@@ -55,8 +53,7 @@ pub struct PositionIncreased {
     pub base_added: i128,
     pub collateral_added: i128,
     pub price: i128,
-    pub opening_fee: i128,
-    /// Stored collateral after fees and capitalization.
+    /// Stored collateral after capitalization.
     pub stored_collateral: i128,
     /// Accrued amounts the increase capitalized before adding new size —
     /// the same decomposition the decrease/close events carry.
@@ -82,6 +79,8 @@ pub struct PositionDecreased {
     pub payable_pnl: i128,
     pub realized_payout: i128,
     pub collateral_withdrawn: i128,
+    /// §11.1 closing fee collected out of the realized winnings.
+    pub closing_fee: i128,
     pub receiver_funding_paid: i128,
     pub lp_funding_paid: i128,
     pub borrow_paid: i128,
@@ -108,6 +107,8 @@ pub struct PositionClosed {
     pub bad_debt: i128,
     pub liquidation_reward: i128,
     pub execution_budget_refunded: i128,
+    /// §11.1 closing fee collected out of the realized winnings.
+    pub closing_fee: i128,
     pub receiver_funding_paid: i128,
     pub lp_funding_paid: i128,
     pub borrow_paid: i128,
@@ -182,7 +183,7 @@ pub struct ExecutionBudgetWithdrawn {
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FeeSource {
-    Opening,
+    Closing,
     Borrow,
 }
 

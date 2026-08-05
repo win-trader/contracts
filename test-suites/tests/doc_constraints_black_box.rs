@@ -78,8 +78,8 @@ mod abi {
     #[contracttype]
     #[derive(Clone, Debug)]
     pub struct MarketConfig {
-        pub open_fee_low_bps: u32,
-        pub open_fee_high_bps: u32,
+        pub close_fee_low_bps: u32,
+        pub close_fee_high_bps: u32,
         pub max_funding_rate_bps_day: i128,
         pub market_risk_factor_bps: u32,
         pub max_long_size_open_interest: i128,
@@ -533,8 +533,8 @@ impl Protocol {
 
     fn market_config(max_funding_rate_bps_day: i128) -> position_manager::MarketConfig {
         position_manager::MarketConfig {
-            open_fee_low_bps: 10,
-            open_fee_high_bps: 30,
+            close_fee_low_bps: 10,
+            close_fee_high_bps: 30,
             max_funding_rate_bps_day,
             market_risk_factor_bps: 5_000,
             max_long_size_open_interest: 1_000_000 * UNIT,
@@ -562,6 +562,16 @@ impl Protocol {
     fn disable_funding(&self) {
         self.manager()
             .set_market_config(&self.admin, &self.market, &Self::market_config(0));
+    }
+
+    /// Zero funding and the closing fee so PnL-precision tests observe the
+    /// price math alone.
+    fn disable_funding_and_close_fee(&self) {
+        let mut config = Self::market_config(0);
+        config.close_fee_low_bps = 0;
+        config.close_fee_high_bps = 0;
+        self.manager()
+            .set_market_config(&self.admin, &self.market, &config);
     }
 
     fn manager(&self) -> position_manager::Client<'_> {
@@ -832,7 +842,6 @@ fn p06_p28_receiver_credit_bounded_by_receiver_backed_accrual() {
     p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
     let short_collateral = 1_000 * UNIT;
     let short_id = p.open(&p.trader_b, false, 2_500 * UNIT, short_collateral);
-    let short_fee = ceil_div(2_500 * UNIT * 10, BPS); // low tier: skew improves
 
     p.advance(99_999); // odd interval to exercise remainders
     p.refresh_price();
@@ -857,12 +866,12 @@ fn p06_p28_receiver_credit_bounded_by_receiver_backed_accrual() {
 
     // Receiver settlement before payer settlement (§19 test condition): the
     // credit is guaranteed (P7) and is paid even though the payer has not
-    // settled. Payout = collateral - fee + credit (zero PnL, zero borrow,
-    // light side pays no funding).
+    // settled. Payout = collateral + credit (zero PnL so no closing fee,
+    // zero borrow, light side pays no funding).
     let balance_before = p.token().balance(&p.trader_b);
     p.close(short_id);
     let payout = p.token().balance(&p.trader_b) - balance_before;
-    assert_eq!(payout, short_collateral - short_fee + credit);
+    assert_eq!(payout, short_collateral + credit);
     assert_eq!(
         liability - manager.pending_receiver_funding_total(),
         credit,
@@ -1007,7 +1016,7 @@ fn c04_receiver_capitalization_is_label_change_only() {
 
 /// P16 + I18.4: new size starts at the current baseline and pays nothing for
 /// time before it existed. After heavy accrual, a brand-new position closed
-/// in the same ledger pays exactly its opening fee and nothing else.
+/// flat in the same ledger costs nothing at all.
 #[test]
 fn p16_new_size_does_not_pay_for_time_before_it_existed() {
     let p = Protocol::new();
@@ -1046,11 +1055,11 @@ fn p16_new_size_does_not_pay_for_time_before_it_existed() {
         floor_div(size * market.receiver_index_long, INDEX_PRECISION)
     );
 
-    // Same-ledger close: no elapsed time, so a low-tier opening fee is the
-    // complete cost (same-side add keeps skew equal -> low tier, §11.1).
+    // Same-ledger close: no elapsed time and no price move, so there is no
+    // fee at all — the closing fee only comes out of positive price PnL
+    // (§11.1), and a flat close realizes at most rounding dust.
     p.close(id);
-    let fee = ceil_div(size * 10, BPS);
-    assert_eq!(p.token().balance(&p.trader_b), balance_before - fee);
+    assert_eq!(p.token().balance(&p.trader_b), balance_before);
 }
 
 /// P17: a partial close capitalizes all old accrual before it resets the
@@ -1210,7 +1219,6 @@ fn p10_borrow_rate_is_quadratic_in_utilization() {
 
         let size = 10_000 * UNIT;
         let collateral = 3_000 * UNIT;
-        let fee = ceil_div(size * 30, BPS); // first open worsens skew: high tier
         let id = p.open(&p.trader_a, true, size, collateral);
 
         p.advance(DAY);
@@ -1218,7 +1226,7 @@ fn p10_borrow_rate_is_quadratic_in_utilization() {
         let balance_before = p.token().balance(&p.trader_a);
         p.close(id);
         let payout = p.token().balance(&p.trader_a) - balance_before;
-        (collateral - fee) - payout
+        collateral - payout
     };
 
     // risk_units = floor(size × 5_000 / BPS) = 5_000 UNIT.
@@ -1233,11 +1241,10 @@ fn p10_borrow_rate_is_quadratic_in_utilization() {
         ceil_div(risk * index_delta, INDEX_PRECISION)
     };
 
-    // Deposits chosen so post-open equity (deposit + 70% of the 30-UNIT
-    // opening fee = deposit + 21 UNIT) makes utilization exact.
+    // With no opening fee the post-open equity is the deposit itself.
     // equity 100_000 -> utilization 500 bps; equity 50_000 -> 1_000 bps.
-    let low = collected_at(99_979 * UNIT);
-    let high = collected_at(49_979 * UNIT);
+    let low = collected_at(100_000 * UNIT);
+    let high = collected_at(50_000 * UNIT);
 
     // ±1 stroop: the doc allows the ceil-of-baseline vs ceil-of-delta
     // difference on the debt baseline; nothing else may round.
@@ -1539,28 +1546,45 @@ fn p26_warning_state_stops_lp_actions_and_new_risk() {
 // Rounding (§16) and PnL cash conversion
 // ---------------------------------------------------------------------------
 
-/// R16 "Opening fee charged: up": opening_fee = ceil(size_added × fee_bps /
-/// BPS) (§11.1).
+/// R16 "Closing fee charged: up": closing_fee = ceil(size_removed × fee_bps
+/// / BPS), capped at the realized positive PnL (§11.1). Opening charges
+/// nothing: stored collateral equals the amount paid.
 #[test]
-fn r16_opening_fee_rounds_up() {
+fn r16_closing_fee_rounds_up() {
     let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
     p.seed_lp();
     let manager = p.manager();
 
-    // size × 30 / 10_000 = 9_999_999.9 stroops — must charge 10_000_000.
+    // size × 10 / 10_000 = 3_333_333.3 stroops — must charge 3_333_334.
+    // Closing the book's only long empties it: skew 10_000 -> 0, low tier.
     let size = 3_333_333_300;
     assert!(
-        size * 30 % BPS != 0,
+        size * 10 % BPS != 0,
         "vector must exercise the ceil boundary"
     );
-    let fee = ceil_div(size * 30, BPS);
-    assert_eq!(fee, 10_000_000);
+    let fee = ceil_div(size * 10, BPS);
+    assert_eq!(fee, 3_333_334);
 
     let collateral = 500 * UNIT;
+    let balance_before = p.token().balance(&p.trader_a);
     let id = p.open(&p.trader_a, true, size, collateral);
     assert_eq!(
         manager.get_position(&id).stored_collateral,
-        collateral - fee
+        collateral,
+        "no fee is charged at open"
+    );
+
+    // 1% up: pnl = 33_333_333 stroops, far above the fee, so the cap does
+    // not bind and the round trip costs exactly the ceil'd fee.
+    p.advance(31);
+    p.set_price(101 * UNIT);
+    p.publish_round();
+    p.close(id);
+    assert_eq!(
+        p.token().balance(&p.trader_a),
+        balance_before + 33_333_333 - fee
     );
 }
 
@@ -1570,23 +1594,31 @@ fn r16_opening_fee_rounds_up() {
 #[test]
 fn r16_fee_split_keeper_down_protocol_exact_remainder() {
     let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
     p.seed_lp();
     let manager = p.manager();
 
-    // fee = ceil(3_333_330_100 × 30 / 10_000) = 9_999_991 stroops, which
-    // splits with remainders on every share.
+    // closing fee = ceil(3_333_330_100 × 10 / 10_000) = 3_333_331 stroops,
+    // which splits with remainders on every share.
     let size = 3_333_330_100;
-    let fee = ceil_div(size * 30, BPS);
-    assert_eq!(fee, 9_999_991);
+    let fee = ceil_div(size * 10, BPS);
+    assert_eq!(fee, 3_333_331);
     let lp_share = floor_div(fee * 7_000, BPS);
     let keeper_share = floor_div(fee * 1_000, BPS);
     let protocol_share = fee - lp_share - keeper_share;
     assert!(fee * 7_000 % BPS != 0 && fee * 1_000 % BPS != 0);
 
+    let id = p.open(&p.trader_a, true, size, 500 * UNIT);
+    p.advance(31);
+    p.set_price(101 * UNIT);
+    p.publish_round();
+    let payable = 33_333_301;
+
     let before = p.snapshot();
     let keeper_before = manager.risk_keeper_reserve_total();
     let protocol_before = manager.protocol_claimable_total();
-    p.open(&p.trader_a, true, size, 500 * UNIT);
+    p.close(id);
     let after = p.snapshot();
 
     assert_eq!(
@@ -1597,7 +1629,12 @@ fn r16_fee_split_keeper_down_protocol_exact_remainder() {
         manager.protocol_claimable_total() - protocol_before,
         protocol_share
     );
-    assert_eq!(after.cash_lp_equity - before.cash_lp_equity, lp_share);
+    // The close pays the trader's profit out of LP cash and keeps only the
+    // fee's LP share behind.
+    assert_eq!(
+        after.cash_lp_equity - before.cash_lp_equity,
+        lp_share - payable
+    );
     // The three shares recompose the collected fee exactly (P27: rounding
     // creates no value).
     assert_eq!(lp_share + keeper_share + protocol_share, fee);
@@ -1694,13 +1731,9 @@ fn r16_required_risk_backing_rounds_up() {
     assert_eq!(after.total_risk_units, risk);
     assert_eq!(after.required_risk_backing, backing);
     assert_eq!(after.free_lp_capital, after.cash_lp_equity - backing);
-    // Risk locks capital but does not reduce ownership: equity moved only by
-    // the LP fee share, never by the risk units themselves.
-    let fee = ceil_div(size * 30, BPS);
-    assert_eq!(
-        after.cash_lp_equity - before.cash_lp_equity,
-        floor_div(fee * 7_000, BPS)
-    );
+    // Risk locks capital but does not reduce ownership: with no opening fee
+    // the open moves LP equity not at all.
+    assert_eq!(after.cash_lp_equity, before.cash_lp_equity);
 }
 
 /// R16 "Post-withdraw utilization: up" (§13.6): a withdrawal whose
@@ -1789,7 +1822,9 @@ fn r16_trader_profit_rounds_down_and_loss_rounds_up() {
     let scenario = |close_price: i128| -> (i128, i128, i128, i128, i128) {
         let p = Protocol::new();
         p.disable_borrow();
-        p.disable_funding();
+        // Close fee off too: this vector pins the PnL conversion to the
+        // stroop, and a profit-side fee would sit on top of it.
+        p.disable_funding_and_close_fee();
         p.seed_lp();
         let manager = p.manager();
 
@@ -1860,18 +1895,17 @@ fn r16_trader_profit_rounds_down_and_loss_rounds_up() {
 #[test]
 fn c06_claim_rows_never_move_lp_equity() {
     let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
     p.seed_lp();
     let manager = p.manager();
 
-    // Open = trader collateral deposit + execution-budget deposit + opening
-    // fee collection composed: cash rises by collateral + budget; claims by
-    // collateral - fee + budget + keeper + protocol = collateral + budget -
-    // lp_share; equity by exactly the LP fee share.
+    // Open = trader collateral deposit + execution-budget deposit, nothing
+    // else: no fee is charged, so cash and claims rise by the same amount
+    // and LP equity does not move at all.
     let size = 10_000 * UNIT;
     let collateral = 3_000 * UNIT;
     let budget = 50 * UNIT;
-    let fee = ceil_div(size * 30, BPS);
-    let lp_share = floor_div(fee * 7_000, BPS);
     let before = p.snapshot();
     let id = p.open_with_budget(&p.trader_a, true, size, collateral, budget);
     let after_open = p.snapshot();
@@ -1881,9 +1915,9 @@ fn c06_claim_rows_never_move_lp_equity() {
     );
     assert_eq!(
         after_open.non_lp_claims - before.non_lp_claims,
-        collateral + budget - lp_share
+        collateral + budget
     );
-    assert_eq!(after_open.cash_lp_equity - before.cash_lp_equity, lp_share);
+    assert_eq!(after_open.cash_lp_equity, before.cash_lp_equity);
     assert_eq!(manager.get_position(&id).execution_budget, budget);
 
     // C9: withdrawing execution budget lowers cash and claims by the same
@@ -1914,21 +1948,41 @@ fn c06_claim_rows_never_move_lp_equity() {
     );
     assert_eq!(after_fund.cash_lp_equity, after_withdraw.cash_lp_equity);
 
+    // C7/C8: a profitable close collects the closing fee and splits it
+    // between the claim rows; only the LP share (less the paid profit)
+    // touches equity. 1% up on 10_000 size: profit 100 UNIT, low-tier fee
+    // 10 UNIT (the close empties the book, improving skew).
+    p.advance(31);
+    p.set_price(101 * UNIT);
+    p.publish_round();
+    let profit = 100 * UNIT;
+    let fee = floor_div(size * 10, BPS);
+    let lp_share = floor_div(fee * 7_000, BPS);
+    let keeper_share = floor_div(fee * 1_000, BPS);
+    let before_close = p.snapshot();
+    p.close(id);
+    let after_close = p.snapshot();
+    assert_eq!(
+        after_close.cash_lp_equity - before_close.cash_lp_equity,
+        lp_share - profit,
+        "C12 + C7: equity pays the profit and keeps the LP fee share"
+    );
+
     // C9: paying out the protocol claim lowers cash and claims equally.
     let claimable = manager.protocol_claimable_total();
-    assert_eq!(claimable, fee - lp_share - floor_div(fee * 1_000, BPS));
+    assert_eq!(claimable, fee - lp_share - keeper_share);
     let recipient_before = p.token().balance(&p.trader_b);
     manager.claim_protocol(&p.admin, &p.trader_b, &claimable);
     let after_claim = p.snapshot();
     assert_eq!(
-        after_fund.physical_cash - after_claim.physical_cash,
+        after_close.physical_cash - after_claim.physical_cash,
         claimable
     );
     assert_eq!(
-        after_fund.non_lp_claims - after_claim.non_lp_claims,
+        after_close.non_lp_claims - after_claim.non_lp_claims,
         claimable
     );
-    assert_eq!(after_claim.cash_lp_equity, after_fund.cash_lp_equity);
+    assert_eq!(after_claim.cash_lp_equity, after_close.cash_lp_equity);
     assert_eq!(p.token().balance(&p.trader_b) - recipient_before, claimable);
     assert_eq!(manager.protocol_claimable_total(), 0);
 }
@@ -2247,6 +2301,9 @@ fn i18_8_adl_reward_paid_only_in_adl_state_and_from_reserve() {
     let router = p.router();
 
     let id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    // A second small long whose profitable close will fund the risk-keeper
+    // reserve through the closing-fee split.
+    let funder_id = p.open(&p.trader_b, true, 100 * UNIT, 30 * UNIT);
     assert!(
         manager.try_deleverage_position(&p.keeper, &id).is_err(),
         "no ADL reward without a qualifying risk state"
@@ -2256,28 +2313,34 @@ fn i18_8_adl_reward_paid_only_in_adl_state_and_from_reserve() {
     // jump persists the risk-state update (§14).
     router.request_deposit(&p.trader_b, &(1_000 * UNIT));
     p.advance(REQUEST_DELAY);
-    // Profit 100 units × 410 = 41_000 UNIT on ~100_021 equity: factor
-    // ~4_099 bps — inside [adl 4_000, hard cap 5_000).
+    // Profit ~101 units × 410 = ~41_400 UNIT on ~100_000 equity: factor
+    // ~4_1xx bps — inside [adl 4_000, hard cap 5_000).
     p.set_price(510 * UNIT);
     p.publish_round();
     let result = router.resolve_next(&p.keeper);
     assert_eq!(result.status, request_router::SettlementStatus::Failed);
 
+    p.close(funder_id);
     let reserve_before = manager.risk_keeper_reserve_total();
     assert!(
         reserve_before > 0,
-        "the fee split must have funded the reserve"
+        "the closing-fee split must have funded the reserve"
     );
     let keeper_before = p.token().balance(&p.keeper);
     manager.deleverage_position(&p.keeper, &id);
 
     let reward = p.token().balance(&p.keeper) - keeper_before;
     assert!(reward > 0, "a qualifying ADL action pays a reward");
+    // The profitable ADL close itself collects a closing fee (10 UNIT low
+    // tier on 10_000 size) whose keeper share tops up the reserve in the
+    // same action; the reward then drains the reserve completely.
+    let close_fee_keeper_share = UNIT;
     assert_eq!(
-        reserve_before - manager.risk_keeper_reserve_total(),
         reward,
+        reserve_before + close_fee_keeper_share,
         "the reward is debited exactly from the risk-keeper reserve"
     );
+    assert_eq!(manager.risk_keeper_reserve_total(), 0);
     assert!(reward <= 100 * UNIT, "capped by max_adl_reward");
     assert!(
         manager.try_get_position(&id).is_err(),
@@ -2544,9 +2607,9 @@ fn p23_lp_settlement_cost_independent_of_open_positions() {
 fn r16_borrow_obligation_rounds_up_exact_vector() {
     let p = Protocol::new();
     p.disable_funding();
-    // Post-open equity = 99_979 + 70% of the 30-UNIT opening fee = 100_000,
-    // making utilization exactly 500 bps (p10's construction).
-    p.deposit(&p.lp, 99_979 * UNIT);
+    // No opening fee: post-open equity is the deposit itself, making
+    // utilization exactly 500 bps (p10's construction).
+    p.deposit(&p.lp, 100_000 * UNIT);
 
     // Ledger t0 = fixture start; the deposit consumed REQUEST_DELAY = 60s.
     // Open at t0 + 864s: pre-open index = 100×1e14×864 / (1e4×86_400) = 1e10
@@ -2554,7 +2617,6 @@ fn r16_borrow_obligation_rounds_up_exact_vector() {
     p.advance(804);
     let size = 10_000 * UNIT;
     let collateral = 3_000 * UNIT;
-    let fee = ceil_div(size * 30, BPS);
     let id = p.open(&p.trader_a, true, size, collateral);
 
     let risk = 5_000 * UNIT;
@@ -2589,7 +2651,7 @@ fn r16_borrow_obligation_rounds_up_exact_vector() {
     p.close(id);
     let payout = p.token().balance(&p.trader_a) - balance_before;
     assert_eq!(
-        (collateral - fee) - payout,
+        collateral - payout,
         expected,
         "borrow collection must ceil with zero tolerance"
     );
@@ -2784,9 +2846,8 @@ fn i18_4_indices_are_monotone_across_lifecycle() {
 /// lands exactly on it: size 128_000 -> risk 64_000 -> backing 80_000 UNIT.
 #[test]
 fn p13_capacity_gate_boundary_accept_and_reject() {
-    // Post-open equity = deposit + 70% of the 384-UNIT opening fee.
-    let lp_fee_share = 384 * UNIT * 7_000 / BPS;
-    let boundary_deposit = 80_000 * UNIT - lp_fee_share;
+    // No opening fee: post-open equity is exactly the deposit.
+    let boundary_deposit = 80_000 * UNIT;
 
     let attempt = |deposit: i128| -> (Protocol, bool) {
         let p = Protocol::new();
