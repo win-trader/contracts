@@ -602,7 +602,12 @@ Write `S` for the current signed skew.
 
 Store one skew EMA for each market.
 Write `E` for the stored EMA.
-Initialize `E` to zero.
+Seed `E` with the post-open skew when an open finds an empty book.
+Zero is not a neutral start.
+A zero seed would discount a one-sided launch until the history fills.
+Set `E` to zero when the book empties.
+An empty market keeps no funding memory.
+Zero the displayed payer side and rate at the same moment.
 `E` decays toward `S` with the global half-life `H`:
 
 ```text

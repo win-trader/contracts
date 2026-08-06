@@ -49,8 +49,10 @@ pub fn risk_added(env: &Env, size: i128, factor_bps: u32) -> i128 {
     mul_div_floor(env, size, factor_bps as i128, BPS)
 }
 
-/// §8.1 — normalized base-exposure skew in bps: 0 balanced, `BPS` one-sided.
-pub fn skew_bps(env: &Env, long_base: i128, short_base: i128) -> i128 {
+/// §11.1 — unsigned distance from balance in bps: 0 balanced, `BPS`
+/// one-sided. The fee tier wants magnitude only; funding uses the signed
+/// `skew_frac` below.
+pub fn skew_abs(env: &Env, long_base: i128, short_base: i128) -> i128 {
     let total = add(env, long_base, short_base);
     if total == 0 {
         return 0;
@@ -331,12 +333,12 @@ mod tests {
     #[test]
     fn skew_is_zero_when_balanced_and_bps_when_one_sided() {
         let e = env();
-        assert_eq!(skew_bps(&e, 0, 0), 0);
-        assert_eq!(skew_bps(&e, 500, 500), 0);
-        assert_eq!(skew_bps(&e, 1_000, 0), BPS);
-        assert_eq!(skew_bps(&e, 0, 1_000), BPS);
+        assert_eq!(skew_abs(&e, 0, 0), 0);
+        assert_eq!(skew_abs(&e, 500, 500), 0);
+        assert_eq!(skew_abs(&e, 1_000, 0), BPS);
+        assert_eq!(skew_abs(&e, 0, 1_000), BPS);
         // 75/25 split → |50| * BPS / 100 = 5_000
-        assert_eq!(skew_bps(&e, 75, 25), 5_000);
+        assert_eq!(skew_abs(&e, 75, 25), 5_000);
     }
 
     #[test]

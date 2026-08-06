@@ -458,12 +458,19 @@ S =
     / (long_base + short_base)
 ```
 
-Each market stores a skew EMA `E`, initialized to zero, decaying toward
-`S` with the global half-life `H = funding_half_life_seconds`:
+Each market stores a skew EMA `E`, decaying toward `S` with the global
+half-life `H = funding_half_life_seconds`:
 
 ```text
 E(t) = S + (E₀ - S) × 2^(−t/H)
 ```
+
+`E` cold-starts: an open that finds an empty book seeds `E` with the
+skew it creates, and the book emptying wipes `E` (and the displayed
+payer side and rate) back to zero. Zero is not a neutral seed — it
+asserts a perfectly balanced history, which would hand a one-sided
+launch a decaying funding discount and let memory leak across a
+restart.
 
 The blended integral skew mixes the instant skew and the EMA with the
 per-market `instant_weight_bps` `w`:

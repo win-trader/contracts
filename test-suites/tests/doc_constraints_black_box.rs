@@ -714,7 +714,10 @@ fn p01_balanced_base_exposure_produces_zero_funding() {
     let market = manager.get_market(&p.market);
     assert_eq!(market.current_payer_side, abi::PayerSide::None);
     assert_eq!(market.current_payer_rate, 0);
-    assert_eq!(market.skew_ema, 0);
+    // §8.1 cold start: the first open seeded the EMA from the momentarily
+    // one-sided book. At this suite's w = BPS the memory carries no weight,
+    // so the balanced book above still prices to zero.
+    assert_eq!(market.skew_ema, INDEX_PRECISION);
 
     p.advance(DAY);
     p.refresh_price();
@@ -3122,6 +3125,76 @@ fn ema_funding_survives_a_lighter_side_payer() {
     // to brick every action here.
     p.close(long_id);
     assert!(manager.try_get_position(&long_id).is_err());
+}
+
+/// §8.1 EMA cold start: an empty book has no history, and zero is not "no
+/// information" — seeding the EMA at 0 would grant a one-sided launch a
+/// decaying discount (w² ≈ 11× at w = 3000). The first open seeds the EMA
+/// from the skew it creates, so a one-sided launch pays the full quadratic
+/// rate from the first second, all of it to LPs (no receivers to match).
+#[test]
+fn ema_cold_start_charges_a_one_sided_launch_the_full_rate() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+    let mut config = Protocol::market_config(100);
+    config.instant_weight_bps = 3_000;
+    manager.set_market_config(&p.admin, &p.market, &config);
+
+    p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    let market = manager.get_market(&p.market);
+    assert_eq!(market.skew_ema, INDEX_PRECISION, "EMA seeded at the skew");
+    assert_eq!(market.current_payer_side, abi::PayerSide::Long);
+    assert_eq!(
+        market.current_payer_rate,
+        100 * INDEX_PRECISION,
+        "full max rate immediately, not the blended discount"
+    );
+
+    // With no counter-exposure the whole flow is unmatched: LPs collect it.
+    p.advance(3_600);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
+    let after = manager.get_market(&p.market);
+    assert!(after.lp_backed_index_long > 0, "launch funding goes to LPs");
+    assert_eq!(after.receiver_index_short, 0);
+}
+
+/// §8.1 EMA restart: a market that empties keeps no funding memory. The
+/// displayed rate drops to zero the moment the last position closes, and
+/// the next open cold-starts from its own skew — history from before the
+/// gap must carry exactly zero weight.
+#[test]
+fn ema_memory_is_wiped_when_the_market_empties() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+    let mut config = Protocol::market_config(100);
+    config.instant_weight_bps = 3_000;
+    manager.set_market_config(&p.admin, &p.market, &config);
+
+    // A day of long-only history, then the book empties.
+    let long_id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(DAY);
+    p.refresh_price();
+    manager.update_indices(&p.keeper, &p.market);
+    p.close(long_id);
+    let emptied = manager.get_market(&p.market);
+    assert_eq!(emptied.skew_ema, 0, "memory wiped on empty");
+    assert_eq!(emptied.current_payer_side, abi::PayerSide::None);
+    assert_eq!(emptied.current_payer_rate, 0, "no stale blend displayed");
+
+    // A restart on the opposite side sees none of the long era: the cold
+    // start points the payer short at the full rate, not long via memory.
+    p.advance(DAY);
+    p.refresh_price();
+    p.open(&p.trader_b, false, 10_000 * UNIT, 3_000 * UNIT);
+    let restarted = manager.get_market(&p.market);
+    assert_eq!(restarted.skew_ema, -INDEX_PRECISION);
+    assert_eq!(restarted.current_payer_side, abi::PayerSide::Short);
+    assert_eq!(restarted.current_payer_rate, 100 * INDEX_PRECISION);
 }
 
 /// §3 under the EMA: checkpoint frequency cannot change accrued value

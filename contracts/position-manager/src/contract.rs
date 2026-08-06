@@ -206,11 +206,20 @@ impl PositionManager for PositionManagerContract {
         if market.side(is_long).risk_state != RiskState::Normal {
             panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
         }
+        let was_empty =
+            market.long.size_open_interest == 0 && market.short.size_open_interest == 0;
         {
             let side = market.side_mut(is_long);
             side.size_open_interest = math::add(&env, side.size_open_interest, size);
             side.base_exposure = math::add(&env, side.base_exposure, base);
             side.risk_units = math::add(&env, side.risk_units, risk_units);
+        }
+        if was_empty {
+            // §8.1 cold start — an empty book carries no history, and zero is
+            // not "no information": it would grant a one-sided launch a
+            // decaying discount. The EMA starts at the skew this open creates.
+            market.skew_ema =
+                math::skew_frac(&env, market.long.base_exposure, market.short.base_exposure);
         }
         ledger.total_risk_units = math::add(&env, ledger.total_risk_units, risk_units);
         risk::enforce_capacity(&env, &ledger, physical, ledger.total_risk_units);

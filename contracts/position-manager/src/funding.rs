@@ -34,10 +34,22 @@ pub struct PendingFees {
 }
 
 /// §8.1 — refresh the market's displayed payer side and rate from the
-/// post-mutation book and EMA, and drop the rounding remainders once the
-/// book is completely empty. Accrual happens in `checkpoint_market`; these
-/// two fields exist for events and off-chain consumers.
+/// post-mutation book and EMA. A market that just emptied keeps no funding
+/// memory: the EMA and the rounding remainders are wiped so the next open
+/// cold-starts, and the displayed rate is zero rather than a stale blend.
+/// Accrual happens in `checkpoint_market`; the two display fields exist for
+/// events and off-chain consumers.
 pub fn refresh_display(env: &Env, market: &mut Market) {
+    if market.long.size_open_interest == 0 && market.short.size_open_interest == 0 {
+        market.skew_ema = 0;
+        market.receiver_payer_remainder = 0;
+        market.lp_payer_remainder = 0;
+        market.receiver_index_remainder = 0;
+        market.pending_remainder = 0;
+        market.current_payer_side = PayerSide::None;
+        market.current_payer_rate = 0;
+        return;
+    }
     let skew = math::skew_frac(env, market.long.base_exposure, market.short.base_exposure);
     let integral = math::integral_skew(env, skew, market.skew_ema, market.config.instant_weight_bps);
     market.current_payer_side = if integral > 0 {
@@ -49,12 +61,6 @@ pub fn refresh_display(env: &Env, market: &mut Market) {
     };
     market.current_payer_rate =
         math::rate_from_integral(env, market.config.max_funding_rate_bps_day, integral);
-    if market.long.size_open_interest == 0 && market.short.size_open_interest == 0 {
-        market.receiver_payer_remainder = 0;
-        market.lp_payer_remainder = 0;
-        market.receiver_index_remainder = 0;
-        market.pending_remainder = 0;
-    }
 }
 
 /// §11.2 — pending amounts for a position against the current indices.

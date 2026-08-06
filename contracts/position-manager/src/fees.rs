@@ -150,7 +150,7 @@ pub fn capitalize(
 /// `is_long` side: low when the removal improves or preserves the book's
 /// base-exposure skew, high when it worsens it.
 pub fn tiered_close_fee_bps(env: &Env, market: &Market, is_long: bool, base_removed: i128) -> u32 {
-    let skew_before = math::skew_bps(env, market.long.base_exposure, market.short.base_exposure);
+    let skew_before = math::skew_abs(env, market.long.base_exposure, market.short.base_exposure);
     let (long_after, short_after) = if is_long {
         (
             math::sub(env, market.long.base_exposure, base_removed),
@@ -162,7 +162,7 @@ pub fn tiered_close_fee_bps(env: &Env, market: &Market, is_long: bool, base_remo
             math::sub(env, market.short.base_exposure, base_removed),
         )
     };
-    let skew_after = math::skew_bps(env, long_after, short_after);
+    let skew_after = math::skew_abs(env, long_after, short_after);
     if skew_after <= skew_before {
         market.config.close_fee_low_bps
     } else {
