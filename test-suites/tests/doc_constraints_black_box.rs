@@ -1165,7 +1165,7 @@ fn i18_4_split_checkpoints_equal_single_interval() {
 
 /// P9 (§7.4): uncollected borrow is not revenue — LP equity is unchanged
 /// while borrow only accrues, and rises exactly when a position action
-/// collects it (borrow splits like the opening fee, §11.4).
+/// collects it (borrow splits like the closing fee, §11.4).
 #[test]
 fn p09_borrow_becomes_revenue_only_on_collection() {
     let p = Protocol::new();
@@ -1388,9 +1388,9 @@ fn p18_accrued_fees_make_position_liquidatable_without_price_move() {
     p.seed_lp();
     let manager = p.manager();
 
-    // size 10_000: initial margin 5% = 500, maintenance 2.5% = 250.
-    // Collateral after the 30-UNIT opening fee is 570 — the open clears the
-    // initial margin by 70 and sits 320 above the maintenance floor.
+    // size 10_000: initial margin 5% = 500, maintenance 2.5% = 250. With no
+    // opening fee the position holds its full 600 — 100 above the initial
+    // margin and 350 above the maintenance floor.
     let id = p.open(&p.trader_a, true, 10_000 * UNIT, 600 * UNIT);
     assert!(
         manager.try_liquidate_position(&p.keeper, &id).is_err(),
@@ -1398,7 +1398,7 @@ fn p18_accrued_fees_make_position_liquidatable_without_price_move() {
     );
 
     // One-sided market: funding = 100 bps/day on size (100 UNIT/day) plus
-    // borrow ~51 UNIT/day — three days eat well through the 320-UNIT buffer.
+    // borrow ~51 UNIT/day — three days eat well through the 350-UNIT buffer.
     p.advance(3 * DAY);
     p.refresh_price();
     manager.liquidate_position(&p.keeper, &id);

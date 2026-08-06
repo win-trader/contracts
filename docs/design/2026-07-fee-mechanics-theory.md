@@ -8,9 +8,10 @@ providers own the vault's residual value.
 
 The fee system has four jobs:
 
-1. Charge for opening exposure.
+1. Charge realized trading profit when exposure closes.
 2. Charge over time for consuming vault capacity.
-3. Make the dominant side of a market pay for directional imbalance.
+3. Make the payer side of a market — the side the time-blended skew
+   points at — pay for directional imbalance.
 4. Keep execution and safety rewards separate from LP-owned cash.
 
 The design favors a small number of explicit rules. It uses one physical
@@ -60,14 +61,16 @@ stored_collateral
 The aggregates make market-level accounting independent of the number
 of positions.
 
-## 3. Opening fee
+## 3. Closing fee
 
-An opening fee applies only when a position is opened or increased.
-Decreases and closes have no position fee.
+A closing fee applies only when exposure is removed — a trader decrease
+or close, a liquidation, an ADL action, or a triggered order. Opens and
+increases carry no position fee; the full amount a trader supplies
+becomes stored collateral.
 
-The fee has two tiers. An action receives the low tier when it improves
-or preserves normalized directional balance, and the high tier when it
-makes the balance worse.
+The fee has two tiers, judged on the book the close leaves behind. A
+removal receives the low tier when it improves or preserves normalized
+directional balance, and the high tier when it makes the balance worse.
 
 ```text
 skew(base_long, base_short) =
@@ -78,16 +81,23 @@ skew(base_long, base_short) =
         × BPS
         / (base_long + base_short)
 
-if skew_after <= skew_before:
-    fee_bps = open_fee_low_bps
-else:
-    fee_bps = open_fee_high_bps
+skew_after = skew of the book minus the removed exposure
 
-opening_fee = size_added × fee_bps / BPS
+if skew_after <= skew_before:
+    fee_bps = close_fee_low_bps
+else:
+    fee_bps = close_fee_high_bps
+
+closing_fee =
+    min(size_removed × fee_bps / BPS, payable_price_pnl)
 ```
 
+The fee only ever comes out of realized positive price PnL, after any
+emergency payout cap. A close without realized profit pays nothing, so
+the fee can never create a shortfall or deepen bad debt.
+
 Base exposure, rather than entry-time USD open interest, is used for the
-comparison. This makes the opening incentive point in the same direction
+comparison. This makes the closing incentive point in the same direction
 as funding.
 
 The tier boundary is intentionally discrete. A continuous impact curve
@@ -98,67 +108,76 @@ path-dependent quoting. The two-tier rule is the simpler policy.
 
 ### 4.1 Purpose and payer
 
-Funding prices directional imbalance.
+Funding prices directional imbalance, blended with its own history so a
+book flip is charged gradually rather than instantly repricing the
+payer side.
+
+The signed skew is a fraction of one:
 
 ```text
-if long_base_exposure > short_base_exposure:
-    longs pay
-
-if short_base_exposure > long_base_exposure:
-    shorts pay
-
-if they are equal:
-    no funding is charged
-```
-
-The normalized skew is:
-
-```text
-skew_bps =
-    |long_base_exposure - short_base_exposure|
-    × BPS
+S =
+    (long_base_exposure - short_base_exposure)
     / (long_base_exposure + short_base_exposure)
 ```
 
-It ranges from zero for a balanced market to `BPS` for a one-sided
-market.
+It is zero on an empty or balanced book and ±1 for a one-sided market.
+
+Each market keeps an exponential moving average `E` of the signed skew.
+It starts at zero and decays toward `S` with a global half-life `H`:
+
+```text
+E(t) = S + (E₀ - S) × 2^(−t/H)
+```
+
+The blended integral skew mixes the two with a per-market instant
+weight `w` (in bps):
+
+```text
+I = (w × S + (BPS − w) × E) / BPS
+```
+
+`w = BPS` reproduces the pure instant skew. The payer over a checkpoint
+window is the side the sign of `∫ I dt` points at. After a book flip
+the payer can be the *lighter* side for a while: a trader who balances
+the book keeps receiving while the history fades, which is exactly the
+incentive the blend is meant to create.
 
 ### 4.2 Quadratic rate
 
-The dominant side pays:
+The payer side pays:
 
 ```text
 payer_rate_bps_day =
-    max_funding_rate_bps_day
-    × skew_bps²
-    / BPS²
+    max_funding_rate_bps_day × I²
 ```
+
+with `I` read as a signed fraction of one; the sign selects the payer
+and never changes the magnitude of the charge.
 
 The quadratic curve is deliberate:
 
 - Small imbalances remain inexpensive.
 - The charge accelerates as imbalance grows.
-- A one-sided market reaches the configured ceiling.
+- A persistently one-sided market converges to the configured ceiling.
 
-Every existing position on the dominant side pays the current rate.
-When new flow increases imbalance, the rate rises for all positions on
-that side from that point forward.
+Every existing position on the payer side pays the current rate. The
+rate is not piecewise constant: between actions it moves continuously
+as the EMA converges, and accrual integrates that motion exactly.
 
 ### 4.3 Dividing the payer flow
 
-Light-side traders offset part of the dominant exposure. LPs bear the
+Receiver-side traders offset part of the payer exposure. LPs bear the
 unmatched remainder. The funding flow is divided by that
 counter-exposure:
 
 ```text
 payer_flow_per_day =
-    dominant_size_open_interest
+    payer_size_open_interest
     × payer_rate_bps_day
     / BPS
 
 counterparty_share =
-    light_base_exposure
-    / dominant_base_exposure
+    min(1, receiver_base_exposure / payer_base_exposure)
 
 trader_receiver_flow_per_day =
     payer_flow_per_day × counterparty_share
@@ -167,25 +186,28 @@ lp_funding_flow_per_day =
     payer_flow_per_day - trader_receiver_flow_per_day
 ```
 
-Because the dominant side is larger, `counterparty_share` is between
-zero and one.
+Under the EMA the payer can be the lighter side, so the raw ratio can
+exceed one. The cap at one hands receivers at most the whole flow; it
+is what keeps the LP slice non-negative, and while receivers over-match
+the payer the LP slice is zero.
 
 This rule is continuous:
 
-- With no light side, all collected funding belongs to LPs.
-- A small light side receives a small share.
-- As the market approaches balance, light-side traders receive a larger
-  share while the payer rate itself approaches zero.
+- With no receiver side, all collected funding belongs to LPs.
+- A small receiver side receives a small share.
+- As the market approaches balance and its history fades, receiver-side
+  traders receive a larger share while the payer rate itself approaches
+  zero.
 - A dust position cannot redirect the complete funding flow away from
   LPs.
 
-The receiver rate per unit of light-side USD size is derived from the
-allocated receiver flow:
+The receiver rate per unit of receiver-side USD size is derived from
+the allocated receiver flow:
 
 ```text
 receiver_rate =
     trader_receiver_flow
-    / light_size_open_interest
+    / receiver_size_open_interest
 ```
 
 This rate may differ from the payer rate when positions were opened at
@@ -315,29 +337,38 @@ flow. This preserves their different accounting treatment.
 The system stores:
 
 - One global borrow index.
-- Per-market funding indices.
-- One global aggregate receiver-flow rate.
-- One global pending receiver-funding claim.
+- Per-market funding indices and the per-market skew EMA.
+- One global pending receiver-funding claim, fed per market.
 
-The aggregate receiver-flow rate lets the guaranteed claim accrue
-without looping over markets.
+The borrow index advances with a piecewise-constant rate. The funding
+indices advance with the exact closed-form integral of the continuously
+decaying funding rate over each checkpoint window.
+
+The guaranteed receiver claim accrues inside each market's checkpoint,
+atomically with that market's indices, so a position's credit can never
+outrun its market's contribution. LP pricing checkpoints every active
+market to see the exact liability; other actions tolerate
+keeper-cadence staleness in the total.
 
 ## 7. Checkpoint order
 
-Rates are constant between checkpoints. A state change cannot
-retroactively alter the rate for elapsed time.
+The borrow rate is constant between checkpoints; the funding rate
+follows a known decay curve between them. In both cases a state change
+cannot retroactively alter the accrual for elapsed time.
 
 Every action that can change a fee base, rate, cash ownership, or risk
 state follows this order:
 
 ```text
-1. Accrue global indices and guaranteed claims to now using old rates.
-2. Accrue the affected market's funding indices using its old flows.
+1. Accrue the global borrow index to now using the old rate.
+2. Accrue the affected market's funding indices, its skew EMA, and its
+   share of the guaranteed receiver claim over the elapsed window,
+   using the pre-mutation book.
 3. Calculate and capitalize the affected position's pending fees.
 4. Apply the position, cash, claim, or configuration mutation.
-5. Recompute the affected market's funding flows.
-6. Update the global receiver-flow sum by the market flow delta.
-7. Recompute the global borrow rate for future time.
+5. Refresh the market's displayed payer side and rate from the
+   post-mutation book and EMA.
+6. Recompute the global borrow rate for future time.
 ```
 
 Repeated checkpointing at the same timestamp changes nothing.
@@ -349,9 +380,11 @@ settling the position stops its time-based fees.
 
 The borrow rate is piecewise constant. Receiver liabilities may reduce
 cash LP equity during an interval, but the resulting utilization change
-is reflected at the next checkpoint. Continuously repricing the
-quadratic curve would require solving and storing a more complex
-time-dependent integral.
+is reflected at the next checkpoint. The funding rate is the opposite:
+it decays continuously as the EMA converges, and each market checkpoint
+advances its indices with the exact closed-form integral of that decay,
+so checkpoint frequency moves accrued funding only within the decay
+table's quantization.
 
 ## 8. Position collateral and settlement
 
@@ -368,6 +401,14 @@ effective_collateral =
 
 Accrued fees enter margin and liquidation calculations immediately.
 
+Two margin rates govern position health. Leverage-increasing actions —
+opening, adding size, or withdrawing collateral without closing — must
+leave the position at or above the initial margin. De-risking actions —
+a pure collateral top-up or a partial close — need only clear the
+maintenance margin, which is also the liquidation threshold. The gap
+between the two is a guaranteed entry buffer: a position opened at
+maximum leverage does not sit on the liquidation boundary.
+
 On any increase, decrease, close, or liquidation:
 
 1. Checkpoint the relevant indices.
@@ -380,8 +421,8 @@ Capitalizing all old accrual before a partial close avoids historical
 pro-rata debt bookkeeping. The remaining position starts from the
 current indices.
 
-Opening fees are collected immediately. Collected opening and borrow
-fees are divided among:
+The closing fee is collected at close, out of realized positive price
+PnL. Collected closing and borrow fees are divided among:
 
 ```text
 LP-owned revenue
@@ -403,11 +444,15 @@ settlement_equity =
     - pending_funding_paid
     - pending_borrow
 
-trader_payout = max(settlement_equity, 0)
+closing_fee_collected =
+    min(closing_fee, max(settlement_equity, 0))
+
+trader_payout = max(settlement_equity - closing_fee_collected, 0)
 bad_debt      = max(-settlement_equity, 0)
 ```
 
-There is no closing fee.
+The closing fee ranks below every accrued obligation and never exceeds
+payable price PnL, so it cannot create bad debt.
 
 ## 9. Vault ownership quantities
 
@@ -616,11 +661,13 @@ without minting LP shares.
 
 The completed mechanism must preserve:
 
-1. Balanced base exposure produces zero funding.
-2. Funding rises quadratically with normalized base-exposure skew.
-3. Light-side traders receive only the flow justified by their
-   counter-exposure; LPs receive the unmatched collected flow.
-4. A dust light-side position cannot redirect all funding.
+1. An empty book, or a balanced book whose funding history has
+   decayed, produces zero funding.
+2. Funding rises quadratically with the blended integral skew.
+3. Receiver-side traders receive only the flow justified by their
+   counter-exposure, capped at the whole payer flow; LPs receive the
+   unmatched collected flow.
+4. A dust receiver-side position cannot redirect all funding.
 5. Receiver claims never exceed receiver-backed payer accrual.
 6. Receiver funding is guaranteed at accrual; payer and borrow revenue
    are recognized only when collected.
@@ -628,7 +675,8 @@ The completed mechanism must preserve:
 8. Risk units price gross action-created capacity and do not mark with
    price.
 9. New risk cannot exceed global or per-market capacity limits.
-10. Checkpoints apply old rates before every relevant mutation.
+10. Checkpoints settle elapsed time on the pre-mutation state before
+    every relevant mutation.
 11. New size never pays fees from before it existed.
 12. Partial closes capitalize old accrual before resetting baselines.
 13. Accrued fees affect margin and liquidation.
@@ -649,9 +697,11 @@ The completed mechanism must preserve:
 The model requires:
 
 ```text
-open_fee_low_bps per market
-open_fee_high_bps per market
+close_fee_low_bps per market
+close_fee_high_bps per market
 max_funding_rate_bps_day per market
+instant_weight_bps per market
+funding_half_life_seconds
 
 market_risk_factor_bps per market
 max_long_size_open_interest per market
@@ -667,6 +717,7 @@ max_withdraw_utilization_bps
 lp_request_delay
 min_deposit_nav_factor_bps
 
+initial_margin_bps per market
 maintenance_margin_bps per market
 liquidation_reward_bps per market
 warning_pnl_factor_bps per market
@@ -684,7 +735,7 @@ max_insolvent_touch_reward
 
 The funding and borrow exponents are fixed at two. The model uses
 governed conservative ceilings and exposure caps rather than an onchain
-volatility estimator. Calibration must cover one-sided markets, sudden
-price moves, high utilization, delayed liquidation, minimum-size
-positions, rounding boundaries, and simultaneous stress across
-markets.
+volatility estimator. Calibration must cover one-sided markets, book
+flips against the funding history, sudden price moves, high
+utilization, delayed liquidation, minimum-size positions, rounding
+boundaries, and simultaneous stress across markets.

@@ -53,7 +53,12 @@ Signed PnL is kept as a high-precision numerator until the final cash
 conversion.
 
 Every cumulative division that repeats over time carries its remainder.
-This makes accrual independent of checkpoint frequency.
+This makes borrow accrual independent of checkpoint frequency. Funding
+integrates a continuously decaying rate in closed form (§6.1); its decay
+table quantizes at roughly 1e-13 relative, so checkpoint frequency
+cannot move accrued funding beyond that tolerance. The equality is
+exact only at `instant_weight_bps = BPS`, where the rate is again
+piecewise constant.
 
 ## 3. Sources of truth
 
@@ -157,9 +162,6 @@ open_position_count
 borrow_index
 borrow_index_remainder
 current_borrow_rate
-
-global_receiver_flow_per_second
-global_receiver_accrual_remainder
 last_global_checkpoint
 
 next_lp_request_id
@@ -173,6 +175,8 @@ max_withdraw_utilization_bps
 min_deposit_nav_factor_bps
 lp_request_delay
 
+funding_half_life_seconds
+
 base_borrow_rate_bps_day
 max_variable_borrow_rate_bps_day
 
@@ -185,6 +189,12 @@ max_insolvent_touch_reward
 
 The active market count has a governance hard bound. The registry is
 used only when an LP action needs a synchronized marked NAV.
+
+There is no global receiver-flow scalar. The guaranteed receiver
+liability accrues per market inside the market checkpoint (§6.3).
+
+`funding_half_life_seconds` is the one memory horizon shared by every
+market's funding EMA, bounded to [60, 31,536,000] seconds.
 
 ### 4.2 Per-market state
 
@@ -209,18 +219,18 @@ lp_backed_payer_index_short
 receiver_index_long
 receiver_index_short
 
+skew_ema
 funding_index_remainders
-receiver_flow_remainder
+pending_receiver_remainder
 last_funding_checkpoint
 
 current_payer_side
 current_payer_rate
-current_receiver_flow_per_second
-current_lp_flow_per_second
 
-open_fee_low_bps
-open_fee_high_bps
+close_fee_low_bps
+close_fee_high_bps
 max_funding_rate_bps_day
+instant_weight_bps
 market_risk_factor_bps
 
 size_caps
@@ -230,6 +240,7 @@ warning_pnl_factor_bps
 adl_pnl_factor_bps
 recovery_pnl_factor_bps
 hard_cap_pnl_factor_bps
+initial_margin_bps
 maintenance_margin_bps
 liquidation_reward_bps
 adl_reward_bps
@@ -237,6 +248,16 @@ adl_reward_bps
 
 The aggregate size and base-exposure fields are sufficient for funding,
 raw market-side PnL, and directional limits.
+
+`skew_ema` is the market's stored funding history and
+`pending_receiver_remainder` carries the sub-unit receiver-liability
+accrual (§6.3). `current_payer_side` and `current_payer_rate` are
+display state refreshed from the blended integral skew after every
+checkpoint and mutation; accrual never reads them. There is no stored
+receiver or LP flow rate.
+
+The size caps must not exceed 10^16 and the base-exposure caps must
+not exceed 10^18 — the i128 headroom the §6.2 window integral needs.
 
 ### 4.3 Per-position state
 
@@ -421,71 +442,117 @@ necessary.
 
 ## 6. Funding mechanics
 
-### 6.1 Current market flow
+### 6.1 Integral skew and rate
 
-For nonzero total base exposure:
+Funding prices net directional imbalance blended with its own history,
+so a book flip is charged gradually rather than instantly repricing the
+payer side.
+
+For nonzero total base exposure, the signed skew is a fraction of one
+at `INDEX_PRECISION` scale (zero on an empty book):
 
 ```text
-skew_bps =
-    |long_base - short_base|
-    × BPS
+S =
+    (long_base - short_base)
+    × INDEX_PRECISION
     / (long_base + short_base)
-
-payer_rate_bps_day =
-    max_funding_rate_bps_day
-    × skew_bps²
-    / BPS²
 ```
 
-The larger base-exposure side pays. Let `dominant_size`,
-`dominant_base`, `light_size`, and `light_base` describe the two sides.
+Each market stores a skew EMA `E`, initialized to zero, decaying toward
+`S` with the global half-life `H = funding_half_life_seconds`:
 
 ```text
-payer_flow_per_second =
-    dominant_size
-    × payer_rate_bps_day
-    / (BPS × SECONDS_PER_DAY)
-
-receiver_flow_per_second =
-    payer_flow_per_second
-    × light_base
-    / dominant_base
-
-lp_flow_per_second =
-    payer_flow_per_second
-    - receiver_flow_per_second
+E(t) = S + (E₀ - S) × 2^(−t/H)
 ```
 
-At balance, every flow is zero. If `light_base` or `light_size` is zero,
-receiver flow is zero and complete collected payer flow is LP-backed.
+The blended integral skew mixes the instant skew and the EMA with the
+per-market `instant_weight_bps` `w`:
 
-### 6.2 Funding indices
+```text
+I = (w × S + (BPS − w) × E) / BPS
+```
 
-The dominant side has two payer indices:
+`w = BPS` reproduces the pure instant skew. The rate is quadratic in
+the blend:
+
+```text
+payer_rate_bps_day =
+    max_funding_rate_bps_day × I²
+```
+
+with `I` read as a signed fraction of one; the sign never changes the
+rate. The payer for a checkpoint window is the side the sign of
+`∫ I dt` over that window points at — after a book flip this can be the
+*lighter* side for a while, and a trader who balances the book keeps
+receiving while the history fades.
+
+### 6.2 Window integral and funding indices
+
+Between two checkpoints the book is constant, so the blend has the
+closed form `I(t) = A + B·d(t)` with:
+
+```text
+d(t) = 2^(−t/H)
+A = S
+B = (BPS − w) × (E₀ − S) / BPS
+```
+
+The window weight — the exact integral of the rate over the elapsed
+`Δt` — is:
+
+```text
+d  = d(Δt)
+J₁ = (H / ln 2) × (1 − d)
+J₂ = (H / (2 ln 2)) × (1 − d²)
+
+W = ∫ rate dt =
+    max_funding_rate_bps_day
+    × (A²·Δt + 2AB·J₁ + B²·J₂)
+```
+
+`d` is computed by a 47-entry square-and-multiply table of
+`2^(−2^(−i))` constants that quantizes at roughly 1e-13 relative.
+Dividing `W` by `BPS × SECONDS_PER_DAY` yields the index delta per unit
+of payer-side size.
+
+The receiver side absorbs the share of the payer flow its
+counter-exposure matches, capped at the whole flow:
+
+```text
+receiver_share = min(1, receiver_base / payer_base)
+
+W_receiver = W × receiver_share
+W_lp       = W − W_receiver
+```
+
+Because the payer can be the lighter side, `receiver_share` would
+otherwise exceed one; the cap is what keeps `W_lp` non-negative and the
+LP-backed index monotone. If the receiver side has zero size or zero
+base exposure, `W_receiver` is zero and the complete collected payer
+flow is LP-backed.
+
+The payer side has two payer indices:
 
 ```text
 receiver_backed_payer_index_delta =
-    receiver_flow
-    × INDEX_PRECISION
-    / dominant_size
+    W_receiver / (BPS × SECONDS_PER_DAY)
 
 lp_backed_payer_index_delta =
-    lp_flow
-    × INDEX_PRECISION
-    / dominant_size
+    W_lp / (BPS × SECONDS_PER_DAY)
 ```
 
-The light side has one receiver index:
+The receiver side has one receiver index, derived from the exact amount
+the payer index will collect:
 
 ```text
+receiver_cash =
+    payer_size × receiver_backed_payer_index_delta
+
 receiver_index_delta =
-    receiver_flow
-    × INDEX_PRECISION
-    / light_size
+    receiver_cash / receiver_size
 ```
 
-All formulas include elapsed time in their flow amount and carry
-division remainders.
+All divisions carry remainders.
 
 Payer index increments round up at the position-obligation boundary.
 Receiver credits round down. Aggregate receiver credit must never
@@ -493,31 +560,27 @@ exceed aggregate receiver-backed payer accrual.
 
 ### 6.3 Guaranteed receiver liability
 
-Each market exposes its current `receiver_flow_per_second`. The global
-state stores their sum.
-
-At a global checkpoint:
+The liability accrues per market, inside the market checkpoint and
+atomically with the indices:
 
 ```text
 pending_receiver_funding_total +=
-    global_receiver_flow_per_second × elapsed_time
+    floor(
+        payer_size
+        × receiver_backed_payer_index_delta
+        / INDEX_PRECISION
+    )
 ```
 
-The cash-unit result rounds down while its high-precision remainder is
-carried. This is the authoritative vault liability and reduces cash LP
-equity immediately. Because the sum of individually rounded-down
-receiver credits cannot exceed the rounded-down aggregate flow, it
-remains sufficient for position claims.
+The sub-unit part is carried in the market's
+`pending_receiver_remainder`. This is the authoritative vault liability
+and reduces cash LP equity immediately. Because the liability and the
+receiver credits derive from the same exact payer collection, a
+position's credit can never outrun its market's contribution to the
+liability.
 
-When a market's flow changes:
-
-```text
-global_receiver_flow_per_second +=
-    new_market_receiver_flow
-    - old_market_receiver_flow
-```
-
-This makes guaranteed liability accrual O(1) for ordinary actions.
+There is no global receiver-flow scalar and the global checkpoint does
+not touch this total.
 
 When receiver funding is capitalized into a position:
 
@@ -544,11 +607,16 @@ the receiver.
 If the payer cannot pay, the uncollected difference is LP bad debt; the
 receiver claim is not reversed.
 
-After the final position closes, the system checkpoints every remaining
-flow to the close time. If `open_position_count`, the global receiver
-flow, and every market size are zero, no receiver can remain. Any
-unassigned receiver-rounding residue and its remainder are released to
-LP residual cash.
+After the final position closes, `open_position_count` alone decides
+the release: aggregate conservation makes every market size zero, so no
+receiver can remain and any unassigned receiver-rounding residue is
+released to LP residual cash without a market loop. A market whose book
+empties also drops its carried funding remainders.
+
+Because the liability accrues per market, LP pricing checkpoints every
+active market (bounded by `max_active_markets`) so it sees exact
+liabilities; entry points that touch no market tolerate keeper-cadence
+staleness in the total.
 
 ## 7. Borrow mechanics
 
@@ -629,22 +697,29 @@ pending_borrow =
 For `now > last_global_checkpoint`:
 
 1. Advance the borrow index with the stored borrow rate.
-2. Increase the guaranteed receiver liability with the stored global
-   receiver flow.
-3. Carry both division remainders.
-4. Set `last_global_checkpoint = now`.
+2. Carry its division remainder.
+3. Set `last_global_checkpoint = now`.
 
-For the same timestamp, it is a no-op.
+For the same timestamp, it is a no-op. The global checkpoint advances
+borrow only; every funding quantity, including the guaranteed receiver
+liability, accrues in the market checkpoint.
 
 ### 8.2 Market checkpoint
 
 For `now > market.last_funding_checkpoint`:
 
-1. Advance the current payer-side receiver-backed index.
-2. Advance the current payer-side LP-backed index.
-3. Advance the light-side receiver index.
-4. Carry all remainders.
-5. Set the market checkpoint timestamp to `now`.
+1. Resolve the funding window with the §6.2 closed-form integral.
+2. Select the window's payer side from the sign of `∫ I dt`.
+3. Split the window weight into its receiver-backed and LP-backed
+   parts.
+4. Advance the payer side's receiver-backed and LP-backed indices.
+5. Advance the receiver side's receiver index.
+6. Accrue the guaranteed receiver liability from the same payer
+   collection.
+7. Carry all remainders.
+8. Advance the skew EMA to the window end.
+9. Refresh the displayed payer side and rate from the integral skew.
+10. Set the market checkpoint timestamp to `now`.
 
 ### 8.3 Mutation order
 
@@ -656,13 +731,16 @@ uses:
 2. checkpoint affected market
 3. capitalize affected position fees
 4. apply the requested mutation
-5. derive the affected market's new funding flows
-6. update the global receiver-flow sum by the flow delta
+5. refresh the market's displayed payer side and rate
+6. re-evaluate the market's risk states
 7. derive the new global borrow rate
 ```
 
-An LP settlement checkpoints global accrual, calculates marked NAV, then
-applies the LP cash/share mutation and recomputes the borrow rate.
+An LP settlement checkpoints global accrual and every active market —
+LP pricing must see exact receiver liabilities (§6.3) — then calculates
+marked NAV, applies the LP cash/share mutation, and recomputes the
+borrow rate. Entry points that touch no market checkpoint only global
+state and tolerate keeper-cadence staleness in the liability total.
 
 An operational pause does not change either accrual clock. Positions
 continue to pay or receive until they are settled.
@@ -736,7 +814,7 @@ exposure to pay the obligation, or use the insolvent full-close path.
 This permits every surviving position to reset its baselines without
 forgiving debt or storing another unpaid-fee ledger.
 
-Collected opening and borrow fees are split:
+Collected closing and borrow fees are split:
 
 ```text
 lp_amount =
@@ -785,17 +863,22 @@ The action order is:
 3. Authenticate and transfer any collateral supplied with the action.
 4. Calculate the existing position's pending fees and funding credit.
 5. Derive `base_added` and `risk_units_added`.
-6. Calculate normalized base-exposure skew before and after.
-7. Calculate the low- or high-tier opening fee.
-8. Settle old obligations and the opening fee from old collateral,
-   funding credit, and newly supplied collateral.
-9. Check resulting collateral and maintenance margin.
-10. Check global risk capacity, market-side caps, and the warning factor.
-11. Increase position and market aggregates.
-12. Set debt baselines so new size starts at current indices.
-13. Recompute funding flows and the borrow rate.
+6. Settle old obligations from old collateral, funding credit, and
+   newly supplied collateral.
+7. Check resulting collateral and the applicable margin.
+8. Check global risk capacity, market-side caps, and the warning factor.
+9. Increase position and market aggregates.
+10. Set debt baselines so new size starts at current indices.
+11. Refresh the displayed payer side/rate and the borrow rate.
 
-Only collateral remaining after fees becomes stored position collateral.
+Nothing is charged at open or increase. The complete supplied
+collateral becomes stored position collateral.
+
+The margin gate depends on what the action does to leverage: an open,
+and an increase that adds size, must satisfy the initial margin; an
+increase that only adds collateral de-risks and must clear just the
+maintenance floor (§10.3).
+
 The transfer, claim-label changes, and residual LP revenue must reconcile
 through the universal cash transition rule.
 
@@ -811,11 +894,13 @@ The action order is:
 6. Calculate every pending fee and funding credit.
 7. Settle credits, obligations, and realized PnL through the fixed
    waterfall.
-8. Apply any explicit collateral withdrawal.
-9. Require a remaining position to satisfy maintenance margin.
-10. Reduce position and market aggregates.
-11. Reset the remaining position's debts, or delete a complete close.
-12. Recompute funding flows and the borrow rate.
+8. Collect the closing fee from realized positive price PnL.
+9. Transfer the remaining realized profit on a partial close.
+10. Apply any explicit collateral withdrawal.
+11. Require a remaining position to satisfy the applicable margin.
+12. Reduce position and market aggregates.
+13. Reset the remaining position's debts, or delete a complete close.
+14. Refresh the displayed payer side/rate and the borrow rate.
 
 For removed exposure:
 
@@ -846,8 +931,10 @@ For a partial close:
 
 - Funding received and positive payable PnL first provide value from
   which accrued obligations can be collected.
-- Any positive PnL remaining after obligations is transferred to the
-  trader and reduces LP cash equity.
+- The closing fee is collected after every obligation.
+- The realized profit transferred to the trader is
+  `min(payable_price_pnl - closing_fee, stored_collateral)`; the
+  transfer reduces LP cash equity.
 - After guaranteed receiver-backed obligations are paid, negative PnL
   reduces remaining stored collateral and increases LP cash equity by
   the amount collected.
@@ -856,6 +943,9 @@ For a partial close:
   remainder.
 - `collateral_withdrawn` is optional, occurs after PnL, and cannot make
   the remaining position unhealthy.
+- A decrease that removes size de-risks and is held to the maintenance
+  margin; a pure collateral withdrawal raises leverage and must leave
+  the position back above the initial margin (§10.3).
 
 For a full close:
 
@@ -868,7 +958,10 @@ close_equity =
     - pending_funding_paid_to_lps
     - pending_borrow
 
-trader_payout = max(close_equity, 0)
+collected_closing_fee =
+    min(closing_fee, max(close_equity, 0))
+
+trader_payout = max(close_equity - collected_closing_fee, 0)
 bad_debt      = max(-close_equity, 0)
 ```
 
@@ -878,7 +971,8 @@ Available value is distributed in this order:
 2. Negative price PnL owed to LPs, when present.
 3. LP-backed funding.
 4. Borrow.
-5. The trader's remaining equity.
+5. The closing fee.
+6. The trader's remaining equity.
 
 Positive price PnL adds to the value available for the waterfall.
 Unpaid LP-backed funding and borrow are not booked as revenue.
@@ -888,9 +982,48 @@ Removing the stored collateral claim and transferring
 residual equity. Bad debt is emitted for risk accounting; it is not
 stored as a fictitious receivable.
 
-There is no closing fee.
+Every close path — trader decrease or close, liquidation, ADL, and
+triggered order — charges the closing fee through this same
+settlement:
 
-### 10.3 Liquidation
+```text
+closing_fee =
+    min(
+        ceil(size_removed × fee_bps / BPS),
+        payable_price_pnl
+    )
+```
+
+The tier is computed on the book the close leaves behind: the low
+`close_fee_low_bps` when removing the exposure improves or preserves
+normalized base-exposure skew, the high `close_fee_high_bps` when it
+worsens it. The fee only ever comes out of realized positive price PnL
+after the hard cap, ranked below every accrued obligation — losers pay
+zero and no shortfall path exists. The collected fee is split through
+the standard revenue split under its own closing-fee source, and every
+close event carries the amount.
+
+### 10.3 Margins and liquidation
+
+Each market configures two margin rates, validated as
+`0 < maintenance_margin_bps <= initial_margin_bps <= BPS`, with the
+requirement for a position of `size`:
+
+```text
+margin_requirement =
+    ceil(size × margin_bps / BPS)
+```
+
+The initial margin gates every leverage-increasing action: an open, an
+increase that adds size, and a pure collateral withdrawal. The
+maintenance margin gates de-risking checks and liquidation: a pure
+collateral top-up, a partial close that removes size, and the
+liquidation test itself.
+
+The gap between the two is the trader's guaranteed entry buffer. Max
+leverage (displayed as `floor(BPS / initial_margin_bps)`) no longer
+sits on the liquidation boundary: a freshly opened position must lose
+the buffer before it can be liquidated.
 
 Liquidation uses the same preparation and settlement accounting as a
 close. It is permitted when effective collateral plus current payable
@@ -900,8 +1033,8 @@ The liquidation reward:
 
 - Is capped by configuration.
 - Cannot exceed value actually available for it.
-- Comes from the liquidated position after guaranteed fees and before
-  any residual trader payout.
+- Comes from the liquidated position after guaranteed fees and the
+  closing fee, and before any residual trader payout.
 - Is accounted separately from trader payout and LP PnL.
 
 An insolvent-position touch may receive a capped reward from the
@@ -1273,7 +1406,7 @@ Rounding follows ownership and solvency:
 
 | Quantity | Direction |
 |---|---|
-| Opening fee charged | Up |
+| Closing fee charged | Up, capped at payable price PnL |
 | Borrow obligation | Up |
 | Funding payer obligation | Up |
 | Aggregate receiver liability | Down with remainder carry |
@@ -1370,9 +1503,12 @@ does not change total claims.
 - Indices never decrease.
 - A same-timestamp checkpoint is idempotent.
 - New size and risk units begin at current baselines.
-- A mutation never changes the rate used for already elapsed time.
-- Splitting an interval into checkpoints produces the same accrual,
-  subject only to the stored remainder.
+- A mutation never changes the accrual for already elapsed time.
+- Splitting a borrow interval into checkpoints produces the same
+  accrual, subject only to the stored remainder.
+- Splitting a funding interval agrees within the decay table's
+  quantization (roughly 1e-13 relative); it is exact only at
+  `instant_weight_bps = BPS`.
 
 ### 16.5 Risk capacity
 
@@ -1442,7 +1578,7 @@ The implementation can proceed in seven independently testable layers:
 2. Position and market aggregates for size, base exposure, collateral,
    and risk units.
 3. Global borrow checkpointing and capacity gates.
-4. Per-market funding flows, indices, and guaranteed receiver claims.
+4. Per-market funding windows, indices, and guaranteed receiver claims.
 5. Fee capitalization, partial closes, and complete settlement.
 6. Marked NAV plus deterministic FIFO LP requests.
 7. Warning, liquidation, ADL, cash-shortfall, and recapitalization
@@ -1450,8 +1586,8 @@ The implementation can proceed in seven independently testable layers:
 
 Each layer must add its invariants before the next layer depends on it.
 The final system should be tested with long time gaps, repeated
-same-block checkpoints, dust light-side exposure, partial closes,
-one-sided markets, simultaneous market stress, receiver settlement
-before payer settlement, delayed liquidation, LP requests around price
-moves, missed oracle rounds, capacity-bound withdrawals, and terminal
-dust cleanup.
+same-block checkpoints, dust receiver-side exposure, book flips against
+the funding EMA, partial closes, one-sided markets, simultaneous market
+stress, receiver settlement before payer settlement, delayed
+liquidation, LP requests around price moves, missed oracle rounds,
+capacity-bound withdrawals, and terminal dust cleanup.

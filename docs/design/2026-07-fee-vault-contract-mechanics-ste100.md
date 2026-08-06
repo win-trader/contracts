@@ -35,17 +35,21 @@ The following terms have one meaning in this document.
 | claim | An accounting label that identifies the owner of vault cash. |
 | clean terminal state | A state with no position, risk unit, receiver claim, or execution budget. |
 | debt baseline | The index-derived amount already applied to a position. |
-| dominant side | The side with more base exposure. |
 | effective collateral | Stored collateral after accrued fees and funding credits. |
-| light side | The side with less base exposure. |
+| half-life | The time in which the skew EMA closes half of its distance to the current skew. |
+| instant weight | The weight of the current skew in the integral skew blend. |
+| integral skew | The blend of the current signed skew and the skew EMA. |
 | LP | A liquidity provider. |
 | marked vault NAV | LP value after recognized unrealized trader PnL. |
 | oracle round | One authenticated set of market prices with one identifier and timestamp. |
+| payer side | The side that pays funding for a checkpoint window. The sign of the integrated integral skew selects this side. |
 | physical cash | The collateral-token balance of the vault. |
 | position size | The USD notional value at entry. |
+| receiver side | The side opposite the payer side. |
 | risk unit | A fixed measure of gross vault capacity that a position uses. |
 | side | The long side or the short side of a market. |
-| skew | The normalized difference between long and short base exposure. |
+| skew | The normalized signed difference between long and short base exposure. |
+| skew EMA | The stored exponential moving average of the signed skew. |
 | stored collateral | Position collateral recorded in contract state. |
 
 `PnL` means profit and loss.
@@ -95,7 +99,13 @@ Keep signed PnL as a high-precision numerator.
 Convert the numerator to cash only at the final step.
 
 Carry the remainder of each repeated cumulative division.
-The checkpoint frequency must not change accrued value.
+The checkpoint frequency must not change accrued borrow value.
+
+Funding integrates a continuously decaying rate in closed form.
+The funding decay table quantizes at approximately 1e-13 relative error.
+The checkpoint frequency must not change accrued funding value beyond
+that tolerance.
+Only an instant weight of `BPS` makes the funding equality exact.
 
 ## 4. Sources of truth
 
@@ -227,13 +237,15 @@ borrow_index_remainder
 current_borrow_rate
 ```
 
-Store these global receiver values:
+Store this global checkpoint value:
 
 ```text
-global_receiver_flow_per_second
-global_receiver_accrual_remainder
 last_global_checkpoint
 ```
+
+Do not store a global receiver-flow rate.
+Do not store a global receiver-accrual remainder.
+The market checkpoint accrues the receiver liability for each market.
 
 Store these LP request values:
 
@@ -261,6 +273,8 @@ max_withdraw_utilization_bps
 min_deposit_nav_factor_bps
 lp_request_delay
 
+funding_half_life_seconds
+
 base_borrow_rate_bps_day
 max_variable_borrow_rate_bps_day
 
@@ -270,6 +284,9 @@ global_hard_cap_factor_limit_bps
 max_adl_reward
 max_insolvent_touch_reward
 ```
+
+`funding_half_life_seconds` is one memory horizon for every market.
+Keep `funding_half_life_seconds` from 60 through 31,536,000 seconds.
 
 ### 5.2 Market state
 
@@ -299,22 +316,30 @@ receiver_index_short
 Store these funding control values:
 
 ```text
+skew_ema
 funding_index_remainders
-receiver_flow_remainder
+pending_receiver_remainder
 last_funding_checkpoint
 
 current_payer_side
 current_payer_rate
-current_receiver_flow_per_second
-current_lp_flow_per_second
 ```
+
+`skew_ema` is the stored funding history for the market.
+`pending_receiver_remainder` carries the sub-unit receiver-liability
+accrual.
+`current_payer_side` and `current_payer_rate` are display state.
+Refresh them from the integral skew after each checkpoint and mutation.
+Do not store a receiver-flow rate.
+Do not store an LP-flow rate.
 
 Store these market parameters:
 
 ```text
-open_fee_low_bps
-open_fee_high_bps
+close_fee_low_bps
+close_fee_high_bps
 max_funding_rate_bps_day
+instant_weight_bps
 market_risk_factor_bps
 
 max_long_size_open_interest
@@ -326,10 +351,16 @@ warning_pnl_factor_bps
 adl_pnl_factor_bps
 recovery_pnl_factor_bps
 hard_cap_pnl_factor_bps
+initial_margin_bps
 maintenance_margin_bps
 liquidation_reward_bps
 adl_reward_bps
 ```
+
+Keep each size cap at or below 10^16.
+Keep each base-exposure cap at or below 10^18.
+The two ceilings keep the funding window integral inside i128
+arithmetic.
 
 Use the market aggregates for funding.
 Use the market aggregates for market-side PnL.
@@ -410,7 +441,8 @@ A cash transfer must have an ownership effect.
 Use this table to test each state transition.
 
 Each settlement entry point must emit one event with the amounts it moved.
-Each keeper checkpoint must emit the updated indices and current rates.
+Each keeper checkpoint must emit the updated indices, the skew EMA, and
+the current rates.
 Each revenue split must emit the collected amount and each share.
 Each LP settlement event must carry the post-settlement supply and NAV.
 Each canonical round publication must emit the round identifier.
@@ -419,9 +451,10 @@ state.
 
 An off-chain consumer must be able to rebuild each row of this table from
 the events.
-Flow and rate values are exact at each checkpoint event.
-A position action can change flows and rates between checkpoint events
-without an event.
+Index and rate values are exact at each checkpoint event.
+A position action can change the displayed payer side and rate between
+checkpoint events without an event.
+The funding rate also decays continuously between events.
 A consumer must treat accrual projections between checkpoint events as
 estimates with keeper-cadence staleness.
 
@@ -548,98 +581,150 @@ The system must use timely liquidation.
 
 ## 8. Funding mechanics
 
-### 8.1 Market flow
+### 8.1 Integral skew and rate
 
-For nonzero total base exposure, calculate skew:
+Calculate the signed skew as a fraction of one at `INDEX_PRECISION`
+scale:
 
 ```text
-skew_bps =
-    |long_base - short_base|
-    × BPS
-    / (long_base + short_base)
+skew_frac(long_base, short_base) =
+    if long_base + short_base = 0:
+        0
+    else:
+        (long_base - short_base)
+        × INDEX_PRECISION
+        / (long_base + short_base)
 ```
 
-Calculate the dominant-side rate:
+Write `S` for the current signed skew.
+`S` is positive when longs dominate.
+`S` is zero for an empty book.
+
+Store one skew EMA for each market.
+Write `E` for the stored EMA.
+Initialize `E` to zero.
+`E` decays toward `S` with the global half-life `H`:
+
+```text
+H = funding_half_life_seconds
+
+E(t) = S + (E₀ - S) × 2^(−t/H)
+```
+
+Blend the current skew and the EMA with the market instant weight `w`:
+
+```text
+w = instant_weight_bps
+
+I = (w × S + (BPS − w) × E) / BPS
+```
+
+An instant weight of `BPS` reproduces the pure instant skew.
+
+Calculate the unsigned payer rate from the integral skew:
 
 ```text
 payer_rate_bps_day =
     max_funding_rate_bps_day
-    × skew_bps²
-    / BPS²
+    × I²
 ```
 
-The side with more base exposure is the payer side.
+Treat `I` as a signed fraction of one in this formula.
+The sign of `I` does not change the rate.
 
-Use these names for the sides:
+The payer side for a checkpoint window is the sign of the integrated
+integral skew:
 
 ```text
-dominant_size
-dominant_base
-light_size
-light_base
+payer_sign = sign(∫ I dt over the window)
+
+payer_sign > 0: longs pay
+payer_sign < 0: shorts pay
+payer_sign = 0: no side pays
 ```
 
-Calculate complete payer flow:
+The payer side can be the side with less base exposure.
+This condition occurs after the book flips against its history.
+A trader who balances the book keeps the receiving position while the
+history decays.
+
+### 8.2 Window integral and indices
+
+The book is constant between two checkpoints.
+Thus the integral skew has a closed form on a window:
 
 ```text
-payer_flow_per_second =
-    dominant_size
-    × payer_rate_bps_day
-    / (BPS × SECONDS_PER_DAY)
+d(t) = 2^(−t/H)
+
+A = S
+B = (BPS − w) × (E₀ − S) / BPS
+
+I(t) = A + B × d(t)
 ```
 
-Calculate receiver and LP flow:
+Integrate the rate exactly over the window length `Δt`:
 
 ```text
-receiver_flow_per_second =
-    payer_flow_per_second
-    × light_base
-    / dominant_base
+d = d(Δt)
 
-lp_flow_per_second =
-    payer_flow_per_second
-    - receiver_flow_per_second
+J₁ = (H / ln 2) × (1 − d)
+J₂ = (H / (2 × ln 2)) × (1 − d²)
+
+W = ∫ rate dt =
+    max_funding_rate_bps_day
+    × (A² × Δt + 2 × A × B × J₁ + B² × J₂)
 ```
 
-At balance, set all flows to zero.
-If `light_base` is zero, set receiver flow to zero.
-If `light_size` is zero, set receiver flow to zero.
-In those cases, all collected payer flow is LP-backed.
+Calculate `d` with a 47-entry square-and-multiply table of
+`2^(−2^(−i))` constants.
+The table quantizes at approximately 1e-13 relative error.
 
-### 8.2 Funding indices
+Write `W` for the window weight `∫ rate dt`.
+Divide `W` by `BPS × SECONDS_PER_DAY` for the index delta per unit of
+payer-side size.
 
-The dominant side has two payer indices.
+Split `W` between the receiver-backed part and the LP-backed part:
 
-Calculate the receiver-backed payer-index change:
+```text
+receiver_share = min(1, receiver_base / payer_base)
+
+W_receiver = W × receiver_share
+W_lp       = W − W_receiver
+```
+
+If the receiver side has zero size, set `W_receiver` to zero.
+If the receiver side has zero base exposure, set `W_receiver` to zero.
+
+The payer side can be the lighter side.
+The cap at one keeps `W_lp` at or above zero.
+The cap keeps the LP-backed index monotone.
+
+The payer side has two payer indices.
+
+Calculate the payer-index changes:
 
 ```text
 receiver_backed_payer_index_delta =
-    receiver_flow
-    × INDEX_PRECISION
-    / dominant_size
-```
+    W_receiver
+    / (BPS × SECONDS_PER_DAY)
 
-Calculate the LP-backed payer-index change:
-
-```text
 lp_backed_payer_index_delta =
-    lp_flow
-    × INDEX_PRECISION
-    / dominant_size
+    W_lp
+    / (BPS × SECONDS_PER_DAY)
 ```
 
-The light side has one receiver index.
-
-Calculate the receiver-index change:
+The receiver side has one receiver index.
+Derive its change from the exact payer collection:
 
 ```text
+receiver_cash =
+    payer_size × receiver_backed_payer_index_delta
+
 receiver_index_delta =
-    receiver_flow
-    × INDEX_PRECISION
-    / light_size
+    receiver_cash
+    / receiver_size
 ```
 
-Include elapsed time in each flow amount.
 Carry each division remainder.
 
 Round payer obligations up at the position boundary.
@@ -648,33 +733,32 @@ Do not let complete receiver credit exceed receiver-backed payer accrual.
 
 ### 8.3 Receiver liability
 
-Expose the current receiver flow for each market.
-Store the sum of all market receiver flows in global state.
-
-At a global checkpoint, calculate:
+Accrue the receiver liability inside the market checkpoint:
 
 ```text
 pending_receiver_funding_total +=
-    global_receiver_flow_per_second × elapsed_time
+    floor(
+        payer_size
+        × receiver_backed_payer_index_delta
+        / INDEX_PRECISION
+    )
 ```
 
-Round the cash result down.
-Carry the high-precision remainder.
+Carry the sub-unit part in the market `pending_receiver_remainder`.
+
+Accrue the liability and the funding indices in the same market
+checkpoint.
+Both values derive from the same exact payer collection.
+Thus a position credit cannot exceed its market's liability
+contribution.
+
+Do not accrue the receiver liability at the global checkpoint.
+Do not store a global receiver-flow rate.
 
 Use `pending_receiver_funding_total` as the authoritative receiver liability.
 The liability reduces cash LP equity when it accrues.
 
 The sum of position receiver credits must not exceed the liability.
-
-When a market flow changes, update the global sum:
-
-```text
-global_receiver_flow_per_second +=
-    new_market_receiver_flow
-    - old_market_receiver_flow
-```
-
-This update must have constant complexity.
 
 When receiver funding becomes position collateral, apply:
 
@@ -703,20 +787,25 @@ Do not reverse the receiver claim.
 
 The final close checkpoints global state and the affected market.
 Use the final close time.
-Then update the affected market flow and the global flow sum.
 
-Release an unassigned rounding residue only when all these values are zero:
+Release an unassigned rounding residue only when this value is zero:
 
 ```text
 open_position_count
-global_receiver_flow_per_second
 ```
 
 Aggregate conservation then requires every market size to be zero.
 Do not loop through markets during the final close.
 
-Release the related remainder at the same time.
 The released amount becomes LP residual cash.
+Drop a market's carried funding remainders when both of its sides have
+zero size open interest.
+
+LP pricing must see exact receiver liabilities.
+Thus an LP settlement checkpoints every active market.
+The `max_active_markets` bound limits this loop.
+An entry point without a market accepts keeper-cadence staleness in the
+liability total.
 
 ## 9. Borrow mechanics
 
@@ -805,21 +894,31 @@ pending_borrow =
 If `now` is after `last_global_checkpoint`, do this procedure:
 
 1. Advance the borrow index with the stored rate.
-2. Increase the receiver liability with the stored global flow.
-3. Carry the two division remainders.
-4. Set `last_global_checkpoint` to `now`.
+2. Carry the division remainder.
+3. Set `last_global_checkpoint` to `now`.
 
 If the timestamps are equal, do not change state.
+
+The global checkpoint advances borrow only.
+The market checkpoint accrues all funding value.
 
 ### 10.2 Market checkpoint
 
 If `now` is after the market checkpoint, do this procedure:
 
-1. Advance the receiver-backed payer index for the payer side.
-2. Advance the LP-backed payer index for the payer side.
-3. Advance the receiver index for the light side.
-4. Carry all remainders.
-5. Set the market checkpoint to `now`.
+1. Resolve the funding window with the closed-form integral.
+2. Select the window payer side from the sign of the integrated skew.
+3. Split the window weight into the receiver-backed part and the
+   LP-backed part.
+4. Advance the receiver-backed payer index for the payer side.
+5. Advance the LP-backed payer index for the payer side.
+6. Advance the receiver index for the receiver side.
+7. Accrue the receiver liability from the same payer collection.
+8. Carry all remainders.
+9. Advance the skew EMA to the window end.
+10. Refresh the displayed payer side and payer rate from the integral
+    skew.
+11. Set the market checkpoint to `now`.
 
 ### 10.3 Mutation order
 
@@ -829,16 +928,21 @@ Use this order for an exposure, claim, risk, or rate-input change:
 2. Checkpoint the affected market.
 3. Capitalize the affected position fees.
 4. Apply the requested mutation.
-5. Calculate the new market funding flows.
-6. Update the global receiver-flow sum.
+5. Refresh the displayed payer side and payer rate.
+6. Evaluate the market risk states.
 7. Calculate the new global borrow rate.
 
 Skip a step if the action has no applicable market or position.
 
 For an LP settlement, checkpoint global accrual first.
+Then checkpoint each active market.
+LP pricing must see exact receiver liabilities.
 Then calculate marked NAV.
 Then apply the cash and share changes.
 Then calculate the new borrow rate.
+
+An entry point without a market checkpoints global state only.
+Its receiver-liability view accepts keeper-cadence staleness.
 
 An operational pause must not stop an accrual clock.
 A position pays or receives fees until settlement.
@@ -850,10 +954,18 @@ Do not use a new parameter for past time.
 
 ## 11. Position fee accounting
 
-### 11.1 Opening fee
+### 11.1 Closing fee
 
-Charge an opening fee for an open or increase action.
-Do not charge a position fee for a decrease or close action.
+Do not charge a fee for an open or increase action.
+The complete supplied collateral becomes stored collateral.
+
+Charge a closing fee when a close path removes size.
+The close paths are the trader decrease, the trader close, the
+liquidation, the ADL action, and the triggered order.
+All close paths use one settlement procedure.
+
+Collect the fee immediately after capitalization.
+Collect the fee before the partial-close profit payout.
 
 Calculate normalized base-exposure skew with this function:
 
@@ -867,34 +979,51 @@ skew(long_base, short_base) =
         / (long_base + short_base)
 ```
 
-Calculate skew before and after the action:
+Compare the book before the removal with the book that remains:
 
 ```text
-skew_before = skew(long_base_before, short_base_before)
-skew_after  = skew(long_base_after, short_base_after)
+skew_before = skew(long_base, short_base)
+
+for a long close:
+    skew_after = skew(long_base − base_removed, short_base)
+
+for a short close:
+    skew_after = skew(long_base, short_base − base_removed)
 ```
 
-Select the opening-fee tier:
+Select the closing-fee tier:
 
 ```text
 if skew_after <= skew_before:
-    fee_bps = open_fee_low_bps
+    fee_bps = close_fee_low_bps
 else:
-    fee_bps = open_fee_high_bps
+    fee_bps = close_fee_high_bps
 ```
 
-Calculate the opening fee:
-
-```text
-opening_fee =
-    ceil(size_added × fee_bps / BPS)
-```
+Use the low tier when the removal improves or preserves the balance.
+Use the high tier when the removal makes the balance worse.
 
 Use base exposure for the skew comparison.
 Do not use entry-time USD open interest for the comparison.
 
-Collect the opening fee during the open or increase action.
+Calculate the closing fee:
+
+```text
+closing_fee =
+    min(
+        ceil(size_removed × fee_bps / BPS),
+        payable_price_pnl
+    )
+```
+
+`payable_price_pnl` is the realized positive price PnL after the
+emergency payout factor.
+Collect the fee only out of realized positive price PnL.
+A close without realized profit pays zero.
+Thus the closing fee has no shortfall path.
+
 Split the collected fee as specified in Section 11.4.
+Use the closing-fee revenue source for the split event.
 
 ### 11.2 Pending amounts
 
@@ -966,7 +1095,7 @@ Otherwise, use the insolvent full-close procedure.
 This rule permits a complete baseline reset.
 The system does not need an unpaid-fee ledger.
 
-Split collected opening and borrow fees:
+Split collected closing and borrow fees:
 
 ```text
 lp_amount =
@@ -1021,22 +1150,27 @@ Use this procedure:
 6. Calculate pending funding credit for the existing position.
 7. Calculate `base_added`.
 8. Calculate `risk_units_added`.
-9. Calculate skew before the action.
-10. Calculate skew after the action.
-11. Select the opening-fee tier.
-12. Calculate the opening fee.
-13. Settle old obligations and the opening fee.
-14. Check the resulting collateral.
-15. Check the maintenance margin.
-16. Check global risk capacity.
-17. Check market-side limits.
-18. Check the warning factor.
-19. Increase the position and market aggregates.
-20. Set the debt baselines at the current indices.
-21. Calculate the new funding flows.
-22. Calculate the new borrow rate.
+9. Settle old obligations from the available collateral.
+10. Check the resulting collateral.
+11. Check the applicable margin requirement.
+12. Check global risk capacity.
+13. Check market-side limits.
+14. Check the warning factor.
+15. Increase the position and market aggregates.
+16. Set the debt baselines at the current indices.
+17. Refresh the displayed payer side and payer rate.
+18. Calculate the new borrow rate.
 
-Only collateral after fees becomes stored position collateral.
+Do not charge a fee for this action.
+The complete supplied collateral becomes stored position collateral.
+
+Select the margin requirement as follows:
+
+- An open action must satisfy the initial margin.
+- An increase with added size must satisfy the initial margin.
+- An increase with only added collateral must satisfy the maintenance
+  margin.
+
 All cash and claim changes must satisfy the cash-transition rules.
 
 ### 12.2 Decrease or close
@@ -1052,13 +1186,15 @@ Use this procedure:
 7. Calculate pending fees.
 8. Calculate pending funding credit.
 9. Settle credits, obligations, and realized PnL.
-10. Apply an explicit collateral withdrawal.
-11. Check maintenance margin for a remaining position.
-12. Reduce the position and market aggregates.
-13. Reset remaining debt baselines.
-14. Delete the position after a complete close.
-15. Calculate the new funding flows.
-16. Calculate the new borrow rate.
+10. Collect the closing fee from realized positive price PnL.
+11. Transfer the remaining realized profit for a partial close.
+12. Apply an explicit collateral withdrawal.
+13. Check the applicable margin for a remaining position.
+14. Reduce the position and market aggregates.
+15. Reset remaining debt baselines.
+16. Delete the position after a complete close.
+17. Refresh the displayed payer side and payer rate.
+18. Calculate the new borrow rate.
 
 For removed long exposure, calculate:
 
@@ -1093,13 +1229,26 @@ For a partial close, apply these rules:
 
 - Received funding supplies value for accrued obligations.
 - Positive payable PnL supplies value for accrued obligations.
-- Transfer remaining positive PnL to the trader.
+- Collect the closing fee after the obligations.
+- Transfer the remaining realized profit to the trader.
 - The transfer reduces LP cash equity.
 - Apply negative PnL after guaranteed receiver obligations.
 - Collected negative PnL increases LP cash equity.
 - Use a full insolvent close if loss exceeds complete collateral.
 - Apply `collateral_withdrawn` after PnL.
 - Do not permit a withdrawal that makes the position unhealthy.
+- A decrease with removed size must satisfy the maintenance margin.
+- A withdrawal without removed size must satisfy the initial margin.
+
+Calculate the realized-profit transfer:
+
+```text
+realized_payout =
+    min(
+        payable_price_pnl − closing_fee,
+        stored_collateral
+    )
+```
 
 For a full close, calculate:
 
@@ -1112,7 +1261,10 @@ close_equity =
     - pending_funding_paid_to_lps
     - pending_borrow
 
-trader_payout = max(close_equity, 0)
+collected_closing_fee =
+    min(closing_fee, max(close_equity, 0))
+
+trader_payout = max(close_equity − collected_closing_fee, 0)
 bad_debt      = max(-close_equity, 0)
 ```
 
@@ -1122,9 +1274,11 @@ Distribute available value in this order:
 2. Pay negative price PnL to LPs.
 3. Pay LP-backed funding.
 4. Pay borrow.
-5. Pay the remaining equity to the trader.
+5. Pay the closing fee.
+6. Pay the remaining equity to the trader.
 
 Positive price PnL adds value to this waterfall.
+The closing fee ranks below every accrued obligation.
 Do not record unpaid LP-backed funding as revenue.
 Do not record unpaid borrow as revenue.
 
@@ -1134,9 +1288,44 @@ These operations move the difference to or from LP residual equity.
 
 Emit bad debt for risk accounting.
 Do not store bad debt as a receivable.
-Do not charge a closing fee.
+Each close event must include the closing fee.
 
-### 12.3 Liquidation
+### 12.3 Margins and liquidation
+
+Configure two margin rates for each market:
+
+```text
+0 < maintenance_margin_bps
+    <= initial_margin_bps
+    <= BPS
+```
+
+Calculate a margin requirement as follows:
+
+```text
+margin_requirement =
+    ceil(size × margin_bps / BPS)
+```
+
+Use the initial margin for each action that increases leverage:
+
+- An open action.
+- An increase with added size.
+- A collateral withdrawal without removed size.
+
+Use the maintenance margin for each de-risking check and for
+liquidation:
+
+- An increase with only added collateral.
+- A partial close with removed size.
+- The liquidation test.
+
+The gap between the two margins is the trader's guaranteed entry
+buffer.
+The maximum leverage shown to a trader is
+`floor(BPS / initial_margin_bps)`.
+A new position at maximum leverage does not sit on the liquidation
+boundary.
 
 Use the close preparation and settlement rules for a liquidation.
 
@@ -1150,7 +1339,8 @@ Apply these liquidation-reward rules:
 - Pay the reward from the liquidated position.
 - Account for the reward separately from PnL.
 
-For a liquidation, insert the reward after borrow in the close waterfall.
+For a liquidation, insert the reward after the closing fee in the close
+waterfall.
 Pay the reward before residual trader equity.
 
 Pay a capped insolvent-position reward from the risk-keeper reserve.
@@ -1313,21 +1503,22 @@ Do not report virtual quantities as owned assets or shares.
 At the assigned round, use this procedure:
 
 1. Checkpoint global accrual to the settlement time.
-2. Validate a synchronized price for each active market.
-3. Evaluate each market-side risk state.
-4. Calculate physical cash.
-5. Calculate non-LP claims.
-6. Calculate cash LP equity.
-7. Calculate marked NAV.
-8. Reject a cash shortfall.
-9. Resolve the request as failed if a risk state blocks settlement.
-10. Check deposit eligibility.
-11. Calculate shares from pre-deposit NAV and supply.
-12. Mark the request as settled.
-13. Advance the FIFO pointer.
-14. Transfer all escrowed collateral into the vault.
-15. Mint all shares to the owner.
-16. Calculate the new borrow rate.
+2. Checkpoint each active market to the settlement time.
+3. Validate a synchronized price for each active market.
+4. Evaluate each market-side risk state.
+5. Calculate physical cash.
+6. Calculate non-LP claims.
+7. Calculate cash LP equity.
+8. Calculate marked NAV.
+9. Reject a cash shortfall.
+10. Resolve the request as failed if a risk state blocks settlement.
+11. Check deposit eligibility.
+12. Calculate shares from pre-deposit NAV and supply.
+13. Mark the request as settled.
+14. Advance the FIFO pointer.
+15. Transfer all escrowed collateral into the vault.
+16. Mint all shares to the owner.
+17. Calculate the new borrow rate.
 
 A clean first deposit requires:
 
@@ -1361,22 +1552,23 @@ Use pre-withdraw NAV.
 Use this procedure:
 
 1. Checkpoint global accrual to the settlement time.
-2. Validate a synchronized price for each active market.
-3. Evaluate each market-side risk state.
-4. Calculate physical cash and non-LP claims.
-5. Calculate cash LP equity and marked NAV.
-6. Calculate `withdrawal_assets`.
-7. Compare the amount with free LP capital.
-8. Calculate post-withdraw cash LP equity.
-9. Calculate post-withdraw utilization.
-10. Check the configured utilization maximum.
-11. Resolve the request as failed if a risk state blocks settlement.
-12. Reject a shortfall.
-13. Mark the request as settled.
-14. Advance the FIFO pointer.
-15. Burn all escrowed shares.
-16. Transfer all collateral to the owner.
-17. Calculate the new borrow rate.
+2. Checkpoint each active market to the settlement time.
+3. Validate a synchronized price for each active market.
+4. Evaluate each market-side risk state.
+5. Calculate physical cash and non-LP claims.
+6. Calculate cash LP equity and marked NAV.
+7. Calculate `withdrawal_assets`.
+8. Compare the amount with free LP capital.
+9. Calculate post-withdraw cash LP equity.
+10. Calculate post-withdraw utilization.
+11. Check the configured utilization maximum.
+12. Resolve the request as failed if a risk state blocks settlement.
+13. Reject a shortfall.
+14. Mark the request as settled.
+15. Advance the FIFO pointer.
+16. Burn all escrowed shares.
+17. Transfer all collateral to the owner.
+18. Calculate the new borrow rate.
 
 Apply these formulas:
 
@@ -1591,7 +1783,7 @@ Use these rounding directions:
 
 | Quantity | Direction |
 |---|---|
-| Opening fee charged | Up |
+| Closing fee charged | Up, but not above payable price PnL |
 | Borrow obligation | Up |
 | Funding payer obligation | Up |
 | Aggregate receiver liability | Down, with a carried remainder |
@@ -1691,8 +1883,11 @@ Preserve these index properties:
 - A same-time checkpoint has no effect.
 - New size starts at the current baseline.
 - New risk units start at the current baseline.
-- A mutation does not change the rate for past time.
-- Stored remainders make split intervals equivalent.
+- A mutation does not change the accrual for past time.
+- Stored remainders make split borrow intervals exact.
+- The funding decay table bounds split-interval error to approximately
+  1e-13 relative.
+- An instant weight of `BPS` makes split funding intervals exact.
 
 ### 18.5 Risk capacity
 
@@ -1779,9 +1974,10 @@ Test these conditions:
 
 - A long time between checkpoints.
 - Repeated checkpoints in one block.
-- A dust light-side position.
+- A dust receiver-side position.
 - A partial close.
 - A one-sided market.
+- A book flip against the funding history.
 - Stress in multiple markets.
 - Receiver settlement before payer settlement.
 - A delayed liquidation.

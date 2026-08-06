@@ -25,8 +25,8 @@ pub trait PositionManager {
     fn set_vault(env: Env, caller: Address, vault: Address);
 
     /// Open a leveraged position (§12.1). Transfers
-    /// `collateral + execution_budget` from `owner`, charges the tiered
-    /// opening fee from collateral, and enforces margin, capacity, and
+    /// `collateral + execution_budget` from `owner` — nothing is charged at
+    /// open (§11.1) — and enforces the initial margin, capacity, and
     /// market-side limits. `acceptable_price` bounds the execution price
     /// (max for longs, min for shorts; `0` = no bound). Returns the new
     /// position id.
@@ -45,7 +45,7 @@ pub trait PositionManager {
     ) -> u64;
 
     /// Add size and/or collateral to an open position (§12.1). Capitalizes
-    /// all accrued fees first; added size pays the tiered opening fee and
+    /// all accrued fees first; added size is held to the initial margin and
     /// must pass the same risk gates as an open.
     fn increase_position(
         env: Env,
