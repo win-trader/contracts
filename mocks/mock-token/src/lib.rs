@@ -63,8 +63,11 @@ impl MockToken {
 
     /// Admin-only mint for deployment seeding and simulations. This bypasses
     /// the public faucet cap and must not be exposed as a user faucet path.
+    /// The credit consumes the recipient's one-shot faucet claim: a wallet
+    /// funded directly must never also claim the public mint on top.
     pub fn admin_mint(env: Env, admin: Address, to: Address, amount: i128) {
         require_admin(&env, &admin);
+        set_public_minted(&env, &to, public_minted(&env, &to) + amount);
         Base::mint(&env, &to, amount);
     }
 
@@ -308,14 +311,27 @@ mod tests {
     }
 
     #[test]
-    fn admin_mint_bypasses_public_cap() {
+    fn admin_mint_bypasses_public_cap_and_consumes_the_faucet_claim() {
         let (_env, token, admin, _vault, _pm, user) = setup();
         let amount = token.public_mint_cap() * 10;
 
         token.admin_mint(&admin, &user, &amount);
 
         assert_eq!(token.balance(&user), amount);
-        assert_eq!(token.public_minted(&user), 0);
+        assert_eq!(token.public_minted(&user), amount);
+
+        // A credited wallet can no longer stack a public faucet claim on
+        // top of its funding.
+        let err = token.try_mint(&user, &1).unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            soroban_sdk::Error::from_contract_error(MockTokenError::MintCapExceeded as u32)
+        );
+
+        // Further admin credits still work and accumulate the record.
+        token.admin_mint(&admin, &user, &amount);
+        assert_eq!(token.balance(&user), 2 * amount);
+        assert_eq!(token.public_minted(&user), 2 * amount);
     }
 
     #[test]

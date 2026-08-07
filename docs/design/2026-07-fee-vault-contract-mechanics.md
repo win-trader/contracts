@@ -994,19 +994,17 @@ triggered order — charges the closing fee through this same
 settlement:
 
 ```text
-closing_fee =
-    min(
-        ceil(size_removed × fee_bps / BPS),
-        payable_price_pnl
-    )
+closing_fee = ceil(payable_price_pnl × fee_bps / BPS)
 ```
 
-The tier is computed on the book the close leaves behind: the low
-`close_fee_low_bps` when removing the exposure improves or preserves
-normalized base-exposure skew, the high `close_fee_high_bps` when it
-worsens it. The fee only ever comes out of realized positive price PnL
-after the hard cap, ranked below every accrued obligation — losers pay
-zero and no shortfall path exists. The collected fee is split through
+The fee is a share of the realized profit, not of the removed size, so
+a winner always keeps the complement share (`fee_bps` is validated
+≤ BPS). The tier is computed on the book the close leaves behind: the
+low `close_fee_low_bps` when removing the exposure improves or
+preserves normalized base-exposure skew, the high `close_fee_high_bps`
+when it worsens it. The fee only ever comes out of realized positive
+price PnL after the hard cap, ranked below every accrued obligation —
+losers pay zero and no shortfall path exists. The collected fee is split through
 the standard revenue split under its own closing-fee source, and every
 close event carries the amount.
 

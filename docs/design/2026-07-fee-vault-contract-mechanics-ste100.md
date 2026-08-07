@@ -1011,14 +1011,10 @@ Use the high tier when the removal makes the balance worse.
 Use base exposure for the skew comparison.
 Do not use entry-time USD open interest for the comparison.
 
-Calculate the closing fee:
+Calculate the closing fee as a share of the realized profit:
 
 ```text
-closing_fee =
-    min(
-        ceil(size_removed × fee_bps / BPS),
-        payable_price_pnl
-    )
+closing_fee = ceil(payable_price_pnl × fee_bps / BPS)
 ```
 
 `payable_price_pnl` is the realized positive price PnL after the
@@ -1026,6 +1022,9 @@ emergency payout factor.
 Collect the fee only out of realized positive price PnL.
 A close without realized profit pays zero.
 Thus the closing fee has no shortfall path.
+The tier validation bounds `fee_bps` at BPS, so the fee never
+exceeds the payable profit and a winner always keeps the
+complement share of the realized profit.
 
 Split the collected fee as specified in Section 11.4.
 Use the closing-fee revenue source for the split event.

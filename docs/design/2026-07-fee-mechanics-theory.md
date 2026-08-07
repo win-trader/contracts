@@ -88,13 +88,16 @@ if skew_after <= skew_before:
 else:
     fee_bps = close_fee_high_bps
 
-closing_fee =
-    min(size_removed × fee_bps / BPS, payable_price_pnl)
+closing_fee = ceil(payable_price_pnl × fee_bps / BPS)
 ```
 
-The fee only ever comes out of realized positive price PnL, after any
-emergency payout cap. A close without realized profit pays nothing, so
-the fee can never create a shortfall or deepen bad debt.
+The fee is a share of the realized profit rather than of the removed
+size, so a winner always keeps the complement share (`fee_bps` is
+validated ≤ BPS) — a small win can never be fully consumed by a
+size-proportional charge. The fee only ever comes out of realized
+positive price PnL, after any emergency payout cap. A close without
+realized profit pays nothing, so the fee can never create a shortfall
+or deepen bad debt.
 
 Base exposure, rather than entry-time USD open interest, is used for the
 comparison. This makes the closing incentive point in the same direction

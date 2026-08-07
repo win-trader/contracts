@@ -634,7 +634,7 @@ fn closing_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
 
     // 100 -> 90: the short is in profit. Halving the dominant short side
     // improves skew 6_000 -> 3_333, so the winner pays the low tier:
-    // fee = 2_000 x 10bps = 2, realized payout = 200 profit - 2.
+    // fee = 10 bps of the 200 profit = 0.2, realized payout = 200 - 0.2.
     p.advance(31);
     p.set_price(90 * UNIT);
     p.publish_round();
@@ -642,13 +642,14 @@ fn closing_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
     manager.decrease_position(&short_id, &(2_000 * UNIT), &0, &0);
     assert_eq!(
         token.balance(&p.trader_b) - before,
-        198 * UNIT,
+        1_998 * UNIT / 10,
         "improving close pays the low tier out of profit"
     );
 
     // 100 -> 110: the long is in profit. Closing the light long side
     // worsens skew 3_333 -> 10_000, so the winner pays the high tier:
-    // fee = 1_000 x 30bps = 3, payout = 300 collateral + 100 profit - 3.
+    // fee = 30 bps of the 100 profit = 0.3, payout = 300 collateral
+    // + 100 profit - 0.3.
     p.advance(31);
     p.set_price(110 * UNIT);
     p.publish_round();
@@ -656,7 +657,7 @@ fn closing_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
     manager.decrease_position(&long_id, &(1_000 * UNIT), &0, &0);
     assert_eq!(
         token.balance(&p.trader_a) - before,
-        397 * UNIT,
+        3_997 * UNIT / 10,
         "worsening close pays the high tier out of profit"
     );
 }
@@ -947,16 +948,16 @@ fn opening_past_max_leverage_is_rejected_by_the_initial_margin() {
 }
 
 #[test]
-fn closing_fee_is_capped_by_profit_and_losers_pay_nothing() {
+fn closing_fee_is_a_share_of_profit_and_losers_pay_nothing() {
     let p = Protocol::new();
     p.zero_rates();
     p.seed_lp();
     let token = soroban_sdk::token::Client::new(&p.env, &p.token_id);
     let manager = position_manager::Client::new(&p.env, &p.position_manager_id);
 
-    // Winner whose profit is below the notional fee: 10_000 size would owe
-    // 10 UNIT at the low tier, but the 2-UNIT profit caps the fee — the
-    // whole win is consumed and the payout is exactly the collateral.
+    // Tiny winner: a 0.02% move on 10_000 size realizes a 2-UNIT profit.
+    // The fee is 10 bps of that profit — the win is never fully consumed
+    // the way a size-proportional fee would.
     let winner = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
     p.advance(31);
     p.set_price(100 * UNIT + 200_000); // 100.02
@@ -965,8 +966,8 @@ fn closing_fee_is_capped_by_profit_and_losers_pay_nothing() {
     manager.decrease_position(&winner, &(10_000 * UNIT), &0, &0);
     assert_eq!(
         token.balance(&p.trader_a) - before,
-        3_000 * UNIT,
-        "fee = min(notional fee, profit): a tiny win never costs extra"
+        3_002 * UNIT - 20_000,
+        "fee = 10 bps of the 2-UNIT profit: the winner keeps 99.9% of it"
     );
 
     // Loser: no profit, no fee — the payout is collateral minus the loss.

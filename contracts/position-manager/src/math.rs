@@ -304,9 +304,10 @@ pub fn pnl(env: &Env, is_long: bool, size: i128, base: i128, price: i128) -> i12
     }
 }
 
-/// §11.1 — closing fee on removed size, rounded up (§16).
-pub fn closing_fee(env: &Env, size: i128, bps: u32) -> i128 {
-    mul_div_ceil(env, size, bps as i128, BPS)
+/// §11.1 — closing fee as a share of the payable price profit, rounded
+/// up (§16).
+pub fn closing_fee(env: &Env, payable_profit: i128, bps: u32) -> i128 {
+    mul_div_ceil(env, payable_profit, bps as i128, BPS)
 }
 
 /// §11.5 — pro-rata remaining value after a partial close; the final close

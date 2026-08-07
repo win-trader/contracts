@@ -195,9 +195,10 @@ pub fn settle_close(
         panic_with_error!(env, PositionManagerError::InsufficientCollateral);
     }
 
-    // §11.1 — the closing fee comes only out of realized price winnings:
-    // `min(size × tier, payable)`, ranked below every waterfall obligation.
-    // Losers pay nothing, so there is no shortfall path.
+    // §11.1 — the closing fee is a share of realized price winnings:
+    // `ceil(payable × tier / BPS)`, ranked below every waterfall obligation.
+    // Losers pay nothing, so there is no shortfall path; the tier is
+    // validated ≤ BPS, so the fee never exceeds the payable profit.
     let mut closing_fee = 0i128;
     if payable > 0 {
         let bps = fees::tiered_close_fee_bps(env, &market, position.is_long, removed.base_removed);
@@ -207,7 +208,7 @@ pub fn settle_close(
             ledger,
             &mut position,
             market.side_mut(is_long),
-            core::cmp::min(math::closing_fee(env, size_removed, bps), payable),
+            math::closing_fee(env, payable, bps),
         );
         fees::split_revenue(env, ledger, closing_fee, FeeSource::Closing, position.id);
     }

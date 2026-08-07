@@ -1558,9 +1558,9 @@ fn p26_warning_state_stops_lp_actions_and_new_risk() {
 // Rounding (§16) and PnL cash conversion
 // ---------------------------------------------------------------------------
 
-/// R16 "Closing fee charged: up": closing_fee = ceil(size_removed × fee_bps
-/// / BPS), capped at the realized positive PnL (§11.1). Opening charges
-/// nothing: stored collateral equals the amount paid.
+/// R16 "Closing fee charged: up": closing_fee = ceil(payable_price_pnl ×
+/// fee_bps / BPS), a share of the realized positive PnL (§11.1). Opening
+/// charges nothing: stored collateral equals the amount paid.
 #[test]
 fn r16_closing_fee_rounds_up() {
     let p = Protocol::new();
@@ -1569,15 +1569,17 @@ fn r16_closing_fee_rounds_up() {
     p.seed_lp();
     let manager = p.manager();
 
-    // size × 10 / 10_000 = 3_333_333.3 stroops — must charge 3_333_334.
+    // A 1% move on this size realizes 33_333_333 stroops of profit;
+    // profit × 10 / 10_000 = 33_333.3 stroops — must charge 33_334.
     // Closing the book's only long empties it: skew 10_000 -> 0, low tier.
     let size = 3_333_333_300;
+    let payable = 33_333_333;
     assert!(
-        size * 10 % BPS != 0,
+        payable * 10 % BPS != 0,
         "vector must exercise the ceil boundary"
     );
-    let fee = ceil_div(size * 10, BPS);
-    assert_eq!(fee, 3_333_334);
+    let fee = ceil_div(payable * 10, BPS);
+    assert_eq!(fee, 33_334);
 
     let collateral = 500 * UNIT;
     let balance_before = p.token().balance(&p.trader_a);
@@ -1588,15 +1590,14 @@ fn r16_closing_fee_rounds_up() {
         "no fee is charged at open"
     );
 
-    // 1% up: pnl = 33_333_333 stroops, far above the fee, so the cap does
-    // not bind and the round trip costs exactly the ceil'd fee.
+    // 1% up: the round trip costs exactly the ceil'd share of the profit.
     p.advance(31);
     p.set_price(101 * UNIT);
     p.publish_round();
     p.close(id);
     assert_eq!(
         p.token().balance(&p.trader_a),
-        balance_before + 33_333_333 - fee
+        balance_before + payable - fee
     );
 }
 
@@ -1611,11 +1612,13 @@ fn r16_fee_split_keeper_down_protocol_exact_remainder() {
     p.seed_lp();
     let manager = p.manager();
 
-    // closing fee = ceil(3_333_330_100 × 10 / 10_000) = 3_333_331 stroops,
+    // A 1% move realizes 33_333_301 stroops; closing fee =
+    // ceil(33_333_301 × 10 / 10_000) = 33_334 stroops of the profit,
     // which splits with remainders on every share.
     let size = 3_333_330_100;
-    let fee = ceil_div(size * 10, BPS);
-    assert_eq!(fee, 3_333_331);
+    let payable = 33_333_301;
+    let fee = ceil_div(payable * 10, BPS);
+    assert_eq!(fee, 33_334);
     let lp_share = floor_div(fee * 7_000, BPS);
     let keeper_share = floor_div(fee * 1_000, BPS);
     let protocol_share = fee - lp_share - keeper_share;
@@ -1625,7 +1628,6 @@ fn r16_fee_split_keeper_down_protocol_exact_remainder() {
     p.advance(31);
     p.set_price(101 * UNIT);
     p.publish_round();
-    let payable = 33_333_301;
 
     let before = p.snapshot();
     let keeper_before = manager.risk_keeper_reserve_total();
@@ -1963,12 +1965,13 @@ fn c06_claim_rows_never_move_lp_equity() {
     // C7/C8: a profitable close collects the closing fee and splits it
     // between the claim rows; only the LP share (less the paid profit)
     // touches equity. 1% up on 10_000 size: profit 100 UNIT, low-tier fee
-    // 10 UNIT (the close empties the book, improving skew).
+    // 10 bps of the profit = 0.1 UNIT (the close empties the book,
+    // improving skew).
     p.advance(31);
     p.set_price(101 * UNIT);
     p.publish_round();
     let profit = 100 * UNIT;
-    let fee = floor_div(size * 10, BPS);
+    let fee = ceil_div(profit * 10, BPS);
     let lp_share = floor_div(fee * 7_000, BPS);
     let keeper_share = floor_div(fee * 1_000, BPS);
     let before_close = p.snapshot();
@@ -2343,10 +2346,11 @@ fn i18_8_adl_reward_paid_only_in_adl_state_and_from_reserve() {
 
     let reward = p.token().balance(&p.keeper) - keeper_before;
     assert!(reward > 0, "a qualifying ADL action pays a reward");
-    // The profitable ADL close itself collects a closing fee (10 UNIT low
-    // tier on 10_000 size) whose keeper share tops up the reserve in the
-    // same action; the reward then drains the reserve completely.
-    let close_fee_keeper_share = UNIT;
+    // The profitable ADL close itself collects a closing fee (10 bps of
+    // the 41_000-UNIT realized profit = 41 UNIT) whose keeper share tops
+    // up the reserve in the same action; the reward then drains the
+    // reserve completely.
+    let close_fee_keeper_share = 41 * UNIT / 10;
     assert_eq!(
         reward,
         reserve_before + close_fee_keeper_share,

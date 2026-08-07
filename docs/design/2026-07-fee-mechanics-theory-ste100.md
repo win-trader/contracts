@@ -144,13 +144,12 @@ if skew_after <= skew_before:
 else:
     fee_bps = close_fee_high_bps
 
-closing_fee =
-    min(
-        ceil(size_removed × fee_bps / BPS),
-        payable_price_pnl
-    )
+closing_fee = ceil(payable_price_pnl × fee_bps / BPS)
 ```
 
+The fee is a share of the realized profit, not of the removed size.
+Validate `fee_bps` at most BPS, so a winner always keeps the
+complement share of the realized profit.
 Collect the fee only out of realized positive price PnL.
 A close without realized profit pays zero.
 Thus the closing fee cannot cause a shortfall.
