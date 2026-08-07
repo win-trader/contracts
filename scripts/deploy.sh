@@ -309,6 +309,11 @@ invoke --id "$MOCK_TOKEN_ID" -- configure_protocol \
   --vault "$VAULT_ID" \
   --position_manager "$PM_ID"
 
+echo "  mock-token.set_public_mint_cap(admin, ${PUBLIC_MINT_CAP_USD:-500})"
+invoke --id "$MOCK_TOKEN_ID" -- set_public_mint_cap \
+  --admin "$ADMIN_ADDR" \
+  --cap_usd "${PUBLIC_MINT_CAP_USD:-500}"
+
 echo "  mock-token.set_protocol_contract(admin, request-router)"
 invoke --id "$MOCK_TOKEN_ID" -- set_protocol_contract \
   --admin "$ADMIN_ADDR" \

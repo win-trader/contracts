@@ -29,6 +29,7 @@ enum MockTokenDataKey {
     RestrictionsActive,
     ProtocolContract(Address),
     PublicMinted(Address),
+    PublicMintCapUsd,
 }
 
 #[contract]
@@ -100,6 +101,19 @@ impl MockToken {
 
     pub fn public_mint_cap(env: Env) -> i128 {
         public_mint_cap(&env)
+    }
+
+    /// Admin-set faucet cap in whole USD, so weekly competition stakes can
+    /// change without redeploying the token. Already-claimed addresses are
+    /// unaffected (the claim is one-shot regardless of amount).
+    pub fn set_public_mint_cap(env: Env, admin: Address, cap_usd: i128) {
+        require_admin(&env, &admin);
+        if cap_usd <= 0 {
+            panic_with_error!(env, MockTokenError::MintCapExceeded);
+        }
+        env.storage()
+            .instance()
+            .set(&MockTokenDataKey::PublicMintCapUsd, &cap_usd);
     }
 }
 
@@ -181,7 +195,12 @@ fn set_public_minted(env: &Env, account: &Address, amount: i128) {
 }
 
 fn public_mint_cap(env: &Env) -> i128 {
-    PUBLIC_MINT_CAP_USD * 10_i128.pow(Base::decimals(env))
+    let cap_usd = env
+        .storage()
+        .instance()
+        .get(&MockTokenDataKey::PublicMintCapUsd)
+        .unwrap_or(PUBLIC_MINT_CAP_USD);
+    cap_usd * 10_i128.pow(Base::decimals(env))
 }
 
 fn add_public_mint(env: &Env, account: &Address, amount: i128) {
@@ -270,6 +289,22 @@ mod tests {
         token.mint(&user, &cap);
         assert_eq!(token.balance(&user), cap);
         assert_eq!(token.public_minted(&user), cap);
+    }
+
+    #[test]
+    fn admin_can_lower_the_faucet_cap_without_redeploying() {
+        let (_env, token, admin, _vault, _pm, user) = setup();
+        token.set_public_mint_cap(&admin, &500);
+        let cap = token.public_mint_cap();
+        assert_eq!(cap, 500 * 10_i128.pow(7));
+
+        let err = token.try_mint(&user, &(cap + 1)).unwrap_err().unwrap();
+        assert_eq!(
+            err,
+            soroban_sdk::Error::from_contract_error(MockTokenError::MintCapExceeded as u32)
+        );
+        token.mint(&user, &cap);
+        assert_eq!(token.balance(&user), cap);
     }
 
     #[test]
