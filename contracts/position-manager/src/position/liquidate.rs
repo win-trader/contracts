@@ -79,7 +79,7 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
 
     let insolvent = effective < 0;
     let size = position.size;
-    let summary = settle::settle_close(
+    let settled = settle::settle_close(
         &env,
         &mut ledger,
         position,
@@ -89,7 +89,7 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
         price,
         Some(&caller),
     );
-    if summary.closed && insolvent {
+    if matches!(settled, settle::Settled::Closed(..)) && insolvent {
         let reward = core::cmp::min(
             ledger.risk_keeper_reserve_total,
             config.max_insolvent_touch_reward,
@@ -108,5 +108,10 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
 
     storage::save_ledger(&env, &ledger);
 
-    events::emit_closed(&env, &summary, events::CloseReason::Liquidation);
+    match &settled {
+        settle::Settled::Closed(header, tail) => {
+            events::emit_closed(&env, header, tail, events::CloseReason::Liquidation)
+        }
+        settle::Settled::Partial(header, tail) => events::emit_decreased(&env, header, tail),
+    }
 }

@@ -45,9 +45,14 @@ pub fn execute_order(env: Env, caller: Address, position_id: u64) {
     funding::accrue(&env, &mut ledger, &mut market, now);
 
     let size = position.size;
-    let summary = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
+    let settled = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
     storage::save_ledger(&env, &ledger);
 
     events::emit_order_executed(&env, position_id, &caller, budget);
-    events::emit_closed(&env, &summary, events::CloseReason::Order);
+    match &settled {
+        settle::Settled::Closed(header, tail) => {
+            events::emit_closed(&env, header, tail, events::CloseReason::Order)
+        }
+        settle::Settled::Partial(header, tail) => events::emit_decreased(&env, header, tail),
+    }
 }

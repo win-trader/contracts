@@ -1,4 +1,4 @@
-use crate::settle::CloseSummary;
+use crate::settle::{PartialTail, SettleHeader};
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 /// A partial close (§12.2). Fee fields are the amounts actually collected in
@@ -26,7 +26,7 @@ pub struct PositionDecreased {
     pub loss_collected: i128,
 }
 
-pub fn emit_decreased(env: &Env, s: &CloseSummary) {
+pub fn emit_decreased(env: &Env, s: &SettleHeader, tail: &PartialTail) {
     PositionDecreased {
         position_id: s.position_id,
         owner: s.owner.clone(),
@@ -35,8 +35,8 @@ pub fn emit_decreased(env: &Env, s: &CloseSummary) {
         price: s.price,
         raw_pnl: s.raw_pnl,
         payable_pnl: s.payable_pnl,
-        realized_payout: s.realized_payout,
-        collateral_withdrawn: s.collateral_withdrawn,
+        realized_payout: tail.realized_payout,
+        collateral_withdrawn: tail.collateral_withdrawn,
         closing_fee: s.closing_fee,
         receiver_funding_paid: s.fees.receiver_funding_paid,
         lp_funding_paid: s.fees.lp_funding_paid,

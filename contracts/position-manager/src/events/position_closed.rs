@@ -1,5 +1,5 @@
 use super::CloseReason;
-use crate::settle::CloseSummary;
+use crate::settle::{ClosedTail, SettleHeader};
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 /// A full close via any path — `reason` distinguishes trader close,
@@ -32,7 +32,7 @@ pub struct PositionClosed {
     pub loss_collected: i128,
 }
 
-pub fn emit_closed(env: &Env, s: &CloseSummary, reason: CloseReason) {
+pub fn emit_closed(env: &Env, s: &SettleHeader, tail: &ClosedTail, reason: CloseReason) {
     PositionClosed {
         position_id: s.position_id,
         owner: s.owner.clone(),
@@ -42,10 +42,10 @@ pub fn emit_closed(env: &Env, s: &CloseSummary, reason: CloseReason) {
         price: s.price,
         raw_pnl: s.raw_pnl,
         payable_pnl: s.payable_pnl,
-        collateral_payout: s.collateral_payout,
-        bad_debt: s.bad_debt,
-        liquidation_reward: s.liquidation_reward,
-        execution_budget_refunded: s.execution_budget_refunded,
+        collateral_payout: tail.collateral_payout,
+        bad_debt: tail.bad_debt,
+        liquidation_reward: tail.liquidation_reward,
+        execution_budget_refunded: tail.execution_budget_refunded,
         closing_fee: s.closing_fee,
         receiver_funding_paid: s.fees.receiver_funding_paid,
         lp_funding_paid: s.fees.lp_funding_paid,

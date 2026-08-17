@@ -50,14 +50,12 @@ fn removed_exposure(env: &Env, position: &Position, size_removed: i128) -> Remov
     }
 }
 
-/// Everything one settlement moved — consumed by the entry points to emit
-/// the action's event and pay keeper rewards.
+/// What every settlement produces, whatever its shape.
 #[derive(Clone, Debug)]
-pub struct CloseSummary {
+pub struct SettleHeader {
     pub position_id: u64,
     pub owner: Address,
     pub market: Symbol,
-    pub closed: bool,
     pub size_removed: i128,
     pub price: i128,
     /// Signed raw price PnL on the removed exposure (§12.2).
@@ -67,26 +65,35 @@ pub struct CloseSummary {
     pub fees: CollectedFees,
     /// §11.1 closing fee collected out of the realized winnings.
     pub closing_fee: i128,
-    /// Partial close: realized profit transferred to the owner.
+}
+
+/// What only a partial close produces.
+#[derive(Clone, Debug, Default)]
+pub struct PartialTail {
+    /// Realized profit transferred to the owner.
     pub realized_payout: i128,
-    /// Partial close: explicit collateral withdrawal transferred.
+    /// Explicit collateral withdrawal transferred.
     pub collateral_withdrawn: i128,
-    /// Full close: residual collateral transferred to the owner.
+}
+
+/// What only a full close produces.
+#[derive(Clone, Debug, Default)]
+pub struct ClosedTail {
+    /// Residual collateral transferred to the owner.
     pub collateral_payout: i128,
-    /// Full close: accrued obligations the position could not cover.
+    /// Accrued obligations the position could not cover.
     pub bad_debt: i128,
     pub liquidation_reward: i128,
     pub execution_budget_refunded: i128,
 }
 
-/// What the full- or partial-close tail paid out.
-#[derive(Default)]
-struct Finalized {
-    collateral_payout: i128,
-    bad_debt: i128,
-    liquidation_reward: i128,
-    budget_refund: i128,
-    collateral_withdrawn: i128,
+/// One settlement's outcome. The two shapes carry only the fields their
+/// path can actually produce — partial payouts on a full close (and vice
+/// versa) are unrepresentable.
+#[derive(Clone, Debug)]
+pub enum Settled {
+    Partial(SettleHeader, PartialTail),
+    Closed(SettleHeader, ClosedTail),
 }
 
 /// §12.2 — settle a decrease, close, liquidation, ADL, or triggered order.
@@ -103,19 +110,20 @@ pub fn settle_close(
     collateral_withdrawn: i128,
     price: i128,
     reward_recipient: Option<&Address>,
-) -> CloseSummary {
+) -> Settled {
     let mut s = Settlement::begin(env, ledger, position, market, size_removed, price);
     s.credit_payable();
     s.capitalize();
     s.charge_closing_fee();
     s.pay_partial_realized();
     s.reduce_exposure();
-    let tail = if s.removed.full {
-        s.finalize_close(reward_recipient)
+    if s.removed.full {
+        let tail = s.finalize_close(reward_recipient);
+        Settled::Closed(s.finish(), tail)
     } else {
-        s.finalize_partial(collateral_withdrawn)
-    };
-    s.finish(tail)
+        let tail = s.finalize_partial(collateral_withdrawn);
+        Settled::Partial(s.finish(), tail)
+    }
 }
 
 /// The working state one settlement threads through its phases.
@@ -293,8 +301,8 @@ impl<'a> Settlement<'a> {
     /// §12.2 full-close waterfall tail: bad debt, then the liquidation
     /// reward, then residual trader equity, then the execution-budget
     /// refund; the position leaves storage.
-    fn finalize_close(&mut self, reward_recipient: Option<&Address>) -> Finalized {
-        let mut tail = Finalized::default();
+    fn finalize_close(&mut self, reward_recipient: Option<&Address>) -> ClosedTail {
+        let mut tail = ClosedTail::default();
         if self.collected.unpaid > 0 {
             tail.bad_debt = self.collected.unpaid;
             events::emit_bad_debt(self.env, self.position.id, tail.bad_debt);
@@ -330,13 +338,13 @@ impl<'a> Settlement<'a> {
             );
         }
         if self.position.execution_budget > 0 {
-            tail.budget_refund = self.position.execution_budget;
+            tail.execution_budget_refunded = self.position.execution_budget;
             ledger::payout(
                 self.env,
                 self.ledger,
                 ledger::Bucket::ExecutionBudget,
                 &self.position.owner,
-                tail.budget_refund,
+                tail.execution_budget_refunded,
             );
         }
         storage::remove_position(self.env, self.position.id);
@@ -347,7 +355,7 @@ impl<'a> Settlement<'a> {
     /// §12.2 partial close: explicit withdrawal, resize, health check,
     /// baseline reset (§11.5: no historical debt carries forward); the
     /// position is saved back.
-    fn finalize_partial(&mut self, collateral_withdrawn: i128) -> Finalized {
+    fn finalize_partial(&mut self, collateral_withdrawn: i128) -> PartialTail {
         if collateral_withdrawn > self.position.stored_collateral {
             panic_with_error!(self.env, PositionManagerError::InsufficientCollateral);
         }
@@ -403,17 +411,17 @@ impl<'a> Settlement<'a> {
         }
         funding::reset_debts(self.env, self.ledger, &mut self.position, &self.market);
         storage::save_position(self.env, &self.position);
-        Finalized {
+        PartialTail {
+            realized_payout: self.realized_payout,
             collateral_withdrawn,
-            ..Finalized::default()
         }
     }
 
     /// §10.3 steps 5-7 — refresh the funding display, re-evaluate risk
     /// against the post-transfer balance, release the empty-book residue,
     /// store the market, refresh the borrow rate, and assemble the
-    /// summary.
-    fn finish(mut self, tail: Finalized) -> CloseSummary {
+    /// header.
+    fn finish(mut self) -> SettleHeader {
         funding::refresh_display(self.env, &mut self.market);
         let physical_after = ledger::physical_cash(self.env);
         let equity_after = self.ledger.cash_lp_equity(self.env, physical_after);
@@ -430,23 +438,16 @@ impl<'a> Settlement<'a> {
         storage::save_market(self.env, &self.position.market, &self.market);
         borrow::refresh_rate(self.env, self.ledger, physical_after);
 
-        CloseSummary {
+        SettleHeader {
             position_id: self.position.id,
             owner: self.position.owner.clone(),
             market: self.position.market.clone(),
-            closed: self.removed.full,
             size_removed: self.size_removed,
             price: self.price,
             raw_pnl: self.raw_pnl,
             payable_pnl: self.payable,
             fees: self.collected,
             closing_fee: self.closing_fee,
-            realized_payout: self.realized_payout,
-            collateral_withdrawn: tail.collateral_withdrawn,
-            collateral_payout: tail.collateral_payout,
-            bad_debt: tail.bad_debt,
-            liquidation_reward: tail.liquidation_reward,
-            execution_budget_refunded: tail.budget_refund,
         }
     }
 }

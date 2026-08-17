@@ -49,7 +49,7 @@ pub fn deleverage_position(env: Env, caller: Address, position_id: u64) {
 
     let size = position.size;
     let reward_bps = market.config.adl_reward_bps;
-    let summary = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
+    let settled = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
 
     let configured_reward = math::mul_div_floor(&env, size, reward_bps as i128, BPS);
     let reward = core::cmp::min(
@@ -71,5 +71,10 @@ pub fn deleverage_position(env: Env, caller: Address, position_id: u64) {
     }
 
     storage::save_ledger(&env, &ledger);
-    events::emit_closed(&env, &summary, events::CloseReason::Deleverage);
+    match &settled {
+        settle::Settled::Closed(header, tail) => {
+            events::emit_closed(&env, header, tail, events::CloseReason::Deleverage)
+        }
+        settle::Settled::Partial(header, tail) => events::emit_decreased(&env, header, tail),
+    }
 }

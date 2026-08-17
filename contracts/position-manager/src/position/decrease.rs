@@ -67,7 +67,7 @@ pub fn decrease_position(
 
     validation::check_slippage(&env, position.is_long, false, price, acceptable_price);
 
-    let summary = settle::settle_close(
+    let settled = settle::settle_close(
         &env,
         &mut ledger,
         position,
@@ -78,9 +78,10 @@ pub fn decrease_position(
         None,
     );
     storage::save_ledger(&env, &ledger);
-    if summary.closed {
-        events::emit_closed(&env, &summary, events::CloseReason::Trader);
-    } else {
-        events::emit_decreased(&env, &summary);
+    match &settled {
+        settle::Settled::Closed(header, tail) => {
+            events::emit_closed(&env, header, tail, events::CloseReason::Trader)
+        }
+        settle::Settled::Partial(header, tail) => events::emit_decreased(&env, header, tail),
     }
 }
