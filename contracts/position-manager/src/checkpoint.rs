@@ -54,7 +54,7 @@ pub fn checkpoint_market(env: &Env, ledger: &mut Ledger, market: &mut Market, no
         return;
     }
     let elapsed = now - market.last_funding_checkpoint;
-    let half_life = storage::global_config(env).funding_half_life_seconds;
+    let half_life = storage::get_global_config(env).funding_half_life_seconds;
     let window = math::funding_window(
         env,
         market.long.base_exposure,
@@ -116,11 +116,8 @@ pub fn checkpoint_market(env: &Env, ledger: &mut Ledger, market: &mut Market, no
             INDEX_PRECISION,
             market.pending_remainder,
         );
-        ledger.pending_receiver_funding_total = math::add(
-            env,
-            ledger.pending_receiver_funding_total,
-            liability_delta,
-        );
+        ledger.pending_receiver_funding_total =
+            math::add(env, ledger.pending_receiver_funding_total, liability_delta);
         market.pending_remainder = pending_rem;
         let (credit_delta, credit_rem) = if receiver_size > 0 {
             accrue(

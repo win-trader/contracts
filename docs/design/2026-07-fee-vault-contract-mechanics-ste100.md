@@ -465,13 +465,26 @@ estimates with keeper-cadence staleness.
 For an increase, calculate new base exposure:
 
 ```text
-base_added =
+base_added (long) =
     floor(
         size_added
         × PRICE_PRECISION
         / execution_price
     )
+
+base_added (short) =
+    ceil(
+        size_added
+        × PRICE_PRECISION
+        / execution_price
+    )
 ```
+
+Round a long base down.
+Round a short base up.
+Rounding must not favor the trader.
+A floored short base gives the trader up to one base unit of free PnL
+at close.
 
 Increase the position size by `size_added`.
 Increase the side-size aggregate by the same amount.
@@ -578,6 +591,25 @@ The aggregate loss limit cannot prove the solvency of each position.
 Individual collateral limits are nonlinear.
 A small set of market sums cannot reconstruct those limits.
 The system must use timely liquidation.
+
+Recognition caps the summed side loss at the summed side collateral:
+
+```text
+truly_collectible = Σ min(lossᵢ, collateralᵢ)
+                  ≤ min(Σ lossᵢ, Σ collateralᵢ) = recognized
+```
+
+Only each position's own collateral is collectible.
+NAV can overstate LP equity by the gap between the two sums.
+Example: position A is down 200 on 100 collateral. Sibling B is flat on
+100 collateral. Recognition books 200. Only A's 100 is collectible.
+The gap opens when one position gaps far past its own collateral.
+The gap closes when the liquidation books the bad debt.
+This is an accepted trade-off (2026-08 review).
+The contract must not loop through positions.
+Restricted risk states block LP settlement during distress.
+The maintenance trigger includes pending fees and fires before zero.
+The keeper liquidation SLA is the primary control.
 
 ## 8. Funding mechanics
 
@@ -865,9 +897,22 @@ Calculate the borrow rate:
 borrow_rate_bps_day =
     base_borrow_rate_bps_day
     + max_variable_borrow_rate_bps_day
-      × utilization_bps²
-      / BPS²
+      × (utilization_bps / BPS) ^ (borrow_exponent_bps / BPS)
 ```
+
+`borrow_exponent_bps` sets the curve shape.
+Use 20_000 for the quadratic curve (deployed default).
+Use 10_000 for a linear curve.
+Fractional exponents such as 17_549 are legal.
+Evaluate the power as `exp2(−e·log2(1/u))` on the funding decay table.
+Validation bounds the exponent to (0, 100_000].
+
+Recorded decisions (2026-08 fee review):
+The rate must not depend on position leverage.
+Equal size is equal vault exposure.
+The rate stays utilization-driven.
+Charge borrow at 1x leverage too.
+Any open position uses vault capacity.
 
 At a checkpoint, calculate the borrow-index change:
 
@@ -889,8 +934,29 @@ borrow_index_value =
     ceil(position.risk_units × borrow_index / INDEX_PRECISION)
 
 pending_borrow =
-    borrow_index_value - position.borrow_debt
+    max(
+        borrow_index_value - position.borrow_debt,
+        ceil(position.risk_units × min_borrow_index_delta / INDEX_PRECISION)
+    )
 ```
+
+`min_borrow_index_delta` is the minimum borrow charge per
+capitalization.
+It is an index delta on risk units at `INDEX_PRECISION` scale.
+The value 2e11 is 20 bps of risk units.
+That is 2 bps of notional at a 10% market risk factor.
+Zero disables the floor.
+Debt baselines reset on each touch.
+The floor therefore applies per capitalization.
+Increases and collateral top-ups also pay the floor.
+A zero-move round trip costs at least the floor.
+Run the negative-pending invariant check on the raw accrual, before
+the floor.
+The floor is part of pending borrow, so it advances liquidation prices
+by a small amount.
+On an insolvent close, an uncollectable floor lands in `unpaid` and
+inflates the bad-debt event by at most the floor amount.
+A market risk-factor change rescales the effective floor on notional.
 
 ## 10. Checkpoints
 

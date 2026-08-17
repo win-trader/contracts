@@ -1,0 +1,112 @@
+use crate::{
+    auth::{require_auth, require_initialized},
+    checkpoint,
+    errors::PositionManagerError,
+    events, funding, ledger, math, risk, settle, snapshot, storage,
+};
+use shared::{MarketConfig, VaultClient};
+use soroban_sdk::{panic_with_error, Address, Env};
+
+fn require_unhealthy_position(
+    env: &Env,
+    effective: i128,
+    position_size: i128,
+    market_config: &MarketConfig,
+) {
+    if effective >= risk::maintenance_requirement(&env, position_size, market_config) {
+        panic_with_error!(env, PositionManagerError::PositionHealthy);
+    }
+}
+
+pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
+    require_initialized(&env);
+    require_auth(&caller);
+
+    let position = storage::get_position(&env, position_id);
+    let mut market = storage::get_market(&env, &position.market);
+    let mut ledger = storage::get_ledger(&env);
+    let config = storage::get_global_config(&env);
+    let vault_address = storage::get_vault(&env);
+    let vault = VaultClient::new(&env, &vault_address);
+
+    let now = env.ledger().timestamp();
+
+    checkpoint::checkpoint_global(&env, &mut ledger, now);
+    checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+
+    let price = snapshot::authenticated_price(&env, &position.market);
+    let physical = ledger::physical_cash(&env);
+    let equity = ledger.cash_lp_equity(&env, physical);
+
+    risk::evaluate_market_risk(
+        &env,
+        &mut ledger,
+        &position.market,
+        &mut market,
+        price,
+        equity,
+    );
+
+    let pending = funding::pending_fees(&env, &ledger, &position, &market);
+    let payable = settle::payable_price_pnl(
+        &env,
+        &ledger,
+        &position,
+        &market,
+        position.size,
+        position.base_exposure,
+        price,
+        physical,
+    );
+
+    let effective = math::add(
+        &env,
+        math::sub(
+            &env,
+            math::sub(
+                &env,
+                math::sub(
+                    &env,
+                    math::add(&env, position.stored_collateral, pending.funding_received),
+                    pending.funding_paid_to_receivers,
+                ),
+                pending.funding_paid_to_lps,
+            ),
+            pending.borrow,
+        ),
+        payable,
+    );
+
+    require_unhealthy_position(&env, effective, position.size, &market.config);
+
+    let insolvent = effective < 0;
+    let size = position.size;
+    let summary = settle::settle_close(
+        &env,
+        &mut ledger,
+        position,
+        market,
+        size,
+        0,
+        price,
+        Some(&caller),
+    );
+    if summary.closed && insolvent {
+        let reward = core::cmp::min(
+            ledger.risk_keeper_reserve_total,
+            config.max_insolvent_touch_reward,
+        );
+        if reward > 0 {
+            ledger.risk_keeper_reserve_total =
+                math::sub(&env, ledger.risk_keeper_reserve_total, reward);
+
+            vault.transfer_safety_claim(&env.current_contract_address(), &caller, &reward);
+
+            events::emit_insolvency_reward(&env, position_id, &caller, reward);
+        }
+    }
+
+    storage::save_ledger(&env, &ledger);
+
+    events::emit_closed(&env, &summary, events::CloseReason::Liquidation);
+}

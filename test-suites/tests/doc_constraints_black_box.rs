@@ -106,6 +106,8 @@ mod abi {
         pub risk_capacity_limit_bps: u32,
         pub base_borrow_rate_bps_day: i128,
         pub max_variable_borrow_bps_day: i128,
+        pub borrow_exponent_bps: u32,
+        pub min_borrow_index_delta: i128,
         pub lp_revenue_share_bps: u32,
         pub risk_keeper_revenue_share_bps: u32,
         pub hard_cap_factor_limit_bps: u32,
@@ -261,6 +263,13 @@ mod abi {
             stop_loss: i128,
             acceptable_price: i128,
         ) -> u64;
+        fn increase_position(
+            env: Env,
+            position_id: u64,
+            size_added: i128,
+            collateral_added: i128,
+            acceptable_price: i128,
+        );
         fn decrease_position(
             env: Env,
             position_id: u64,
@@ -524,6 +533,8 @@ impl Protocol {
             risk_capacity_limit_bps: 8_000,
             base_borrow_rate_bps_day,
             max_variable_borrow_bps_day,
+            borrow_exponent_bps: 20_000,
+            min_borrow_index_delta: 0,
             lp_revenue_share_bps: 7_000,
             risk_keeper_revenue_share_bps: 1_000,
             hard_cap_factor_limit_bps: 10_000,
@@ -3256,5 +3267,110 @@ fn i18_4_ema_split_checkpoints_match_single_interval_within_tolerance() {
         "credit drift: {} vs {}",
         single.2,
         split.2
+    );
+}
+
+/// §11.2 minimum borrow charge: with `min_borrow_index_delta` configured,
+/// a settlement pays at least the floor on its risk units even when the
+/// accrued borrow is smaller — and every capitalization pays it again
+/// (per-touch semantics, the anti-churn design). Floor 2e11 = 20 bps of
+/// risk units; with this suite's 50% risk factor that is $10 per touch on
+/// a $10k position.
+#[test]
+fn min_borrow_fee_floors_each_capitalization() {
+    let p = Protocol::new();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    // Zero the running borrow rates so the floor is the only borrow
+    // charge, then enable the floor.
+    let mut config = Protocol::global_config(0, 0);
+    config.min_borrow_index_delta = 200_000_000_000;
+    manager.set_global_config(&p.admin, &config);
+
+    let size = 10_000 * UNIT;
+    let collateral = 3_000 * UNIT;
+    let risk = size * 5_000 / BPS;
+    let floor = ceil_div(risk * 200_000_000_000, INDEX_PRECISION);
+    assert!(floor > 0);
+
+    // One-minute churn round trip at an unchanged price: the floor is the
+    // whole cost of the trip.
+    let id = p.open(&p.trader_a, true, size, collateral);
+    p.advance(60);
+    p.refresh_price();
+    let balance_before = p.token().balance(&p.trader_a);
+    p.close(id);
+    let paid = collateral - (p.token().balance(&p.trader_a) - balance_before);
+    assert_eq!(paid, floor, "a zero-move round trip pays exactly the floor");
+
+    // A pure collateral top-up capitalizes too, so increase + close pay
+    // the floor twice.
+    let id = p.open(&p.trader_a, true, size, collateral);
+    p.advance(60);
+    p.refresh_price();
+    manager.increase_position(&id, &0, &UNIT, &0);
+    p.advance(60);
+    p.refresh_price();
+    let balance_before = p.token().balance(&p.trader_a);
+    p.close(id);
+    let paid = collateral + UNIT - (p.token().balance(&p.trader_a) - balance_before);
+    assert_eq!(paid, 2 * floor, "each capitalization pays the floor");
+}
+
+/// §9.2 configurable borrow exponent: at `borrow_exponent_bps = 30_000`
+/// the one-day collected borrow matches base + variable·u³ exactly at a
+/// power-of-two utilization (u = 50%), and undercuts the quadratic curve.
+#[test]
+fn borrow_exponent_reshapes_the_rate_curve() {
+    let p = Protocol::new();
+    p.disable_funding();
+    // risk = 5_000 UNIT on a 10_000 UNIT deposit → utilization exactly 50%.
+    p.deposit(&p.lp, 10_000 * UNIT);
+
+    let mut config = Protocol::global_config(100, 900);
+    config.borrow_exponent_bps = 30_000;
+    p.manager().set_global_config(&p.admin, &config);
+
+    let size = 10_000 * UNIT;
+    let collateral = 3_000 * UNIT;
+    let id = p.open(&p.trader_a, true, size, collateral);
+    p.advance(DAY);
+    p.refresh_price();
+    let balance_before = p.token().balance(&p.trader_a);
+    p.close(id);
+    let paid = collateral - (p.token().balance(&p.trader_a) - balance_before);
+
+    let risk = 5_000 * UNIT;
+    // u = 1/2 → u³ = 1/8; one day of index: rate / BPS (see P10).
+    let cubic_rate = 100 * INDEX_PRECISION + 900 * INDEX_PRECISION / 8;
+    assert_eq!(paid, ceil_div(risk * (cubic_rate / BPS), INDEX_PRECISION));
+    let quadratic_rate = 100 * INDEX_PRECISION + 900 * INDEX_PRECISION / 4;
+    assert!(paid < ceil_div(risk * (quadratic_rate / BPS), INDEX_PRECISION));
+}
+
+/// §16 rounding: a short's base exposure rounds UP at open, so a zero-move
+/// round trip can never hand the trader a free stroop of price PnL. Sized
+/// so size/price divides with a remainder — the case a floored short base
+/// used to convert into trader profit at close.
+#[test]
+fn short_base_rounds_against_the_trader() {
+    let p = Protocol::new();
+    p.disable_funding_and_close_fee();
+    p.disable_borrow();
+    p.seed_lp();
+
+    let size = 10_000 * UNIT + 3;
+    let collateral = 3_000 * UNIT;
+    let id = p.open(&p.trader_a, false, size, collateral);
+    p.advance(60);
+    p.refresh_price();
+    let balance_before = p.token().balance(&p.trader_a);
+    p.close(id);
+    let payout = p.token().balance(&p.trader_a) - balance_before;
+    assert!(
+        payout <= collateral,
+        "zero-move short round trip must not profit: payout {payout} vs collateral {collateral}"
     );
 }

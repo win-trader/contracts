@@ -286,6 +286,11 @@ export interface OracleRound {
 export interface GlobalConfig {
   base_borrow_rate_bps_day: i128;
   /**
+ * §9.2 borrow-curve exponent, bps: 20_000 = u² (legacy quadratic),
+ * 10_000 = linear. Bounded to ≤ 100_000 (e ≤ 10) by validation.
+ */
+borrow_exponent_bps: u32;
+  /**
  * §8.1 half-life of the funding skew EMA, seconds (global: one memory
  * horizon for every market).
  */
@@ -296,6 +301,13 @@ funding_half_life_seconds: u64;
   max_adl_reward: i128;
   max_insolvent_touch_reward: i128;
   max_variable_borrow_bps_day: i128;
+  /**
+ * §11.2 minimum borrow charge per capitalization: an index delta at
+ * `INDEX_PRECISION` scale applied to the position's risk units
+ * (2e11 = 2 bps of notional at a 10% market risk factor). Zero
+ * disables the floor.
+ */
+min_borrow_index_delta: i128;
   min_collateral: i128;
   min_position_lifetime: u64;
   risk_capacity_limit_bps: u32;

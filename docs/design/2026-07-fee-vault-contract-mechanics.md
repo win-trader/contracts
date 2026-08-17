@@ -331,13 +331,25 @@ an ownership effect.
 For an increase at execution price:
 
 ```text
-base_added =
+base_added (long) =
     floor(
         size_added
         × PRICE_PRECISION
         / execution_price
     )
+
+base_added (short) =
+    ceil(
+        size_added
+        × PRICE_PRECISION
+        / execution_price
+    )
 ```
+
+Longs round down (marginally less exposure per dollar); shorts round up
+(marginally more buyback owed). Rounding never favors the trader: a
+floored short base would hand the trader up to one base unit of free
+price PnL on a zero-move round trip.
 
 The position and its market side increase by the same `size_added` and
 `base_added`.
@@ -439,6 +451,27 @@ The aggregate loss cap is not an exact proof of every position's
 solvency. Individual collateral limits are nonlinear and cannot be
 reconstructed from a few market sums. Timely liquidation remains
 necessary.
+
+Precisely: recognition caps the side's *summed* loss at the side's
+*summed* collateral, but only each position's own collateral is
+collectible, so
+
+```text
+truly_collectible = Σ min(lossᵢ, collateralᵢ)
+                  ≤ min(Σ lossᵢ, Σ collateralᵢ) = recognized
+```
+
+NAV can therefore overstate LP equity by the gap between the two sums.
+Example: position A is down 200 on 100 collateral while sibling B is
+flat on 100 collateral — recognition books 200, but only A's 100 is
+collectible; B's collateral cannot pay A's loss. The gap opens only when
+one position on a side gaps far past its own collateral while siblings
+stay healthy (a fast move outrunning liquidation), and it closes as soon
+as the underwater position is liquidated and its bad debt is recognized.
+Accepted trade-off (2026-08 review): positions cannot be looped
+on-chain, restricted risk states block LP settlement during distress,
+and the fee-aware maintenance trigger fires well before zero equity —
+the keeper liquidation SLA is the real control.
 
 ## 6. Funding mechanics
 
@@ -670,9 +703,22 @@ else:
 borrow_rate_bps_day =
     base_borrow_rate_bps_day
     + max_variable_borrow_rate_bps_day
-      × utilization_bps²
-      / BPS²
+      × (utilization_bps / BPS) ^ (borrow_exponent_bps / BPS)
 ```
+
+`borrow_exponent_bps` shapes the curve: `20_000` is the quadratic
+(deployed default), `10_000` is linear, fractional values such as
+`17_549` are legal. The power is evaluated in fixed point as
+`exp2(−e·log2(1/u))` on the same 47-entry table as funding decay;
+`20_000` reproduces the closed-form quadratic to ~1e-10 relative.
+Validation bounds the exponent to `(0, 100_000]` (e ≤ 10).
+
+Design decisions recorded (2026-08 fee review): the rate does not
+depend on position leverage — equal size is equal vault exposure
+regardless of leverage, and higher leverage self-liquidates sooner; the
+rate stays utilization-driven; and borrow is charged at 1× leverage too,
+because any open position uses vault capacity and moves the LP share
+price.
 
 At a checkpoint:
 
@@ -694,8 +740,28 @@ borrow_index_value =
     ceil(position.risk_units × borrow_index / INDEX_PRECISION)
 
 pending_borrow =
-    borrow_index_value - position.borrow_debt
+    max(
+        borrow_index_value - position.borrow_debt,
+        ceil(position.risk_units × min_borrow_index_delta / INDEX_PRECISION)
+    )
 ```
+
+`min_borrow_index_delta` is the minimum borrow charge per
+capitalization, denominated on risk units at `INDEX_PRECISION` scale
+(`2e11` = 20 bps of risk units = 2 bps of notional at a 10% market risk
+factor; zero disables the floor). Because debt baselines reset on every
+touch, the floor applies per capitalization — including increases and
+pure collateral top-ups — which is the anti-churn intent: a zero-move
+round trip costs at least the floor no matter how fast it closes,
+equivalent to a dynamic hidden minimum holding time of
+`min_borrow_index_delta / rate` (about 19 h at the 25 bps/day base,
+2.3 h at the 85% utilization cap with default parameters). Three
+consequences to know: the negative-pending invariant check runs on the
+raw accrual before the floor; the floor is part of pending borrow, so it
+marginally advances liquidation prices; and on an insolvent close an
+uncollectable floor lands in `unpaid`, inflating the informational
+bad-debt event by at most the floor amount. Changing a market's risk
+factor rescales the effective floor on notional.
 
 ## 8. Checkpointing
 

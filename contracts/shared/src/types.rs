@@ -142,6 +142,14 @@ pub struct GlobalConfig {
     pub risk_capacity_limit_bps: u32,
     pub base_borrow_rate_bps_day: i128,
     pub max_variable_borrow_bps_day: i128,
+    /// §9.2 borrow-curve exponent, bps: 20_000 = u² (legacy quadratic),
+    /// 10_000 = linear. Bounded to ≤ 100_000 (e ≤ 10) by validation.
+    pub borrow_exponent_bps: u32,
+    /// §11.2 minimum borrow charge per capitalization: an index delta at
+    /// `INDEX_PRECISION` scale applied to the position's risk units
+    /// (2e11 = 2 bps of notional at a 10% market risk factor). Zero
+    /// disables the floor.
+    pub min_borrow_index_delta: i128,
     pub lp_revenue_share_bps: u32,
     pub risk_keeper_revenue_share_bps: u32,
     pub hard_cap_factor_limit_bps: u32,

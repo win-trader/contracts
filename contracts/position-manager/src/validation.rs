@@ -19,6 +19,10 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
         || c.base_borrow_rate_bps_day > BPS
         || c.max_variable_borrow_bps_day < 0
         || c.max_variable_borrow_bps_day > BPS
+        // Exponent cap keeps `neg_log2 × e` inside u64 for exp2 (§9.2).
+        || c.borrow_exponent_bps == 0
+        || c.borrow_exponent_bps > 100_000
+        || c.min_borrow_index_delta < 0
         || split > BPS as u64
         || c.hard_cap_factor_limit_bps > BPS as u32
         || c.max_adl_reward < 0

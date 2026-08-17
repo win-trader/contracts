@@ -87,7 +87,7 @@ impl Ledger {
 /// balance (§4.1). Costs a vault + token hop; actions read it once per
 /// distinct balance state, not per use.
 pub fn physical_cash(env: &Env) -> i128 {
-    VaultClient::new(env, &storage::vault(env)).physical_cash()
+    VaultClient::new(env, &storage::get_vault(env)).physical_cash()
 }
 
 // ---------------------------------------------------------------------------

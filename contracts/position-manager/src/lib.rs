@@ -1,5 +1,6 @@
 #![no_std]
 
+mod auth;
 mod checkpoint;
 mod contract;
 mod errors;
@@ -8,6 +9,7 @@ mod fees;
 mod funding;
 mod ledger;
 mod math;
+mod position;
 mod risk;
 mod settle;
 mod snapshot;

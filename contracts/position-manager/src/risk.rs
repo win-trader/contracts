@@ -7,7 +7,7 @@ use shared::constants::BPS;
 use shared::{Market, MarketConfig, RiskState};
 
 use crate::errors::PositionManagerError;
-use crate::events::RiskStateChanged;
+use crate::events;
 use crate::ledger::Ledger;
 use crate::{math, storage};
 
@@ -20,24 +20,25 @@ const SIDES_PER_MARKET: u64 = 2;
 /// after any mutation that changes risk units or cash LP equity (§10.3
 /// step 7).
 pub fn refresh_rate(env: &Env, ledger: &mut Ledger, physical_cash: i128) {
-    let config = storage::global_config(env);
+    let config = storage::get_global_config(env);
     let utilization = math::utilization_bps(
         env,
         ledger.total_risk_units,
         ledger.cash_lp_equity(env, physical_cash),
     );
-    ledger.current_borrow_rate = math::borrow_rate(
+    ledger.current_borrow_rate = math::borrow_rate_exp(
         env,
         config.base_borrow_rate_bps_day,
         config.max_variable_borrow_bps_day,
         utilization,
+        config.borrow_exponent_bps,
     );
 }
 
 /// §9.1 — the global capacity gate: new total risk must stay within the
 /// configured share of cash LP equity.
 pub fn enforce_capacity(env: &Env, ledger: &Ledger, physical_cash: i128, risk_after: i128) {
-    let config = storage::global_config(env);
+    let config = storage::get_global_config(env);
     let limit = math::mul_div_floor(
         env,
         ledger.cash_lp_equity(env, physical_cash),
@@ -171,20 +172,10 @@ pub fn evaluate_market_risk(
     update_blocked_count(ledger, market.long.risk_state, long_new);
     update_blocked_count(ledger, market.short.risk_state, short_new);
     if long_new != market.long.risk_state {
-        RiskStateChanged {
-            market: symbol.clone(),
-            is_long: true,
-            state: long_new,
-        }
-        .publish(env);
+        events::emit_risk_state_changed(env, symbol, true, long_new);
     }
     if short_new != market.short.risk_state {
-        RiskStateChanged {
-            market: symbol.clone(),
-            is_long: false,
-            state: short_new,
-        }
-        .publish(env);
+        events::emit_risk_state_changed(env, symbol, false, short_new);
     }
     market.long.risk_state = long_new;
     market.short.risk_state = short_new;
@@ -208,10 +199,7 @@ pub fn hard_cap_factor_sum(
                 factor
             }
             _ => {
-                storage::market(env, &symbol)
-                    .unwrap_or_else(|| {
-                        panic_with_error!(env, PositionManagerError::MarketNotConfigured)
-                    })
+                storage::get_market(env, &symbol)
                     .config
                     .hard_cap_pnl_factor_bps
             }

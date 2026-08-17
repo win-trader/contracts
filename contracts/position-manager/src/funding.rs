@@ -16,7 +16,7 @@ use shared::{Market, PayerSide, Position};
 
 use crate::errors::PositionManagerError;
 use crate::ledger::Ledger;
-use crate::math;
+use crate::{math, storage};
 
 /// §11.2 — the pending amounts a position has accrued since its debt
 /// baselines were last reset. All four are non-negative by construction; a
@@ -51,7 +51,8 @@ pub fn refresh_display(env: &Env, market: &mut Market) {
         return;
     }
     let skew = math::skew_frac(env, market.long.base_exposure, market.short.base_exposure);
-    let integral = math::integral_skew(env, skew, market.skew_ema, market.config.instant_weight_bps);
+    let integral =
+        math::integral_skew(env, skew, market.skew_ema, market.config.instant_weight_bps);
     market.current_payer_side = if integral > 0 {
         PayerSide::Long
     } else if integral < 0 {
@@ -100,11 +101,21 @@ pub fn pending_fees(
     {
         panic_with_error!(env, PositionManagerError::InvariantViolation);
     }
+    // §11.2 — minimum borrow charge: every settlement pays at least the
+    // configured index delta on its risk units (anti-churn floor; the
+    // invariant check above runs on the raw accrual, not the floored
+    // value). Baselines reset per touch, so the floor applies per
+    // capitalization.
+    let borrow_floor = math::index_value_ceil(
+        env,
+        position.risk_units,
+        storage::get_global_config(env).min_borrow_index_delta,
+    );
     PendingFees {
         funding_paid_to_receivers,
         funding_paid_to_lps,
         funding_received,
-        borrow,
+        borrow: core::cmp::max(borrow, borrow_floor),
     }
 }
 

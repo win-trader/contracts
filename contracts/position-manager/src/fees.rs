@@ -10,7 +10,7 @@ use soroban_sdk::Env;
 use shared::constants::BPS;
 use shared::{Market, Position};
 
-use crate::events::{FeeSource, RevenueSplit};
+use crate::events::{self, FeeSource};
 use crate::funding;
 use crate::ledger::{self, Ledger};
 use crate::{math, storage};
@@ -46,7 +46,7 @@ pub fn split_revenue(
     if collected == 0 {
         return;
     }
-    let config = storage::global_config(env);
+    let config = storage::get_global_config(env);
     let keeper = math::mul_div_floor(
         env,
         collected,
@@ -57,15 +57,7 @@ pub fn split_revenue(
     let protocol = math::sub(env, math::sub(env, collected, keeper), lp);
     ledger.risk_keeper_reserve_total = math::add(env, ledger.risk_keeper_reserve_total, keeper);
     ledger.protocol_claimable_total = math::add(env, ledger.protocol_claimable_total, protocol);
-    RevenueSplit {
-        position_id,
-        source,
-        collected,
-        keeper_share: keeper,
-        lp_share: lp,
-        protocol_share: protocol,
-    }
-    .publish(env);
+    events::emit_revenue_split(env, position_id, source, collected, keeper, lp, protocol);
 }
 
 /// §11.4 — capitalize all accrued amounts plus `negative_pnl` against the
@@ -119,7 +111,13 @@ pub fn capitalize(
         )
     };
 
-    split_revenue(env, ledger, borrow_collected, FeeSource::Borrow, position.id);
+    split_revenue(
+        env,
+        ledger,
+        borrow_collected,
+        FeeSource::Borrow,
+        position.id,
+    );
     funding::reset_debts(env, ledger, position, market);
 
     let guaranteed_and_loss = math::add(

@@ -15,11 +15,11 @@ use shared::constants::BPS;
 use shared::{Market, Position, RiskState, VaultClient};
 
 use crate::errors::PositionManagerError;
+use crate::events::FeeSource;
 use crate::fees::{self, CollectedFees};
 use crate::funding;
 use crate::ledger::{self, Ledger};
 use crate::risk;
-use crate::events::FeeSource;
 use crate::{events, math, storage};
 
 /// §11.5 — the exposure a decrease removes, pro-rata by size; the final
@@ -127,7 +127,7 @@ pub struct CloseSummary {
 }
 
 fn transfer_safety(env: &Env, recipient: &Address, amount: i128) {
-    VaultClient::new(env, &storage::vault(env)).transfer_safety_claim(
+    VaultClient::new(env, &storage::get_vault(env)).transfer_safety_claim(
         &env.current_contract_address(),
         recipient,
         &amount,
@@ -253,11 +253,7 @@ pub fn settle_close(
         // then residual trader equity, then the execution-budget refund.
         if collected.unpaid > 0 {
             bad_debt = collected.unpaid;
-            events::BadDebt {
-                position_id: position.id,
-                amount: bad_debt,
-            }
-            .publish(env);
+            events::emit_bad_debt(env, position.id, bad_debt);
         }
         if let Some(liquidator) = reward_recipient {
             let is_long = position.is_long;
@@ -323,7 +319,7 @@ pub fn settle_close(
             if size_removed > 0 {
                 transfer_safety(env, &position.owner, collateral_withdrawn);
             } else {
-                VaultClient::new(env, &storage::vault(env)).transfer_claim(
+                VaultClient::new(env, &storage::get_vault(env)).transfer_claim(
                     &env.current_contract_address(),
                     &position.owner,
                     &collateral_withdrawn,
@@ -365,7 +361,14 @@ pub fn settle_close(
     funding::refresh_display(env, &mut market);
     let physical_after = ledger::physical_cash(env);
     let equity_after = ledger.cash_lp_equity(env, physical_after);
-    risk::evaluate_market_risk(env, ledger, &position.market, &mut market, price, equity_after);
+    risk::evaluate_market_risk(
+        env,
+        ledger,
+        &position.market,
+        &mut market,
+        price,
+        equity_after,
+    );
 
     // §8.3 — with no open positions anywhere, aggregate conservation makes
     // every market size zero: release the unassigned rounding residue to LP

@@ -18,7 +18,7 @@ use crate::{math, storage};
 /// The authenticated cached price for `symbol` from the OracleRouter — used
 /// by every position action (§13.1: one canonical price source).
 pub fn authenticated_price(env: &Env, symbol: &Symbol) -> i128 {
-    let price = OracleRouterClient::new(env, &storage::oracle_router(env)).get_price(symbol);
+    let price = OracleRouterClient::new(env, &storage::get_oracle_router(env)).get_price(symbol);
     if price <= 0 {
         panic_with_error!(env, PositionManagerError::InvalidOracleRound);
     }
@@ -52,7 +52,7 @@ pub fn build_snapshot(
     physical: i128,
     mutate_risk: bool,
 ) -> AccountingSnapshot {
-    let markets = storage::active_markets(env);
+    let markets = storage::get_active_markets(env);
     if round.prices.len() != markets.len() {
         panic_with_error!(env, PositionManagerError::InvalidOracleRound);
     }
@@ -66,8 +66,7 @@ pub fn build_snapshot(
     while i < markets.len() {
         let symbol = markets.get(i).unwrap();
         let price = round_price(env, round, &symbol, i);
-        let mut market = storage::market(env, &symbol)
-            .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::MarketNotConfigured));
+        let mut market = storage::get_market(env, &symbol);
 
         // §7.2 raw side PnL numerators (one extra PRICE_PRECISION factor),
         // §7.3 recognition: profit in full, loss capped at side collateral.
@@ -161,7 +160,7 @@ pub fn build_snapshot(
     } else {
         nav_num / PRICE_PRECISION
     };
-    let config = storage::global_config(env);
+    let config = storage::get_global_config(env);
     let required = if ledger.total_risk_units == 0 {
         0
     } else {
