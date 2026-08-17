@@ -129,12 +129,12 @@ pub fn open_position(
         funding::cold_start(&env, &mut market);
     }
 
-    ledger.total_risk_units = math::add(&env, ledger.total_risk_units, risk_units);
+    risk::register_exposure(&env, &mut ledger, risk_units);
     risk::enforce_capacity(&env, &ledger, physical, ledger.total_risk_units);
     risk::enforce_market_limits(&env, &market, is_long);
     funding::reset_debts(&env, &ledger, &mut position, &market);
     storage::save_position(&env, &position);
-    ledger.open_position_count += 1;
+    risk::register_position(&mut ledger);
     funding::refresh_display(&env, &mut market);
     storage::save_market(&env, &market_symbol, &market);
     borrow::refresh_rate(&env, &mut ledger, physical);

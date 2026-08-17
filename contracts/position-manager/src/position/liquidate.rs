@@ -46,7 +46,7 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
     );
 
     let pending = funding::pending_fees(&env, &ledger, &position, &market);
-    let payable = settle::payable_price_pnl(
+    let payable = risk::payable_pnl(
         &env,
         &ledger,
         &position,

@@ -85,7 +85,7 @@ pub fn increase_position(
         side.base_exposure = math::add(&env, side.base_exposure, base);
         side.risk_units = math::add(&env, side.risk_units, risk_units);
     }
-    ledger.total_risk_units = math::add(&env, ledger.total_risk_units, risk_units);
+    risk::register_exposure(&env, &mut ledger, risk_units);
     risk::enforce_capacity(&env, &ledger, physical, ledger.total_risk_units);
     risk::enforce_market_limits(&env, &market, position.is_long);
     let health = math::add(
@@ -101,11 +101,7 @@ pub fn increase_position(
     );
     // Adding size is held to the initial margin; a pure collateral top-up
     // only de-risks and must clear just the maintenance floor (§12.3).
-    let required = if size_added > 0 {
-        risk::initial_requirement(&env, position.size, &market.config)
-    } else {
-        risk::maintenance_requirement(&env, position.size, &market.config)
-    };
+    let required = risk::required_margin(&env, position.size, &market.config, size_added > 0);
     if health < required {
         panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
     }

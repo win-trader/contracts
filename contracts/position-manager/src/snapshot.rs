@@ -8,7 +8,7 @@
 use soroban_sdk::{panic_with_error, Env, Symbol};
 
 use shared::constants::{BPS, PRICE_PRECISION};
-use shared::{AccountingSnapshot, OracleRound, OracleRouterClient, RiskState};
+use shared::{AccountingSnapshot, OracleRound, OracleRouterClient};
 
 use crate::errors::PositionManagerError;
 use crate::ledger::Ledger;
@@ -102,49 +102,14 @@ pub fn build_snapshot(
             math::add(env, long_recognized, short_recognized),
         );
 
+        // One pure assessment serves both modes: the LP settlement path
+        // persists it, the reporting path only counts it.
+        let assessment = risk::assess(env, &market, price, equity);
         if mutate_risk {
-            risk::evaluate_market_risk(env, ledger, &symbol, &mut market, price, equity);
+            risk::apply(env, ledger, &symbol, &mut market, &assessment);
             storage::save_market(env, &symbol, &market);
-        } else {
-            market.long.risk_state = risk::risk_state_for(
-                env,
-                market.long.risk_state,
-                core::cmp::max(
-                    math::pnl(
-                        env,
-                        true,
-                        market.long.size_open_interest,
-                        market.long.base_exposure,
-                        price,
-                    ),
-                    0,
-                ),
-                equity,
-                &market.config,
-            );
-            market.short.risk_state = risk::risk_state_for(
-                env,
-                market.short.risk_state,
-                core::cmp::max(
-                    math::pnl(
-                        env,
-                        false,
-                        market.short.size_open_interest,
-                        market.short.base_exposure,
-                        price,
-                    ),
-                    0,
-                ),
-                equity,
-                &market.config,
-            );
         }
-        if market.long.risk_state != RiskState::Normal {
-            blocked_side_count += 1;
-        }
-        if market.short.risk_state != RiskState::Normal {
-            blocked_side_count += 1;
-        }
+        blocked_side_count += assessment.blocked_sides();
         i += 1;
     }
 

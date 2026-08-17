@@ -12,7 +12,7 @@
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::BPS;
-use shared::{Market, Position, RiskState};
+use shared::{Market, Position};
 
 use crate::borrow;
 use crate::errors::PositionManagerError;
@@ -47,55 +47,6 @@ fn removed_exposure(env: &Env, position: &Position, size_removed: i128) -> Remov
         base_removed: math::sub(env, position.base_exposure, base_after),
         risk_removed: math::sub(env, position.risk_units, risk_after),
     }
-}
-
-/// §14 — positive price PnL after the hard-cap payout factor. Below the
-/// hard-cap state the raw PnL passes through; at hard cap every profitable
-/// position on the side is scaled by the same factor from one price
-/// snapshot. Negative PnL always passes through.
-pub fn payable_price_pnl(
-    env: &Env,
-    ledger: &Ledger,
-    position: &Position,
-    market: &Market,
-    size: i128,
-    base: i128,
-    price: i128,
-    physical_cash: i128,
-) -> i128 {
-    let raw = math::pnl(env, position.is_long, size, base, price);
-    if raw <= 0 {
-        return raw;
-    }
-    let side = market.side(position.is_long);
-    if side.risk_state != RiskState::HardCap {
-        return raw;
-    }
-    let side_positive = core::cmp::max(
-        math::pnl(
-            env,
-            position.is_long,
-            side.size_open_interest,
-            side.base_exposure,
-            price,
-        ),
-        0,
-    );
-    if side_positive == 0 {
-        return 0;
-    }
-    let hard_cap_value = math::mul_div_floor(
-        env,
-        ledger.cash_lp_equity(env, physical_cash),
-        market.config.hard_cap_pnl_factor_bps as i128,
-        BPS,
-    );
-    math::mul_div_floor(
-        env,
-        raw,
-        core::cmp::min(hard_cap_value, side_positive),
-        side_positive,
-    )
 }
 
 /// Everything one settlement moved — consumed by the entry points to emit
@@ -157,7 +108,7 @@ pub fn settle_close(
         price,
     );
     let payable = core::cmp::max(
-        payable_price_pnl(
+        risk::payable_pnl(
             env,
             ledger,
             &position,
@@ -230,7 +181,7 @@ pub fn settle_close(
         side.base_exposure = math::sub(env, side.base_exposure, removed.base_removed);
         side.risk_units = math::sub(env, side.risk_units, removed.risk_removed);
     }
-    ledger.total_risk_units = math::sub(env, ledger.total_risk_units, removed.risk_removed);
+    risk::release_exposure(env, ledger, removed.risk_removed);
 
     let mut collateral_payout = 0i128;
     let mut liquidation_reward = 0i128;
@@ -284,7 +235,7 @@ pub fn settle_close(
             );
         }
         storage::remove_position(env, position.id);
-        ledger.open_position_count = ledger.open_position_count.saturating_sub(1);
+        risk::release_position(ledger);
     } else {
         // §12.2 partial close: explicit withdrawal, resize, health check,
         // baseline reset (§11.5: no historical debt carries forward).
@@ -330,14 +281,10 @@ pub fn settle_close(
                 price,
             ),
         );
-        // Shrinking the position de-risks, so the maintenance floor is
-        // enough; a pure collateral withdrawal raises leverage and must
-        // leave the position back above the initial margin (§12.3).
-        let required = if size_removed > 0 {
-            risk::maintenance_requirement(env, removed.new_size, &market.config)
-        } else {
-            risk::initial_requirement(env, removed.new_size, &market.config)
-        };
+        // Shrinking the position de-risks; a pure collateral withdrawal
+        // raises leverage and re-underwrites at the initial margin (§12.3).
+        let required =
+            risk::required_margin(env, removed.new_size, &market.config, size_removed == 0);
         if health < required {
             panic_with_error!(env, PositionManagerError::InsufficientCollateral);
         }
