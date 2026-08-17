@@ -1,7 +1,7 @@
 #![no_std]
 
 mod auth;
-mod checkpoint;
+mod borrow;
 mod contract;
 mod errors;
 mod events;

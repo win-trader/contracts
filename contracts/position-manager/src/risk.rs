@@ -16,25 +16,6 @@ use crate::{math, storage};
 /// "Limit the sum of all side hard-cap factors").
 const SIDES_PER_MARKET: u64 = 2;
 
-/// §9.2 — recompute the stored borrow rate from current utilization. Call
-/// after any mutation that changes risk units or cash LP equity (§10.3
-/// step 7).
-pub fn refresh_rate(env: &Env, ledger: &mut Ledger, physical_cash: i128) {
-    let config = storage::get_global_config(env);
-    let utilization = math::utilization_bps(
-        env,
-        ledger.total_risk_units,
-        ledger.cash_lp_equity(env, physical_cash),
-    );
-    ledger.current_borrow_rate = math::borrow_rate_exp(
-        env,
-        config.base_borrow_rate_bps_day,
-        config.max_variable_borrow_bps_day,
-        utilization,
-        config.borrow_exponent_bps,
-    );
-}
-
 /// §9.1 — the global capacity gate: new total risk must stay within the
 /// configured share of cash LP equity.
 pub fn enforce_capacity(env: &Env, ledger: &Ledger, physical_cash: i128, risk_after: i128) {

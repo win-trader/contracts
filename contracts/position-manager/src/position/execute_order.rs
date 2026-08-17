@@ -1,8 +1,8 @@
 use crate::{
     auth::{require_auth, require_initialized},
-    checkpoint,
+    borrow,
     errors::PositionManagerError,
-    events, ledger, settle, snapshot, storage,
+    events, funding, ledger, settle, snapshot, storage,
 };
 use soroban_sdk::{panic_with_error, Address, Env};
 
@@ -41,8 +41,8 @@ pub fn execute_order(env: Env, caller: Address, position_id: u64) {
 
     let mut market = storage::get_market(&env, &position.market);
     let now = env.ledger().timestamp();
-    checkpoint::checkpoint_global(&env, &mut ledger, now);
-    checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, now);
+    funding::accrue(&env, &mut ledger, &mut market, now);
 
     let size = position.size;
     let summary = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);

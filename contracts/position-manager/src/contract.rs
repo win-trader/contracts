@@ -7,7 +7,7 @@ use crate::auth::{require_initialized, require_role, require_vault};
 use crate::errors::PositionManagerError;
 use crate::events;
 use crate::ledger::{self, Ledger};
-use crate::{checkpoint, funding, math, position, risk, snapshot, storage, validation};
+use crate::{borrow, funding, math, position, risk, snapshot, storage, validation};
 use position::{
     decrease::decrease_position, deleverage::deleverage_position, execute_order::execute_order,
     fund_execution_budget::fund_execution_budget, increase::increase_position,
@@ -144,12 +144,12 @@ impl PositionManager for PositionManagerContract {
         require_role(&env, &caller, ROLE_KEEPER);
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
-        checkpoint::checkpoint_global(&env, &mut ledger, now);
+        borrow::accrue(&env, &mut ledger, now);
         let mut market = storage::get_market(&env, &market_symbol);
-        checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+        funding::accrue(&env, &mut ledger, &mut market, now);
         storage::save_market(&env, &market_symbol, &market);
         let physical = ledger::physical_cash(&env);
-        risk::refresh_rate(&env, &mut ledger, physical);
+        borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
         events::emit_market_checkpoint(&env, &market_symbol, &market, &ledger, now);
     }
@@ -158,7 +158,7 @@ impl PositionManager for PositionManagerContract {
         require_role(&env, &caller, ROLE_ADMIN);
         validation::validate_global(&env, &config);
         let mut ledger = storage::get_ledger(&env);
-        checkpoint::checkpoint_global(&env, &mut ledger, env.ledger().timestamp());
+        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
         let markets = storage::get_active_markets(&env);
         if markets.len() > config.max_active_markets {
             panic_with_error!(&env, PositionManagerError::InvalidConfig);
@@ -168,7 +168,7 @@ impl PositionManager for PositionManagerContract {
             panic_with_error!(&env, PositionManagerError::InvalidConfig);
         }
         storage::save_global_config(&env, &config);
-        risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
+        borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
         storage::save_ledger(&env, &ledger);
         events::emit_global_config_updated(&env, &config);
     }
@@ -178,7 +178,7 @@ impl PositionManager for PositionManagerContract {
         validation::validate_market(&env, &config);
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
-        checkpoint::checkpoint_global(&env, &mut ledger, now);
+        borrow::accrue(&env, &mut ledger, now);
         let markets = storage::get_active_markets(&env);
         let existing = storage::try_get_market(&env, &market_symbol);
         if existing.is_none()
@@ -195,7 +195,7 @@ impl PositionManager for PositionManagerContract {
             panic_with_error!(&env, PositionManagerError::InvalidConfig);
         }
         if let Some(mut market) = existing {
-            checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+            funding::accrue(&env, &mut ledger, &mut market, now);
             market.config = config.clone();
             funding::refresh_display(&env, &mut market);
             storage::save_market(&env, &market_symbol, &market);
@@ -205,7 +205,7 @@ impl PositionManager for PositionManagerContract {
             markets.push_back(market_symbol.clone());
             storage::save_active_markets(&env, &markets);
         }
-        risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
+        borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
         storage::save_ledger(&env, &ledger);
         events::emit_market_config_updated(&env, &market_symbol, &config);
     }
@@ -235,17 +235,17 @@ impl PositionManager for PositionManagerContract {
         require_vault(&env, &caller);
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
-        checkpoint::checkpoint_global(&env, &mut ledger, now);
+        borrow::accrue(&env, &mut ledger, now);
         // §8.3 — the receiver liability accrues per-market, so LP pricing
         // checkpoints every active market (bounded by max_active_markets)
         // rather than trusting the keeper sweep's cadence.
         for symbol in storage::get_active_markets(&env).iter() {
             let mut market = storage::get_market(&env, &symbol);
-            checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+            funding::accrue(&env, &mut ledger, &mut market, now);
             storage::save_market(&env, &symbol, &market);
         }
         let result = snapshot::build_snapshot(&env, &mut ledger, &round, physical, true);
-        risk::refresh_rate(&env, &mut ledger, physical);
+        borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
         result
     }
@@ -253,17 +253,17 @@ impl PositionManager for PositionManagerContract {
     fn refresh_borrow_rate(env: Env, caller: Address, physical: i128) {
         require_vault(&env, &caller);
         let mut ledger = storage::get_ledger(&env);
-        checkpoint::checkpoint_global(&env, &mut ledger, env.ledger().timestamp());
-        risk::refresh_rate(&env, &mut ledger, physical);
+        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+        borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
     }
 
     fn can_create_lp_request(env: Env, caller: Address, physical: i128) -> bool {
         require_vault(&env, &caller);
         let mut ledger = storage::get_ledger(&env);
-        checkpoint::checkpoint_global(&env, &mut ledger, env.ledger().timestamp());
+        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
         let claims = ledger.non_lp_claims(&env);
-        risk::refresh_rate(&env, &mut ledger, physical);
+        borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
         claims <= physical && ledger.lp_blocked_side_count == 0
     }
@@ -309,7 +309,7 @@ impl PositionManager for PositionManagerContract {
     fn claim_protocol(env: Env, caller: Address, recipient: Address, amount: i128) {
         require_role(&env, &caller, ROLE_ADMIN);
         let mut ledger = storage::get_ledger(&env);
-        checkpoint::checkpoint_global(&env, &mut ledger, env.ledger().timestamp());
+        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
         if amount <= 0 || amount > ledger.protocol_claimable_total {
             panic_with_error!(&env, PositionManagerError::InvalidAmount);
         }
@@ -320,7 +320,7 @@ impl PositionManager for PositionManagerContract {
             &recipient,
             amount,
         );
-        risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
+        borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
         storage::save_ledger(&env, &ledger);
         events::emit_protocol_claimed(&env, &recipient, amount);
     }
@@ -334,8 +334,8 @@ impl PositionManager for PositionManagerContract {
         // LP-equity donation.
         ledger::receive(&env, &contributor, amount);
         let mut ledger = storage::get_ledger(&env);
-        checkpoint::checkpoint_global(&env, &mut ledger, env.ledger().timestamp());
-        risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
+        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+        borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
         storage::save_ledger(&env, &ledger);
         events::emit_recapitalized(&env, &contributor, amount);
     }

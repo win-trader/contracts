@@ -1,6 +1,6 @@
 use crate::{
     auth::{require_auth, require_initialized, require_market_active, require_not_paused},
-    checkpoint::{checkpoint_global, checkpoint_market},
+    borrow,
     errors::PositionManagerError,
     events, funding, ledger, math, risk, snapshot, storage,
     validation::{check_slippage, validate_orders},
@@ -52,8 +52,8 @@ pub fn open_position(
 
     let now = env.ledger().timestamp();
 
-    checkpoint_global(&env, &mut ledger, now);
-    checkpoint_market(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, now);
+    funding::accrue(&env, &mut ledger, &mut market, now);
 
     let price = snapshot::authenticated_price(&env, &market_symbol);
 
@@ -126,11 +126,7 @@ pub fn open_position(
     }
 
     if was_empty {
-        // §8.1 cold start — an empty book carries no history, and zero is
-        // not "no information": it would grant a one-sided launch a
-        // decaying discount. The EMA starts at the skew this open creates.
-        market.skew_ema =
-            math::skew_frac(&env, market.long.base_exposure, market.short.base_exposure);
+        funding::cold_start(&env, &mut market);
     }
 
     ledger.total_risk_units = math::add(&env, ledger.total_risk_units, risk_units);
@@ -141,7 +137,7 @@ pub fn open_position(
     ledger.open_position_count += 1;
     funding::refresh_display(&env, &mut market);
     storage::save_market(&env, &market_symbol, &market);
-    risk::refresh_rate(&env, &mut ledger, physical);
+    borrow::refresh_rate(&env, &mut ledger, physical);
     storage::save_ledger(&env, &ledger);
 
     events::emit_opened(&env, &position, price);

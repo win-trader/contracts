@@ -1,8 +1,8 @@
 use crate::{
     auth::{require_auth, require_initialized},
-    checkpoint,
+    borrow,
     errors::PositionManagerError,
-    events, settle, snapshot, storage, validation,
+    events, funding, settle, snapshot, storage, validation,
 };
 use soroban_sdk::{panic_with_error, Env};
 
@@ -60,8 +60,8 @@ pub fn decrease_position(
     let mut market = storage::get_market(&env, &position.market);
     let mut ledger = storage::get_ledger(&env);
 
-    checkpoint::checkpoint_global(&env, &mut ledger, now);
-    checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, now);
+    funding::accrue(&env, &mut ledger, &mut market, now);
 
     let price = snapshot::authenticated_price(&env, &position.market);
 

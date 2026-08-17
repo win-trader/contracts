@@ -1,8 +1,8 @@
 use crate::{
     auth::{require_initialized, require_role},
-    checkpoint,
+    borrow,
     errors::PositionManagerError,
-    events, ledger, math, risk, settle, snapshot, storage,
+    events, funding, ledger, math, risk, settle, snapshot, storage,
 };
 use shared::constants::{BPS, ROLE_KEEPER};
 use shared::RiskState;
@@ -17,8 +17,8 @@ pub fn deleverage_position(env: Env, caller: Address, position_id: u64) {
     let mut ledger = storage::get_ledger(&env);
 
     let now = env.ledger().timestamp();
-    checkpoint::checkpoint_global(&env, &mut ledger, now);
-    checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, now);
+    funding::accrue(&env, &mut ledger, &mut market, now);
 
     let price = snapshot::authenticated_price(&env, &position.market);
     let physical = ledger::physical_cash(&env);

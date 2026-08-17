@@ -14,6 +14,7 @@ use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 use shared::constants::BPS;
 use shared::{Market, Position, RiskState};
 
+use crate::borrow;
 use crate::errors::PositionManagerError;
 use crate::events::FeeSource;
 use crate::fees::{self, CollectedFees};
@@ -358,15 +359,9 @@ pub fn settle_close(
         equity_after,
     );
 
-    // §8.3 — with no open positions anywhere, aggregate conservation makes
-    // every market size zero: release the unassigned rounding residue to LP
-    // residual cash without a market loop.
-    if ledger.open_position_count == 0 {
-        let residue = ledger.pending_receiver_funding_total;
-        ledger.release(env, ledger::Bucket::ReceiverFunding, residue);
-    }
+    funding::release_residue(env, ledger);
     storage::save_market(env, &position.market, &market);
-    risk::refresh_rate(env, ledger, physical_after);
+    borrow::refresh_rate(env, ledger, physical_after);
 
     CloseSummary {
         position_id: position.id,

@@ -1,6 +1,6 @@
 use crate::{
     auth::{require_auth, require_initialized},
-    checkpoint,
+    borrow,
     errors::PositionManagerError,
     events, funding, ledger, math, risk, settle, snapshot, storage,
 };
@@ -29,8 +29,8 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
 
     let now = env.ledger().timestamp();
 
-    checkpoint::checkpoint_global(&env, &mut ledger, now);
-    checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, now);
+    funding::accrue(&env, &mut ledger, &mut market, now);
 
     let price = snapshot::authenticated_price(&env, &position.market);
     let physical = ledger::physical_cash(&env);

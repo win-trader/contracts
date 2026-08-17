@@ -1,6 +1,6 @@
 use crate::{
     auth::{require_auth, require_initialized, require_market_active, require_not_paused},
-    checkpoint,
+    borrow,
     errors::PositionManagerError,
     events, fees, funding, ledger, math, risk, snapshot, storage, validation,
 };
@@ -33,8 +33,8 @@ pub fn increase_position(
     require_auth(&position.owner);
     require_market_active(&env, &position.market);
 
-    checkpoint::checkpoint_global(&env, &mut ledger, now);
-    checkpoint::checkpoint_market(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, now);
+    funding::accrue(&env, &mut ledger, &mut market, now);
 
     validation::check_slippage(&env, position.is_long, true, price, acceptable_price);
 
@@ -113,7 +113,7 @@ pub fn increase_position(
     storage::save_position(&env, &position);
     funding::refresh_display(&env, &mut market);
     storage::save_market(&env, &position.market, &market);
-    risk::refresh_rate(&env, &mut ledger, physical);
+    borrow::refresh_rate(&env, &mut ledger, physical);
     storage::save_ledger(&env, &ledger);
     events::emit_increased(
         &env,

@@ -24,7 +24,7 @@ use crate::{math, storage};
 
 /// §5.1 global state: the five non-LP claim totals, the risk counters, and
 /// the global borrow accrual. The receiver-funding liability total is fed
-/// per-market by `checkpoint::checkpoint_market` (§8.3).
+/// per-market by `funding::accrue` (§8.3).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Ledger {
