@@ -3,7 +3,7 @@
 
 use soroban_sdk::{panic_with_error, Env};
 
-use shared::constants::BPS;
+use shared::constants::{BPS, INDEX_PRECISION};
 use shared::{GlobalConfig, MarketConfig};
 
 use crate::errors::PositionManagerError;
@@ -23,6 +23,11 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
         || c.borrow_exponent_bps == 0
         || c.borrow_exponent_bps > 100_000
         || c.min_borrow_index_delta < 0
+        // Upper-bound the floor: a 1.0-per-unit index delta is already an
+        // absurd per-touch charge, and it keeps `risk_units × delta`
+        // (≤ 1e16 × 1e14) inside i128 so `pending_fees` can never
+        // overflow-panic and brick settlement.
+        || c.min_borrow_index_delta > INDEX_PRECISION
         || split > BPS as u64
         || c.hard_cap_factor_limit_bps > BPS as u32
         || c.max_adl_reward < 0

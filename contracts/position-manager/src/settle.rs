@@ -183,6 +183,18 @@ impl<'a> Settlement<'a> {
             ),
             0,
         );
+        // §15.2 — a close must never mint a cash shortfall. The §14 side
+        // risk states already cap a winner's payout against LP equity, but
+        // only through the side *aggregate*: a winner masked by a bigger
+        // same-side loser keeps the side in `Normal`, so `payable_pnl`
+        // returns raw profit that could exceed the equity backing it. Clamp
+        // every profit credit at current LP equity. Under HardCap the factor
+        // already bounds `payable` at `equity × factor / BPS ≤ equity`, so
+        // this is a no-op there; in healthy states equity dwarfs one
+        // position's profit, so it only bites at the edge of insolvency
+        // (first-come-first-served among racing winners, which is safe —
+        // it can never drive claims past physical).
+        let payable = core::cmp::min(payable, equity);
         let negative = core::cmp::max(-raw_pnl, 0);
         Settlement {
             env,
@@ -362,27 +374,19 @@ impl<'a> Settlement<'a> {
         if collateral_withdrawn > 0 {
             let is_long = self.position.is_long;
             let owner = self.position.owner.clone();
-            // Shrinking the book may use the safety path; a pure collateral
-            // withdrawal goes through the conservation-checked path.
-            if self.size_removed > 0 {
-                ledger::payout_collateral(
-                    self.env,
-                    self.ledger,
-                    &mut self.position,
-                    self.market.side_mut(is_long),
-                    &owner,
-                    collateral_withdrawn,
-                );
-            } else {
-                ledger::payout_collateral_checked(
-                    self.env,
-                    self.ledger,
-                    &mut self.position,
-                    self.market.side_mut(is_long),
-                    &owner,
-                    collateral_withdrawn,
-                );
-            }
+            // An explicit withdrawal is an outflow, not close proceeds, so
+            // it always takes the conservation-checked path — it can never
+            // create or deepen a shortfall, whether or not a size decrease
+            // rides along. (Realized close profit still takes the safety
+            // path in `pay_partial_realized`, as a risk-reduction proceed.)
+            ledger::payout_collateral_checked(
+                self.env,
+                self.ledger,
+                &mut self.position,
+                self.market.side_mut(is_long),
+                &owner,
+                collateral_withdrawn,
+            );
         }
         self.position.size = self.removed.new_size;
         self.position.base_exposure = self.removed.base_after;
@@ -398,13 +402,16 @@ impl<'a> Settlement<'a> {
                 self.price,
             ),
         );
-        // Shrinking the position de-risks; a pure collateral withdrawal
-        // raises leverage and re-underwrites at the initial margin (§12.3).
+        // Any explicit collateral withdrawal raises leverage and
+        // re-underwrites the remaining position at the initial margin — a
+        // dust size decrease must not downgrade the floor to maintenance.
+        // A pure shrink (no withdrawal) de-risks and keeps the maintenance
+        // floor. `require_valid_input` forbids both being zero.
         let required = risk::required_margin(
             self.env,
             self.removed.new_size,
             &self.market.config,
-            self.size_removed == 0,
+            collateral_withdrawn > 0,
         );
         if health < required {
             panic_with_error!(self.env, PositionManagerError::InsufficientCollateral);

@@ -3374,3 +3374,122 @@ fn short_base_rounds_against_the_trader() {
         "zero-move short round trip must not profit: payout {payout} vs collateral {collateral}"
     );
 }
+
+/// §12.3 — a dust size decrease must not downgrade a collateral withdrawal
+/// to the maintenance floor. Withdrawing collateral past the initial-margin
+/// leverage cap is rejected identically whether or not a one-stroop size
+/// decrease rides along; only a pure shrink (no withdrawal) keeps the
+/// lenient maintenance floor.
+#[test]
+fn dust_decrease_cannot_bypass_the_initial_margin_floor() {
+    let p = Protocol::new();
+    p.disable_funding();
+    p.disable_borrow();
+    p.seed_lp();
+    let manager = p.manager();
+
+    // size 10_000, collateral 600. initial(10_000)=500, maintenance=250.
+    let size = 10_000 * UNIT;
+    let id = p.open(&p.trader_a, true, size, 600 * UNIT);
+
+    // Withdraw 300 — leaving 300, strictly between the maintenance floor
+    // (250) and the initial floor (500) — while shrinking by a single
+    // stroop. Under the bug this cleared the maintenance floor; it must now
+    // revert exactly as the equivalent pure withdrawal does.
+    assert!(
+        manager
+            .try_decrease_position(&id, &1, &(300 * UNIT), &0)
+            .is_err(),
+        "dust-decrease + withdrawal past the initial margin must revert"
+    );
+    assert!(
+        manager
+            .try_decrease_position(&id, &0, &(300 * UNIT), &0)
+            .is_err(),
+        "the equivalent pure withdrawal must also revert"
+    );
+
+    // A withdrawal that leaves the position above the initial margin still
+    // succeeds (with or without a dust shrink).
+    manager.decrease_position(&id, &1, &(50 * UNIT), &0);
+    assert!(manager.get_position(&id).stored_collateral >= 500 * UNIT);
+}
+
+/// §15.2 — a close must never mint a cash shortfall. A winner masked by a
+/// bigger same-side loser keeps the side in `Normal` (no §14 haircut), so
+/// without the equity clamp its raw profit would be credited past the LP
+/// equity that backs it, minting a shortfall. Requires a production-like
+/// low risk factor for the book to fit inside the capacity gate.
+#[test]
+fn masked_winner_close_cannot_mint_a_shortfall() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    // Production-like 10% risk factor (harness default is a conservative
+    // 50%, under which capacity makes this book unreachable), zero funding
+    // and close fee so the settlement is pure price PnL.
+    let mut mc = Protocol::market_config(0);
+    mc.market_risk_factor_bps = 1_000;
+    mc.close_fee_low_bps = 0;
+    mc.close_fee_high_bps = 0;
+    p.manager().set_market_config(&p.admin, &p.market, &mc);
+
+    // Thin LP: equity ~3_000, below the masked winner's 5_000 raw profit.
+    p.deposit(&p.lp, 3_000 * UNIT);
+
+    // Loser enters high FIRST (while flat, so its side is Normal and the
+    // open is allowed), heavily collateralized — its collateral is what a
+    // missing clamp would over-pay the winner from.
+    p.advance(31);
+    p.set_price(200 * UNIT);
+    p.publish_round();
+    let _l = p.open(&p.trader_b, true, 12_000 * UNIT, 7_000 * UNIT);
+
+    // Winner enters low, while the (now losing) loser keeps the side's
+    // aggregate PnL non-positive, so the winner's open is not risk-blocked.
+    p.advance(31);
+    p.set_price(50 * UNIT);
+    p.publish_round();
+    let w = p.open(&p.trader_a, true, 5_000 * UNIT, 300 * UNIT);
+
+    // Masked state: long-side aggregate PnL is negative (loser dominates),
+    // so the side stays Normal and payable_pnl returns raw, uncapped profit.
+    p.advance(31);
+    p.set_price(100 * UNIT);
+    p.publish_round();
+
+    let balance_before = p.token().balance(&p.trader_a);
+    p.close(w);
+    let payout = p.token().balance(&p.trader_a) - balance_before;
+
+    // Winner's profit was clamped to equity (~3_000), not the raw 5_000, so
+    // total payout (collateral 300 + clamped profit) stays well under
+    // collateral + raw profit.
+    assert!(
+        payout < (300 + 5_000) * UNIT,
+        "winner extracted un-clamped profit: payout {payout}"
+    );
+    // And the vault is still solvent — no shortfall minted.
+    assert_eq!(
+        p.fresh_snapshot().cash_shortfall,
+        0,
+        "masked-winner close minted a cash shortfall"
+    );
+}
+
+/// Governance guard: `min_borrow_index_delta` is bounded above so a
+/// fat-fingered value cannot overflow `pending_fees` and brick settlement
+/// (including liquidations). A nominal value is accepted; one above
+/// INDEX_PRECISION is rejected by validation.
+#[test]
+fn min_borrow_index_delta_is_bounded_above() {
+    let p = Protocol::new();
+    let manager = p.manager();
+    let mut cfg = Protocol::global_config(25, 250);
+    cfg.min_borrow_index_delta = 200_000_000_000; // 2e11 — the nominal floor
+    manager.set_global_config(&p.admin, &cfg);
+    cfg.min_borrow_index_delta = INDEX_PRECISION + 1;
+    assert!(
+        manager.try_set_global_config(&p.admin, &cfg).is_err(),
+        "min_borrow_index_delta above INDEX_PRECISION must be rejected"
+    );
+}
