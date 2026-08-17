@@ -15,7 +15,7 @@
 //! `collateral_token.balanceOf(vault)` (§4.1), read via the vault. Cash LP
 //! equity, free capital, and NAV are always derived (§4.3).
 
-use soroban_sdk::{contracttype, panic_with_error, Env};
+use soroban_sdk::{contracttype, panic_with_error, Address, Env};
 
 use shared::{MarketSide, Position, VaultClient};
 
@@ -88,6 +88,161 @@ impl Ledger {
 /// distinct balance state, not per use.
 pub fn physical_cash(env: &Env) -> i128 {
     VaultClient::new(env, &storage::get_vault(env)).physical_cash()
+}
+
+fn vault(env: &Env) -> VaultClient<'_> {
+    VaultClient::new(env, &storage::get_vault(env))
+}
+
+// ---------------------------------------------------------------------------
+// Claim-bucket verbs.
+//
+// Every dollar in the vault carries exactly one label: one of the claim
+// totals below, position collateral (its own three-leg choke point further
+// down), or the LP-equity residual. Money moves in exactly two ways — a
+// label move (`credit`/`release`, cash stays put) or a boundary move
+// (`payout*`/`receive`, cash crosses the vault wall together with its
+// label). Nothing outside this module writes a claim total, so "show every
+// money movement" is a grep for these verbs.
+// ---------------------------------------------------------------------------
+
+/// The label-only claim buckets. Position collateral keeps its dedicated
+/// three-leg choke point; LP equity is the residual and never stored.
+#[derive(Clone, Copy, Debug)]
+pub enum Bucket {
+    ReceiverFunding,
+    ExecutionBudget,
+    ProtocolClaimable,
+    KeeperReserve,
+}
+
+impl Ledger {
+    fn bucket_mut(&mut self, bucket: Bucket) -> &mut i128 {
+        match bucket {
+            Bucket::ReceiverFunding => &mut self.pending_receiver_funding_total,
+            Bucket::ExecutionBudget => &mut self.execution_budget_total,
+            Bucket::ProtocolClaimable => &mut self.protocol_claimable_total,
+            Bucket::KeeperReserve => &mut self.risk_keeper_reserve_total,
+        }
+    }
+
+    /// Label move LP equity → `bucket`: cash stays put, the claim grows and
+    /// the residual shrinks by construction.
+    pub fn credit(&mut self, env: &Env, bucket: Bucket, amount: i128) {
+        if amount == 0 {
+            return;
+        }
+        if amount < 0 {
+            panic_with_error!(env, PositionManagerError::InvariantViolation);
+        }
+        let total = self.bucket_mut(bucket);
+        *total = math::add(env, *total, amount);
+    }
+
+    /// Label move `bucket` → LP equity, capped at the held amount (the
+    /// `collect_stored_collateral` contract). Returns what was released.
+    pub fn release(&mut self, env: &Env, bucket: Bucket, amount: i128) -> i128 {
+        let total = self.bucket_mut(bucket);
+        let released = core::cmp::min(*total, amount);
+        if released <= 0 {
+            return 0;
+        }
+        *total = math::sub(env, *total, released);
+        released
+    }
+
+    /// Exact debit backing a cash payout. Unlike `release`, a shortfall here
+    /// means a pre-computed payout exceeds its claim — an invariant
+    /// violation, never a cap.
+    fn debit(&mut self, env: &Env, bucket: Bucket, amount: i128) {
+        let total = self.bucket_mut(bucket);
+        if amount < 0 || *total < amount {
+            panic_with_error!(env, PositionManagerError::InvariantViolation);
+        }
+        *total = math::sub(env, *total, amount);
+    }
+}
+
+/// Boundary move out: debit `bucket` and transfer the same cash to
+/// `recipient`, one atomic call (the safety-claim path). No-op at zero.
+pub fn payout(env: &Env, ledger: &mut Ledger, bucket: Bucket, recipient: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    ledger.debit(env, bucket, amount);
+    vault(env).transfer_safety_claim(&env.current_contract_address(), recipient, &amount);
+}
+
+/// Boundary move out on the conservation-checked vault path: debit the
+/// bucket FIRST, hand the vault the post-debit claim total as
+/// `claims_after`, then transfer.
+pub fn payout_checked(
+    env: &Env,
+    ledger: &mut Ledger,
+    bucket: Bucket,
+    recipient: &Address,
+    amount: i128,
+) {
+    if amount <= 0 {
+        return;
+    }
+    ledger.debit(env, bucket, amount);
+    let claims_after = ledger.non_lp_claims(env);
+    vault(env).transfer_claim(
+        &env.current_contract_address(),
+        recipient,
+        &amount,
+        &claims_after,
+    );
+}
+
+/// Trader payout from stored collateral: three-leg collect (capped at the
+/// held amount) plus the cash transfer, one call. Returns what was paid.
+pub fn payout_collateral(
+    env: &Env,
+    ledger: &mut Ledger,
+    position: &mut Position,
+    side: &mut MarketSide,
+    recipient: &Address,
+    amount: i128,
+) -> i128 {
+    let collected = collect_stored_collateral(env, ledger, position, side, amount);
+    if collected > 0 {
+        vault(env).transfer_safety_claim(&env.current_contract_address(), recipient, &collected);
+    }
+    collected
+}
+
+/// `payout_collateral` on the conservation-checked vault path (pure
+/// collateral withdrawal): collect first, then hand the vault the
+/// post-collect claim total.
+pub fn payout_collateral_checked(
+    env: &Env,
+    ledger: &mut Ledger,
+    position: &mut Position,
+    side: &mut MarketSide,
+    recipient: &Address,
+    amount: i128,
+) -> i128 {
+    let collected = collect_stored_collateral(env, ledger, position, side, amount);
+    if collected > 0 {
+        let claims_after = ledger.non_lp_claims(env);
+        vault(env).transfer_claim(
+            &env.current_contract_address(),
+            recipient,
+            &collected,
+            &claims_after,
+        );
+    }
+    collected
+}
+
+/// Boundary move in: pull `amount` from `from` into the vault. Labeling
+/// stays with the caller — open pulls collateral and budget in one
+/// transfer, and recapitalize deliberately labels nothing (a pure LP-equity
+/// donation).
+pub fn receive(env: &Env, from: &Address, amount: i128) {
+    vault(env).receive_collateral(&env.current_contract_address(), from, &amount);
 }
 
 // ---------------------------------------------------------------------------

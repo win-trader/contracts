@@ -116,8 +116,7 @@ pub fn checkpoint_market(env: &Env, ledger: &mut Ledger, market: &mut Market, no
             INDEX_PRECISION,
             market.pending_remainder,
         );
-        ledger.pending_receiver_funding_total =
-            math::add(env, ledger.pending_receiver_funding_total, liability_delta);
+        ledger.credit(env, crate::ledger::Bucket::ReceiverFunding, liability_delta);
         market.pending_remainder = pending_rem;
         let (credit_delta, credit_rem) = if receiver_size > 0 {
             accrue(

@@ -2,9 +2,8 @@ use crate::{
     auth::{require_auth, require_initialized},
     checkpoint,
     errors::PositionManagerError,
-    events, math, settle, snapshot, storage,
+    events, ledger, settle, snapshot, storage,
 };
-use shared::VaultClient;
 use soroban_sdk::{panic_with_error, Address, Env};
 
 pub fn execute_order(env: Env, caller: Address, position_id: u64) {
@@ -32,11 +31,12 @@ pub fn execute_order(env: Env, caller: Address, position_id: u64) {
     let budget = position.execution_budget;
     position.execution_budget = 0;
     storage::save_position(&env, &position);
-    ledger.execution_budget_total = math::sub(&env, ledger.execution_budget_total, budget);
-    VaultClient::new(&env, &storage::get_vault(&env)).transfer_safety_claim(
-        &env.current_contract_address(),
+    ledger::payout(
+        &env,
+        &mut ledger,
+        ledger::Bucket::ExecutionBudget,
         &caller,
-        &budget,
+        budget,
     );
 
     let mut market = storage::get_market(&env, &position.market);

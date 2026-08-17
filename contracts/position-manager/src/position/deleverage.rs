@@ -5,7 +5,7 @@ use crate::{
     events, ledger, math, risk, settle, snapshot, storage,
 };
 use shared::constants::{BPS, ROLE_KEEPER};
-use shared::{RiskState, VaultClient};
+use shared::RiskState;
 use soroban_sdk::{panic_with_error, Address, Env};
 
 pub fn deleverage_position(env: Env, caller: Address, position_id: u64) {
@@ -60,12 +60,12 @@ pub fn deleverage_position(env: Env, caller: Address, position_id: u64) {
         configured_reward,
     );
     if reward > 0 {
-        ledger.risk_keeper_reserve_total =
-            math::sub(&env, ledger.risk_keeper_reserve_total, reward);
-        VaultClient::new(&env, &storage::get_vault(&env)).transfer_safety_claim(
-            &env.current_contract_address(),
+        ledger::payout(
+            &env,
+            &mut ledger,
+            ledger::Bucket::KeeperReserve,
             &caller,
-            &reward,
+            reward,
         );
         events::emit_adl_reward(&env, position_id, &caller, reward);
     }

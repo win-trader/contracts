@@ -55,8 +55,8 @@ pub fn split_revenue(
     );
     let lp = math::mul_div_floor(env, collected, config.lp_revenue_share_bps as i128, BPS);
     let protocol = math::sub(env, math::sub(env, collected, keeper), lp);
-    ledger.risk_keeper_reserve_total = math::add(env, ledger.risk_keeper_reserve_total, keeper);
-    ledger.protocol_claimable_total = math::add(env, ledger.protocol_claimable_total, protocol);
+    ledger.credit(env, ledger::Bucket::KeeperReserve, keeper);
+    ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
     events::emit_revenue_split(env, position_id, source, collected, keeper, lp, protocol);
 }
 
@@ -81,9 +81,8 @@ pub fn capitalize(
         let is_long = position.is_long;
         let side = market.side_mut(is_long);
         if receiver_credit > 0 {
-            ledger.pending_receiver_funding_total =
-                math::sub(env, ledger.pending_receiver_funding_total, receiver_credit);
-            ledger::add_stored_collateral(env, ledger, position, side, receiver_credit);
+            let released = ledger.release(env, ledger::Bucket::ReceiverFunding, receiver_credit);
+            ledger::add_stored_collateral(env, ledger, position, side, released);
         }
         let receiver_collected = ledger::collect_stored_collateral(
             env,

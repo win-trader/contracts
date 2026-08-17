@@ -271,6 +271,7 @@ pub fn rate_from_integral(env: &Env, max_rate: i128, integral: i128) -> i128 {
 /// BPS²`, scaled by `INDEX_PRECISION` (bps/day inputs). Kept as the exact
 /// reference the configurable-exponent path is regression-tested against;
 /// production uses `borrow_rate_exp`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn borrow_rate(env: &Env, base: i128, variable: i128, utilization: i128) -> i128 {
     let base_scaled = mul(env, base, INDEX_PRECISION);
     let variable_scaled = mul(env, variable, INDEX_PRECISION);

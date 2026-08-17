@@ -5,7 +5,7 @@ use crate::{
     events, funding, ledger, math, risk, snapshot, storage,
     validation::{check_slippage, validate_orders},
 };
-use shared::{MarketConfig, Position, RiskState, VaultClient};
+use shared::{MarketConfig, Position, RiskState};
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 fn require_valid_input(env: &Env, size: i128, collateral: i128, execution_budget: i128) {
@@ -49,8 +49,6 @@ pub fn open_position(
 
     let mut market = storage::get_market(&env, &market_symbol);
     let mut ledger = storage::get_ledger(&env);
-    let vault_address = storage::get_vault(&env);
-    let vault = VaultClient::new(&env, &vault_address);
 
     let now = env.ledger().timestamp();
 
@@ -64,10 +62,9 @@ pub fn open_position(
 
     let total_transfer = math::add(&env, collateral, execution_budget);
 
-    vault.receive_collateral(&env.current_contract_address(), &owner, &total_transfer);
+    ledger::receive(&env, &owner, total_transfer);
 
-    ledger.execution_budget_total =
-        math::add(&env, ledger.execution_budget_total, execution_budget);
+    ledger.credit(&env, ledger::Bucket::ExecutionBudget, execution_budget);
 
     let position_id = storage::get_next_position_id(&env);
     storage::update_position_id(&env);

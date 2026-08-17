@@ -4,7 +4,7 @@ use crate::{
     errors::PositionManagerError,
     events, funding, ledger, math, risk, settle, snapshot, storage,
 };
-use shared::{MarketConfig, VaultClient};
+use shared::MarketConfig;
 use soroban_sdk::{panic_with_error, Address, Env};
 
 fn require_unhealthy_position(
@@ -26,8 +26,6 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
     let mut market = storage::get_market(&env, &position.market);
     let mut ledger = storage::get_ledger(&env);
     let config = storage::get_global_config(&env);
-    let vault_address = storage::get_vault(&env);
-    let vault = VaultClient::new(&env, &vault_address);
 
     let now = env.ledger().timestamp();
 
@@ -97,11 +95,13 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
             config.max_insolvent_touch_reward,
         );
         if reward > 0 {
-            ledger.risk_keeper_reserve_total =
-                math::sub(&env, ledger.risk_keeper_reserve_total, reward);
-
-            vault.transfer_safety_claim(&env.current_contract_address(), &caller, &reward);
-
+            ledger::payout(
+                &env,
+                &mut ledger,
+                ledger::Bucket::KeeperReserve,
+                &caller,
+                reward,
+            );
             events::emit_insolvency_reward(&env, position_id, &caller, reward);
         }
     }

@@ -12,7 +12,7 @@
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::BPS;
-use shared::{Market, Position, RiskState, VaultClient};
+use shared::{Market, Position, RiskState};
 
 use crate::errors::PositionManagerError;
 use crate::events::FeeSource;
@@ -126,14 +126,6 @@ pub struct CloseSummary {
     pub execution_budget_refunded: i128,
 }
 
-fn transfer_safety(env: &Env, recipient: &Address, amount: i128) {
-    VaultClient::new(env, &storage::get_vault(env)).transfer_safety_claim(
-        &env.current_contract_address(),
-        recipient,
-        &amount,
-    );
-}
-
 /// §12.2 — settle a decrease, close, liquidation, ADL, or triggered order.
 /// The caller must have checkpointed global state and the market to `now`.
 /// Saves the market and position storage; the caller saves the ledger.
@@ -217,20 +209,15 @@ pub fn settle_close(
     let mut realized_payout = 0i128;
     if !removed.full && payable > closing_fee {
         let is_long = position.is_long;
-        realized_payout = core::cmp::min(
+        let owner = position.owner.clone();
+        realized_payout = ledger::payout_collateral(
+            env,
+            ledger,
+            &mut position,
+            market.side_mut(is_long),
+            &owner,
             math::sub(env, payable, closing_fee),
-            position.stored_collateral,
         );
-        if realized_payout > 0 {
-            ledger::collect_stored_collateral(
-                env,
-                ledger,
-                &mut position,
-                market.side_mut(is_long),
-                realized_payout,
-            );
-            transfer_safety(env, &position.owner, realized_payout);
-        }
     }
 
     // §12.2 step 12: reduce the exposure aggregates (collateral aggregates
@@ -257,47 +244,43 @@ pub fn settle_close(
         }
         if let Some(liquidator) = reward_recipient {
             let is_long = position.is_long;
-            let reward = core::cmp::min(
-                position.stored_collateral,
-                math::mul_div_floor(
-                    env,
-                    size_removed,
-                    market.config.liquidation_reward_bps as i128,
-                    BPS,
-                ),
+            let reward = math::mul_div_floor(
+                env,
+                size_removed,
+                market.config.liquidation_reward_bps as i128,
+                BPS,
             );
-            if reward > 0 {
-                ledger::collect_stored_collateral(
-                    env,
-                    ledger,
-                    &mut position,
-                    market.side_mut(is_long),
-                    reward,
-                );
-                transfer_safety(env, liquidator, reward);
-                liquidation_reward = reward;
-            }
+            liquidation_reward = ledger::payout_collateral(
+                env,
+                ledger,
+                &mut position,
+                market.side_mut(is_long),
+                liquidator,
+                reward,
+            );
         }
         {
             let is_long = position.is_long;
-            let payout = position.stored_collateral;
-            if payout > 0 {
-                ledger::collect_stored_collateral(
-                    env,
-                    ledger,
-                    &mut position,
-                    market.side_mut(is_long),
-                    payout,
-                );
-                transfer_safety(env, &position.owner, payout);
-                collateral_payout = payout;
-            }
+            let owner = position.owner.clone();
+            let residual = position.stored_collateral;
+            collateral_payout = ledger::payout_collateral(
+                env,
+                ledger,
+                &mut position,
+                market.side_mut(is_long),
+                &owner,
+                residual,
+            );
         }
         if position.execution_budget > 0 {
             budget_refund = position.execution_budget;
-            ledger.execution_budget_total =
-                math::sub(env, ledger.execution_budget_total, budget_refund);
-            transfer_safety(env, &position.owner, budget_refund);
+            ledger::payout(
+                env,
+                ledger,
+                ledger::Bucket::ExecutionBudget,
+                &position.owner,
+                budget_refund,
+            );
         }
         storage::remove_position(env, position.id);
         ledger.open_position_count = ledger.open_position_count.saturating_sub(1);
@@ -309,21 +292,26 @@ pub fn settle_close(
         }
         if collateral_withdrawn > 0 {
             let is_long = position.is_long;
-            ledger::collect_stored_collateral(
-                env,
-                ledger,
-                &mut position,
-                market.side_mut(is_long),
-                collateral_withdrawn,
-            );
+            let owner = position.owner.clone();
+            // Shrinking the book may use the safety path; a pure collateral
+            // withdrawal goes through the conservation-checked path.
             if size_removed > 0 {
-                transfer_safety(env, &position.owner, collateral_withdrawn);
+                ledger::payout_collateral(
+                    env,
+                    ledger,
+                    &mut position,
+                    market.side_mut(is_long),
+                    &owner,
+                    collateral_withdrawn,
+                );
             } else {
-                VaultClient::new(env, &storage::get_vault(env)).transfer_claim(
-                    &env.current_contract_address(),
-                    &position.owner,
-                    &collateral_withdrawn,
-                    &ledger.non_lp_claims(env),
+                ledger::payout_collateral_checked(
+                    env,
+                    ledger,
+                    &mut position,
+                    market.side_mut(is_long),
+                    &owner,
+                    collateral_withdrawn,
                 );
             }
         }
@@ -374,7 +362,8 @@ pub fn settle_close(
     // every market size zero: release the unassigned rounding residue to LP
     // residual cash without a market loop.
     if ledger.open_position_count == 0 {
-        ledger.pending_receiver_funding_total = 0;
+        let residue = ledger.pending_receiver_funding_total;
+        ledger.release(env, ledger::Bucket::ReceiverFunding, residue);
     }
     storage::save_market(env, &position.market, &market);
     risk::refresh_rate(env, ledger, physical_after);

@@ -2,7 +2,6 @@ use crate::{
     auth::require_auth, checkpoint, errors::PositionManagerError, events, ledger, math, risk,
     storage,
 };
-use shared::VaultClient;
 use soroban_sdk::{panic_with_error, Env};
 
 pub fn withdraw_execution_budget(env: Env, position_id: u64, amount: i128) {
@@ -20,13 +19,13 @@ pub fn withdraw_execution_budget(env: Env, position_id: u64, amount: i128) {
         panic_with_error!(&env, PositionManagerError::InsufficientExecutionBudget);
     }
     position.execution_budget = math::sub(&env, position.execution_budget, amount);
-    ledger.execution_budget_total = math::sub(&env, ledger.execution_budget_total, amount);
     storage::save_position(&env, &position);
-    VaultClient::new(&env, &storage::get_vault(&env)).transfer_claim(
-        &env.current_contract_address(),
+    ledger::payout_checked(
+        &env,
+        &mut ledger,
+        ledger::Bucket::ExecutionBudget,
         &position.owner,
-        &amount,
-        &ledger.non_lp_claims(&env),
+        amount,
     );
     risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
     storage::save_ledger(&env, &ledger);

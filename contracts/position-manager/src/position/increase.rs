@@ -4,7 +4,7 @@ use crate::{
     errors::PositionManagerError,
     events, fees, funding, ledger, math, risk, snapshot, storage, validation,
 };
-use shared::{RiskState, VaultClient};
+use shared::RiskState;
 use soroban_sdk::{panic_with_error, Env};
 
 fn require_valid_input(env: &Env, size_added: i128, collateral_added: i128) {
@@ -29,8 +29,6 @@ pub fn increase_position(
     let mut ledger = storage::get_ledger(&env);
     let now = env.ledger().timestamp();
     let price = snapshot::authenticated_price(&env, &position.market);
-    let vault_address = storage::get_vault(&env);
-    let vault = VaultClient::new(&env, &vault_address);
 
     require_auth(&position.owner);
     require_market_active(&env, &position.market);
@@ -42,11 +40,7 @@ pub fn increase_position(
 
     // can we increase positons without adding colleteral?
     if collateral_added > 0 {
-        vault.receive_collateral(
-            &env.current_contract_address(),
-            &position.owner,
-            &collateral_added,
-        );
+        ledger::receive(&env, &position.owner, collateral_added);
         let is_long = position.is_long;
 
         ledger::add_stored_collateral(

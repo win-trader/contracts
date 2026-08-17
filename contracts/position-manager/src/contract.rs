@@ -17,7 +17,7 @@ use position::{
 use shared::constants::{INDEX_PRECISION, ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER};
 use shared::{
     AccountingSnapshot, ConfigManagerClient, GlobalConfig, Market, MarketConfig, MigrationData,
-    OracleRound, Position, PositionManager, TimelockedUpgradeable, UpgradeFailure, VaultClient,
+    OracleRound, Position, PositionManager, TimelockedUpgradeable, UpgradeFailure,
 };
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
@@ -313,12 +313,12 @@ impl PositionManager for PositionManagerContract {
         if amount <= 0 || amount > ledger.protocol_claimable_total {
             panic_with_error!(&env, PositionManagerError::InvalidAmount);
         }
-        ledger.protocol_claimable_total = math::sub(&env, ledger.protocol_claimable_total, amount);
-        VaultClient::new(&env, &storage::get_vault(&env)).transfer_claim(
-            &env.current_contract_address(),
+        ledger::payout_checked(
+            &env,
+            &mut ledger,
+            ledger::Bucket::ProtocolClaimable,
             &recipient,
-            &amount,
-            &ledger.non_lp_claims(&env),
+            amount,
         );
         risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
         storage::save_ledger(&env, &ledger);
@@ -330,11 +330,9 @@ impl PositionManager for PositionManagerContract {
         if amount <= 0 {
             panic_with_error!(&env, PositionManagerError::InvalidAmount);
         }
-        VaultClient::new(&env, &storage::get_vault(&env)).receive_collateral(
-            &env.current_contract_address(),
-            &contributor,
-            &amount,
-        );
+        // Deliberately labels no bucket: a recapitalization is a pure
+        // LP-equity donation.
+        ledger::receive(&env, &contributor, amount);
         let mut ledger = storage::get_ledger(&env);
         checkpoint::checkpoint_global(&env, &mut ledger, env.ledger().timestamp());
         risk::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
