@@ -39,7 +39,7 @@ done
 cat > "$BIND_OUT/package.json" <<'EOF'
 {
   "name": "@win-trader/bindings",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "type": "module",
   "exports": {
     "./vault": "./vault/dist/index.js",
