@@ -1059,6 +1059,8 @@ export interface Client {
    * Construct and simulate a admin_mint transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Admin-only mint for deployment seeding and simulations. This bypasses
    * the public faucet cap and must not be exposed as a user faucet path.
+   * The credit consumes the recipient's one-shot faucet claim: a wallet
+   * funded directly must never also claim the public mint on top.
    */
   admin_mint: ({admin, to, amount}: {admin: string, to: string, amount: i128}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
@@ -1106,6 +1108,14 @@ export interface Client {
   restrictions_active: (options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
 
   /**
+   * Construct and simulate a set_public_mint_cap transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Admin-set faucet cap in whole USD, so weekly competition stakes can
+   * change without redeploying the token. Already-claimed addresses are
+   * unaffected (the claim is one-shot regardless of amount).
+   */
+  set_public_mint_cap: ({admin, cap_usd}: {admin: string, cap_usd: i128}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
    * Construct and simulate a is_protocol_contract transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   is_protocol_contract: ({contract}: {contract: string}, options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
@@ -1143,7 +1153,7 @@ export class Client extends ContractClient {
         "AAAAAAAAAAAAAAAIdHJhbnNmZXIAAAADAAAAAAAAAARmcm9tAAAAEwAAAAAAAAACdG8AAAAAABQAAAAAAAAABmFtb3VudAAAAAAACwAAAAA=",
         "AAAAAAAAAPBSZXR1cm5zIHRoZSBhbW91bnQgb2YgdG9rZW5zIGEgYHNwZW5kZXJgIGlzIGFsbG93ZWQgdG8gc3BlbmQgb24gYmVoYWxmCm9mIGFuIGBvd25lcmAuCgojIEFyZ3VtZW50cwoKKiBgZWAgLSBBY2Nlc3MgdG8gU29yb2JhbiBlbnZpcm9ubWVudC4KKiBgb3duZXJgIC0gVGhlIGFkZHJlc3MgaG9sZGluZyB0aGUgdG9rZW5zLgoqIGBzcGVuZGVyYCAtIFRoZSBhZGRyZXNzIGF1dGhvcml6ZWQgdG8gc3BlbmQgdGhlIHRva2Vucy4AAAAJYWxsb3dhbmNlAAAAAAAAAgAAAAAAAAAFb3duZXIAAAAAAAATAAAAAAAAAAdzcGVuZGVyAAAAABMAAAABAAAACw==",
         "AAAAAAAAAsBEZXN0cm95cyBgYW1vdW50YCBvZiB0b2tlbnMgZnJvbSBgZnJvbWAuIFVwZGF0ZXMgdGhlIHRvdGFsCnN1cHBseSBhY2NvcmRpbmdseS4KCiMgQXJndW1lbnRzCgoqIGBlYCAtIEFjY2VzcyB0byB0aGUgU29yb2JhbiBlbnZpcm9ubWVudC4KKiBgc3BlbmRlcmAgLSBUaGUgYWRkcmVzcyBhdXRob3JpemVkIHRvIGJ1cm4gdGhlIHRva2Vucy4KKiBgZnJvbWAgLSBUaGUgYWNjb3VudCB3aG9zZSB0b2tlbnMgYXJlIGRlc3Ryb3llZC4KKiBgYW1vdW50YCAtIFRoZSBhbW91bnQgb2YgdG9rZW5zIHRvIGJ1cm4uCgojIEVycm9ycwoKKiBbYGNyYXRlOjpmdW5naWJsZTo6RnVuZ2libGVUb2tlbkVycm9yOjpJbnN1ZmZpY2llbnRCYWxhbmNlYF0gLSBXaGVuCmF0dGVtcHRpbmcgdG8gYnVybiBtb3JlIHRva2VucyB0aGFuIGBmcm9tYCBjdXJyZW50IGJhbGFuY2UuCiogW2BjcmF0ZTo6ZnVuZ2libGU6OkZ1bmdpYmxlVG9rZW5FcnJvcjo6SW5zdWZmaWNpZW50QWxsb3dhbmNlYF0gLSBXaGVuCmF0dGVtcHRpbmcgdG8gYnVybiBtb3JlIHRva2VucyB0aGFuIGBmcm9tYCBhbGxvd2FuY2UuCiogW2BjcmF0ZTo6ZnVuZ2libGU6OkZ1bmdpYmxlVG9rZW5FcnJvcjo6TGVzc1RoYW5aZXJvYF0gLSBXaGVuIGBhbW91bnQgPAowYC4KCiMgRXZlbnRzCgoqIHRvcGljcyAtIGBbImJ1cm4iLCBmcm9tOiBBZGRyZXNzXWAKKiBkYXRhIC0gYFthbW91bnQ6IGkxMjhdYAAAAAlidXJuX2Zyb20AAAAAAAADAAAAAAAAAAdzcGVuZGVyAAAAABMAAAAAAAAABGZyb20AAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAA",
-        "AAAAAAAAAIpBZG1pbi1vbmx5IG1pbnQgZm9yIGRlcGxveW1lbnQgc2VlZGluZyBhbmQgc2ltdWxhdGlvbnMuIFRoaXMgYnlwYXNzZXMKdGhlIHB1YmxpYyBmYXVjZXQgY2FwIGFuZCBtdXN0IG5vdCBiZSBleHBvc2VkIGFzIGEgdXNlciBmYXVjZXQgcGF0aC4AAAAAAAphZG1pbl9taW50AAAAAAADAAAAAAAAAAVhZG1pbgAAAAAAABMAAAAAAAAAAnRvAAAAAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAA",
+        "AAAAAAAAAQxBZG1pbi1vbmx5IG1pbnQgZm9yIGRlcGxveW1lbnQgc2VlZGluZyBhbmQgc2ltdWxhdGlvbnMuIFRoaXMgYnlwYXNzZXMKdGhlIHB1YmxpYyBmYXVjZXQgY2FwIGFuZCBtdXN0IG5vdCBiZSBleHBvc2VkIGFzIGEgdXNlciBmYXVjZXQgcGF0aC4KVGhlIGNyZWRpdCBjb25zdW1lcyB0aGUgcmVjaXBpZW50J3Mgb25lLXNob3QgZmF1Y2V0IGNsYWltOiBhIHdhbGxldApmdW5kZWQgZGlyZWN0bHkgbXVzdCBuZXZlciBhbHNvIGNsYWltIHRoZSBwdWJsaWMgbWludCBvbiB0b3AuAAAACmFkbWluX21pbnQAAAAAAAMAAAAAAAAABWFkbWluAAAAAAAAEwAAAAAAAAACdG8AAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAA=",
         "AAAAAAAAACREZXBsb3kgYW5kIGNvbmZpZ3VyZSB0aGUgbW9jayB0b2tlbi4AAAAKaW5pdGlhbGl6ZQAAAAAABAAAAAAAAAAFYWRtaW4AAAAAAAATAAAAAAAAAAhkZWNpbWFscwAAAAQAAAAAAAAABG5hbWUAAAAQAAAAAAAAAAZzeW1ib2wAAAAAABAAAAAA",
         "AAAABAAAAAAAAAAAAAAADk1vY2tUb2tlbkVycm9yAAAAAAAEAAAAAAAAABJBbHJlYWR5SW5pdGlhbGl6ZWQAAAAAAAEAAAAAAAAADFVuYXV0aG9yaXplZAAAAAIAAAAAAAAAD01pbnRDYXBFeGNlZWRlZAAAAAADAAAAAAAAABJUcmFuc2ZlclJlc3RyaWN0ZWQAAAAAAAQ=",
         "AAAAAAAAAGtSZXR1cm5zIHRoZSB0b3RhbCBhbW91bnQgb2YgdG9rZW5zIGluIGNpcmN1bGF0aW9uLgoKIyBBcmd1bWVudHMKCiogYGVgIC0gQWNjZXNzIHRvIHRoZSBTb3JvYmFuIGVudmlyb25tZW50LgAAAAAMdG90YWxfc3VwcGx5AAAAAAAAAAEAAAAL",
@@ -1152,6 +1162,7 @@ export class Client extends ContractClient {
         "AAAAAAAAAAAAAAAPcHVibGljX21pbnRfY2FwAAAAAAAAAAABAAAACw==",
         "AAAAAAAAAHhBY3RpdmF0ZSBwcm90b2NvbC1vbmx5IHRyYW5zZmVyIG1vZGUgYW5kIG1hcmsgdGhlIHR3byBwZXJwcyBjb250cmFjdHMKdGhhdCBtYXkgcmVjZWl2ZSBmcm9tIHVzZXJzIGFuZCBwYXkgYmFjayB0byB1c2Vycy4AAAASY29uZmlndXJlX3Byb3RvY29sAAAAAAADAAAAAAAAAAVhZG1pbgAAAAAAABMAAAAAAAAABXZhdWx0AAAAAAAAEwAAAAAAAAAQcG9zaXRpb25fbWFuYWdlcgAAABMAAAAA",
         "AAAAAAAAAAAAAAATcmVzdHJpY3Rpb25zX2FjdGl2ZQAAAAAAAAAAAQAAAAE=",
+        "AAAAAAAAAMBBZG1pbi1zZXQgZmF1Y2V0IGNhcCBpbiB3aG9sZSBVU0QsIHNvIHdlZWtseSBjb21wZXRpdGlvbiBzdGFrZXMgY2FuCmNoYW5nZSB3aXRob3V0IHJlZGVwbG95aW5nIHRoZSB0b2tlbi4gQWxyZWFkeS1jbGFpbWVkIGFkZHJlc3NlcyBhcmUKdW5hZmZlY3RlZCAodGhlIGNsYWltIGlzIG9uZS1zaG90IHJlZ2FyZGxlc3Mgb2YgYW1vdW50KS4AAAATc2V0X3B1YmxpY19taW50X2NhcAAAAAACAAAAAAAAAAVhZG1pbgAAAAAAABMAAAAAAAAAB2NhcF91c2QAAAAACwAAAAA=",
         "AAAAAAAAAAAAAAAUaXNfcHJvdG9jb2xfY29udHJhY3QAAAABAAAAAAAAAAhjb250cmFjdAAAABMAAAABAAAAAQ==",
         "AAAAAAAAAAAAAAAVc2V0X3Byb3RvY29sX2NvbnRyYWN0AAAAAAAAAwAAAAAAAAAFYWRtaW4AAAAAAAATAAAAAAAAAAhjb250cmFjdAAAABMAAAAAAAAAB2FsbG93ZWQAAAAAAQAAAAA=",
         "AAAAAQAAAAAAAAAAAAAADk93bmVyVG9rZW5zS2V5AAAAAAACAAAAAAAAAAVpbmRleAAAAAAAAAQAAAAAAAAABW93bmVyAAAAAAAAEw==",
@@ -1293,6 +1304,7 @@ export class Client extends ContractClient {
         public_mint_cap: this.txFromJSON<i128>,
         configure_protocol: this.txFromJSON<null>,
         restrictions_active: this.txFromJSON<boolean>,
+        set_public_mint_cap: this.txFromJSON<null>,
         is_protocol_contract: this.txFromJSON<boolean>,
         set_protocol_contract: this.txFromJSON<null>
   }
