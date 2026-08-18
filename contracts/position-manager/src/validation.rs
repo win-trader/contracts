@@ -9,7 +9,9 @@ use shared::{GlobalConfig, MarketConfig};
 use crate::errors::PositionManagerError;
 
 pub fn validate_global(env: &Env, c: &GlobalConfig) {
-    let split = c.lp_revenue_share_bps as u64 + c.risk_keeper_revenue_share_bps as u64;
+    let split = c.lp_revenue_share_bps as u64
+        + c.risk_keeper_revenue_share_bps as u64
+        + c.referral_fee_share_bps as u64;
     if c.min_collateral <= 0
         || c.funding_half_life_seconds < 60
         || c.funding_half_life_seconds > 31_536_000

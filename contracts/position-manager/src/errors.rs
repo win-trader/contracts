@@ -39,4 +39,12 @@ pub enum PositionManagerError {
     OrderNotFound = 26,
     /// `execute_entry_order` called before the trigger price was crossed.
     OrderNotTriggered = 27,
+    /// `register_referral_code` for a code that is already owned.
+    ReferralCodeTaken = 28,
+    /// A referral code failed the length/format bounds.
+    ReferralCodeInvalid = 29,
+    /// `set_referrer` for a code no one has registered.
+    ReferralCodeNotFound = 30,
+    /// A trader tried to set their own code as their referrer.
+    SelfReferral = 31,
 }

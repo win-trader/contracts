@@ -36,10 +36,18 @@ pub struct CollectedFees {
 
 /// §11.4 — split a collected opening or borrow fee between the risk-keeper
 /// reserve, protocol claimable revenue, and (implicitly) residual LP cash.
+///
+/// `referral` is a carve-out already credited to a referrer by the caller
+/// (only nonzero on a referred closing fee, §11.1); it comes purely out of
+/// the protocol slice, so the keeper and LP shares — computed off the full
+/// `collected` — are never diluted. `keeper + lp + protocol + referral ==
+/// collected`, and `protocol ≥ 0` because the validated share sum bounds
+/// `keeper + lp + referral ≤ collected`.
 pub fn split_revenue(
     env: &Env,
     ledger: &mut Ledger,
     collected: i128,
+    referral: i128,
     source: FeeSource,
     position_id: u64,
 ) {
@@ -54,10 +62,23 @@ pub fn split_revenue(
         BPS,
     );
     let lp = math::mul_div_floor(env, collected, config.lp_revenue_share_bps as i128, BPS);
-    let protocol = math::sub(env, math::sub(env, collected, keeper), lp);
+    let protocol = math::sub(
+        env,
+        math::sub(env, math::sub(env, collected, keeper), lp),
+        referral,
+    );
     ledger.credit(env, ledger::Bucket::KeeperReserve, keeper);
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
-    events::emit_revenue_split(env, position_id, source, collected, keeper, lp, protocol);
+    events::emit_revenue_split(
+        env,
+        position_id,
+        source,
+        collected,
+        keeper,
+        lp,
+        protocol,
+        referral,
+    );
 }
 
 /// §11.4 — capitalize all accrued amounts plus `negative_pnl` against the
@@ -114,6 +135,7 @@ pub fn capitalize(
         env,
         ledger,
         borrow_collected,
+        0,
         FeeSource::Borrow,
         position.id,
     );

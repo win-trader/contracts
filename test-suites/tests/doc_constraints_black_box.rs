@@ -110,6 +110,7 @@ mod abi {
         pub min_borrow_index_delta: i128,
         pub lp_revenue_share_bps: u32,
         pub risk_keeper_revenue_share_bps: u32,
+        pub referral_fee_share_bps: u32,
         pub hard_cap_factor_limit_bps: u32,
         pub max_adl_reward: i128,
         pub max_insolvent_touch_reward: i128,
@@ -322,6 +323,13 @@ mod abi {
         fn execute_entry_order(env: Env, caller: Address, order_id: u64);
         fn cancel_entry_order(env: Env, order_id: u64);
         fn get_entry_order(env: Env, order_id: u64) -> EntryOrder;
+        fn register_referral_code(env: Env, owner: Address, code: Symbol);
+        fn set_referrer(env: Env, trader: Address, code: Symbol);
+        fn claim_referral(env: Env, referrer: Address);
+        fn get_referrer(env: Env, trader: Address) -> Option<Address>;
+        fn referral_code_owner(env: Env, code: Symbol) -> Option<Address>;
+        fn referral_balance(env: Env, referrer: Address) -> i128;
+        fn referral_claimable_total(env: Env) -> i128;
         fn update_indices(env: Env, caller: Address, market: Symbol);
         fn set_global_config(env: Env, caller: Address, config: GlobalConfig);
         fn set_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
@@ -452,6 +460,10 @@ impl Protocol {
     fn new() -> Self {
         let env = Env::default();
         env.mock_all_auths();
+        // These are functional (behavioral) tests, not metering tests: uploading
+        // the full unoptimized WASMs for the whole protocol would otherwise
+        // exhaust the host's default CPU budget at `register` time.
+        env.cost_estimate().budget().reset_unlimited();
         env.ledger().with_mut(|ledger| {
             ledger.timestamp = START_TIME;
             ledger.sequence_number = 1;
@@ -580,6 +592,7 @@ impl Protocol {
             min_borrow_index_delta: 0,
             lp_revenue_share_bps: 7_000,
             risk_keeper_revenue_share_bps: 1_000,
+            referral_fee_share_bps: 500,
             hard_cap_factor_limit_bps: 10_000,
             max_adl_reward: 100 * UNIT,
             max_insolvent_touch_reward: 100 * UNIT,
@@ -2950,7 +2963,10 @@ fn p13_capacity_gate_boundary_accept_and_reject() {
     let (past_limit, accepted) = attempt(boundary_deposit - 1);
     assert!(accepted == false, "one stroop past the limit is rejected");
     let market = past_limit.manager().get_market(&past_limit.market);
-    assert_eq!(market.long.size_open_interest, 0, "rejection must not mutate");
+    assert_eq!(
+        market.long.size_open_interest, 0,
+        "rejection must not mutate"
+    );
     assert_eq!(market.long.risk_units, 0);
     assert_eq!(past_limit.snapshot().total_risk_units, 0);
 }
@@ -2979,8 +2995,7 @@ fn r16_receiver_liability_floors_with_carried_remainder() {
     p.advance(997);
     p.refresh_price();
     manager.update_indices(&p.keeper, &p.market);
-    let first_delta =
-        manager.get_market(&p.market).receiver_backed_index_long - index_start;
+    let first_delta = manager.get_market(&p.market).receiver_backed_index_long - index_start;
     let first = manager.pending_receiver_funding_total() - start;
     assert!(first_delta > 0);
     assert_eq!(
@@ -2994,8 +3009,7 @@ fn r16_receiver_liability_floors_with_carried_remainder() {
     p.advance(1_003);
     p.refresh_price();
     manager.update_indices(&p.keeper, &p.market);
-    let total_delta =
-        manager.get_market(&p.market).receiver_backed_index_long - index_start;
+    let total_delta = manager.get_market(&p.market).receiver_backed_index_long - index_start;
     let total = manager.pending_receiver_funding_total() - start;
     assert_eq!(total, floor_div(payer_size * total_delta, INDEX_PRECISION));
 }
@@ -3616,7 +3630,13 @@ fn slipped_entry_order_stays_pending() {
     p.token()
         .approve(&p.trader_a, &p.vault_id, &collateral, &500_000);
     // acceptable 105 < fill price 110.
-    let params = long_entry(10_000 * UNIT, collateral, 105 * UNIT, 110 * UNIT, 1_000_000_000);
+    let params = long_entry(
+        10_000 * UNIT,
+        collateral,
+        105 * UNIT,
+        110 * UNIT,
+        1_000_000_000,
+    );
     let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
 
     p.advance(31);
@@ -3640,7 +3660,13 @@ fn unfundable_entry_order_is_removed() {
     let manager = p.manager();
 
     // No allowance granted.
-    let params = long_entry(10_000 * UNIT, 3_000 * UNIT, 115 * UNIT, 110 * UNIT, 1_000_000_000);
+    let params = long_entry(
+        10_000 * UNIT,
+        3_000 * UNIT,
+        115 * UNIT,
+        110 * UNIT,
+        1_000_000_000,
+    );
     let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
 
     p.advance(31);
@@ -3662,7 +3688,13 @@ fn expired_entry_order_is_swept() {
     let manager = p.manager();
 
     let expires_at = p.env.ledger().timestamp() + 100;
-    let params = long_entry(10_000 * UNIT, 3_000 * UNIT, 115 * UNIT, 110 * UNIT, expires_at);
+    let params = long_entry(
+        10_000 * UNIT,
+        3_000 * UNIT,
+        115 * UNIT,
+        110 * UNIT,
+        expires_at,
+    );
     let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
 
     p.advance(200); // past expiry
@@ -3679,10 +3711,206 @@ fn owner_cancels_pending_entry_order() {
     p.seed_lp();
     let manager = p.manager();
 
-    let params = long_entry(10_000 * UNIT, 3_000 * UNIT, 115 * UNIT, 110 * UNIT, 1_000_000_000);
+    let params = long_entry(
+        10_000 * UNIT,
+        3_000 * UNIT,
+        115 * UNIT,
+        110 * UNIT,
+        1_000_000_000,
+    );
     let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
     assert_eq!(manager.get_entry_order(&order_id).id, order_id);
 
     manager.cancel_entry_order(&order_id);
     assert!(manager.try_get_entry_order(&order_id).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Referrals (§11.1)
+// ---------------------------------------------------------------------------
+
+/// Open a long, move price up 20%, and full-close it in profit — the close
+/// charges a closing fee that splits into the revenue shares. With `refer`
+/// set, trader_a is attached to trader_b's code first. Borrow and funding are
+/// zeroed so the closing fee is the only revenue, and both branches run the
+/// identical deterministic timeline. Returns
+/// `(risk_keeper_reserve, protocol_claimable, referral_claimable)`.
+fn winning_close_revenue(refer: bool) -> (i128, i128, i128) {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    if refer {
+        let code = Symbol::new(&p.env, "victor");
+        manager.register_referral_code(&p.trader_b, &code);
+        manager.set_referrer(&p.trader_a, &code);
+    }
+
+    let id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(31);
+    p.set_price(120 * UNIT);
+    p.publish_round();
+    p.close(id);
+
+    (
+        manager.risk_keeper_reserve_total(),
+        manager.protocol_claimable_total(),
+        manager.referral_claimable_total(),
+    )
+}
+
+/// The referral reward comes purely out of the protocol slice: the keeper and
+/// LP shares are computed off the full closing fee and are untouched, so the
+/// protocol claim drops by exactly the referral and nothing else moves.
+#[test]
+fn referral_is_carved_from_the_protocol_slice_only() {
+    let (keeper_base, protocol_base, referral_base) = winning_close_revenue(false);
+    let (keeper_ref, protocol_ref, referral_ref) = winning_close_revenue(true);
+
+    // No referrer → no referral accrues; the same close with a referrer does.
+    assert_eq!(referral_base, 0);
+    assert!(referral_ref > 0);
+    // Keeper share identical (computed off the full fee, never diluted).
+    assert_eq!(keeper_ref, keeper_base);
+    // The referral is carved entirely from what would have been protocol
+    // revenue; the LP share (residual) is likewise unaffected.
+    assert_eq!(protocol_ref, protocol_base - referral_ref);
+}
+
+/// The referral bucket is a non-LP claim: it sits inside `non_lp_claims` and
+/// is excluded from LP equity/NAV. Paying it out drops physical cash and the
+/// claims total by the same amount, so equity and NAV are unchanged — proving
+/// the referral was never counted as LP money.
+#[test]
+fn referral_claim_does_not_touch_lp_nav() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let code = Symbol::new(&p.env, "victor");
+    manager.register_referral_code(&p.trader_b, &code);
+    manager.set_referrer(&p.trader_a, &code);
+
+    let id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(31);
+    p.set_price(120 * UNIT);
+    p.publish_round();
+    p.close(id);
+
+    let referral = manager.referral_balance(&p.trader_b);
+    assert!(referral > 0);
+    assert_eq!(manager.referral_claimable_total(), referral);
+
+    // Before the claim: the referral is inside non-LP claims, and the
+    // conservation identity holds.
+    let before = p.fresh_snapshot();
+    assert!(before.non_lp_claims >= referral);
+    assert_eq!(
+        before.physical_cash,
+        before.non_lp_claims + before.cash_lp_equity
+    );
+
+    // Claim pays the referrer their full balance out of the vault.
+    let bal_before = p.token().balance(&p.trader_b);
+    manager.claim_referral(&p.trader_b);
+    assert_eq!(p.token().balance(&p.trader_b) - bal_before, referral);
+    assert_eq!(manager.referral_balance(&p.trader_b), 0);
+    assert_eq!(manager.referral_claimable_total(), 0);
+
+    // After the claim: physical and claims both fell by the referral, so LP
+    // equity and NAV are unchanged — the referral never inflated them.
+    let after = p.fresh_snapshot();
+    assert_eq!(after.cash_lp_equity, before.cash_lp_equity);
+    assert_eq!(after.vault_nav, before.vault_nav);
+    assert_eq!(after.non_lp_claims, before.non_lp_claims - referral);
+    assert_eq!(after.physical_cash, before.physical_cash - referral);
+    assert_eq!(
+        after.physical_cash,
+        after.non_lp_claims + after.cash_lp_equity
+    );
+}
+
+/// A losing close pays no closing fee, so a referred loser accrues nothing to
+/// their referrer.
+#[test]
+fn referred_loser_accrues_no_referral() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let code = Symbol::new(&p.env, "victor");
+    manager.register_referral_code(&p.trader_b, &code);
+    manager.set_referrer(&p.trader_a, &code);
+
+    let id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(31);
+    p.set_price(90 * UNIT); // a loss
+    p.publish_round();
+    p.close(id);
+
+    assert_eq!(manager.referral_balance(&p.trader_b), 0);
+    assert_eq!(manager.referral_claimable_total(), 0);
+}
+
+/// Code registration and referrer-set guards: codes are unique, unknown codes
+/// are rejected, and a trader cannot refer themselves.
+#[test]
+fn referral_code_guards() {
+    let p = Protocol::new();
+    let manager = p.manager();
+
+    let code = Symbol::new(&p.env, "alpha");
+    manager.register_referral_code(&p.trader_b, &code);
+    assert_eq!(manager.referral_code_owner(&code), Some(p.trader_b.clone()));
+
+    // A taken code cannot be re-registered.
+    assert!(manager
+        .try_register_referral_code(&p.trader_a, &code)
+        .is_err());
+    // A trader cannot set their own code as their referrer.
+    assert!(manager.try_set_referrer(&p.trader_b, &code).is_err());
+    // An unregistered code cannot be attached.
+    let ghost = Symbol::new(&p.env, "ghost");
+    assert!(manager.try_set_referrer(&p.trader_a, &ghost).is_err());
+
+    // A valid attach resolves the code to its owner.
+    manager.set_referrer(&p.trader_a, &code);
+    assert_eq!(manager.get_referrer(&p.trader_a), Some(p.trader_b.clone()));
+}
+
+/// A trader may freely change their referrer; the referrer in force at close
+/// time is the one credited.
+#[test]
+fn referrer_is_freely_changeable() {
+    let p = Protocol::new();
+    p.disable_borrow();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let ref2 = Address::generate(&p.env);
+    let code_b = Symbol::new(&p.env, "bbb");
+    let code_c = Symbol::new(&p.env, "ccc");
+    manager.register_referral_code(&p.trader_b, &code_b);
+    manager.register_referral_code(&ref2, &code_c);
+
+    manager.set_referrer(&p.trader_a, &code_b);
+    manager.set_referrer(&p.trader_a, &code_c); // change wins
+    assert_eq!(manager.get_referrer(&p.trader_a), Some(ref2.clone()));
+
+    let id = p.open(&p.trader_a, true, 10_000 * UNIT, 3_000 * UNIT);
+    p.advance(31);
+    p.set_price(120 * UNIT);
+    p.publish_round();
+    p.close(id);
+
+    // Only the current referrer is credited.
+    assert!(manager.referral_balance(&ref2) > 0);
+    assert_eq!(manager.referral_balance(&p.trader_b), 0);
 }

@@ -201,6 +201,11 @@ pub struct GlobalConfig {
     pub min_borrow_index_delta: i128,
     pub lp_revenue_share_bps: u32,
     pub risk_keeper_revenue_share_bps: u32,
+    /// §11.1 share of a closing fee routed to the trader's referrer, carved
+    /// from the protocol slice (keeper and LP shares are untouched). `0`
+    /// disables referral accrual globally — a kill switch. Validated so
+    /// `lp + keeper + referral ≤ BPS`, keeping the protocol remainder ≥ 0.
+    pub referral_fee_share_bps: u32,
     pub hard_cap_factor_limit_bps: u32,
     pub max_adl_reward: i128,
     pub max_insolvent_touch_reward: i128,

@@ -118,6 +118,31 @@ pub trait PositionManager {
     /// Read a pending entry order (panics `OrderNotFound` if absent).
     fn get_entry_order(env: Env, order_id: u64) -> EntryOrder;
 
+    /// Register a referral code (owner). First-come; the code owner is
+    /// immutable, and one address may own several codes. Panics
+    /// `ReferralCodeTaken` if the code exists.
+    fn register_referral_code(env: Env, owner: Address, code: Symbol);
+
+    /// Point the caller at a referrer via that referrer's code (§11.1).
+    /// Freely re-settable; a trader cannot refer themselves.
+    fn set_referrer(env: Env, trader: Address, code: Symbol);
+
+    /// Withdraw the caller's accrued referral rewards (§11.1).
+    /// Conservation-checked, so it is blocked during a cash shortfall.
+    fn claim_referral(env: Env, referrer: Address);
+
+    /// The referrer a trader is attached to, if any.
+    fn get_referrer(env: Env, trader: Address) -> Option<Address>;
+
+    /// The owner of a referral code, if it is registered.
+    fn referral_code_owner(env: Env, code: Symbol) -> Option<Address>;
+
+    /// A referrer's accrued unclaimed referral rewards.
+    fn referral_balance(env: Env, referrer: Address) -> i128;
+
+    /// Total accrued unclaimed referral rewards across all referrers.
+    fn referral_claimable_total(env: Env) -> i128;
+
     /// Checkpoint the global indices and one market's funding indices to
     /// now (KEEPER, §10). Fee accrual is lazy; this bounds staleness.
     fn update_indices(env: Env, caller: Address, market: Symbol);

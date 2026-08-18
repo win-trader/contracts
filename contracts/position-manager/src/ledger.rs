@@ -34,6 +34,11 @@ pub struct Ledger {
     pub execution_budget_total: i128,
     pub protocol_claimable_total: i128,
     pub risk_keeper_reserve_total: i128,
+    /// §11.1 referral rewards accrued but not yet claimed — the aggregate
+    /// backing the per-referrer `ReferralBalance` map (their sum is this
+    /// total). Like every claim here it is a label on cash already in the
+    /// vault, so NAV and the solvency checks net it out automatically.
+    pub referral_claimable_total: i128,
     // -- Risk counters. --
     pub total_risk_units: i128,
     pub open_position_count: u64,
@@ -54,6 +59,7 @@ impl Ledger {
             execution_budget_total: 0,
             protocol_claimable_total: 0,
             risk_keeper_reserve_total: 0,
+            referral_claimable_total: 0,
             total_risk_units: 0,
             open_position_count: 0,
             lp_blocked_side_count: 0,
@@ -70,7 +76,8 @@ impl Ledger {
         total = math::add(env, total, self.pending_receiver_funding_total);
         total = math::add(env, total, self.execution_budget_total);
         total = math::add(env, total, self.protocol_claimable_total);
-        math::add(env, total, self.risk_keeper_reserve_total)
+        total = math::add(env, total, self.risk_keeper_reserve_total);
+        math::add(env, total, self.referral_claimable_total)
     }
 
     /// §4.3 — `max(physical_cash - non_lp_claims, 0)`, never stored.
@@ -114,6 +121,7 @@ pub enum Bucket {
     ExecutionBudget,
     ProtocolClaimable,
     KeeperReserve,
+    Referral,
 }
 
 impl Ledger {
@@ -123,6 +131,7 @@ impl Ledger {
             Bucket::ExecutionBudget => &mut self.execution_budget_total,
             Bucket::ProtocolClaimable => &mut self.protocol_claimable_total,
             Bucket::KeeperReserve => &mut self.risk_keeper_reserve_total,
+            Bucket::Referral => &mut self.referral_claimable_total,
         }
     }
 

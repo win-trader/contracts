@@ -21,6 +21,7 @@ use crate::events::FeeSource;
 use crate::fees::{self, CollectedFees};
 use crate::funding;
 use crate::ledger::{self, Ledger};
+use crate::referral;
 use crate::risk;
 use crate::{events, math, storage};
 
@@ -270,10 +271,20 @@ impl<'a> Settlement<'a> {
             self.market.side_mut(is_long),
             fee,
         );
+        // §11.1 — a referred trader diverts a share of the closing fee to
+        // their referrer, carved from the protocol slice only.
+        let referral = referral::accrue_from_close(
+            self.env,
+            self.ledger,
+            &self.position.owner,
+            self.closing_fee,
+            self.position.id,
+        );
         fees::split_revenue(
             self.env,
             self.ledger,
             self.closing_fee,
+            referral,
             FeeSource::Closing,
             self.position.id,
         );

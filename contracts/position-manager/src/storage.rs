@@ -31,6 +31,13 @@ pub enum StorageKey {
     MarketDisabled(Symbol),
     EntryOrder(u64),
     NextEntryOrderId,
+    /// Referral code → owning referrer address (owner immutable once set).
+    ReferralCode(Symbol),
+    /// Trader → their referrer address (freely re-set by the trader).
+    Referrer(Address),
+    /// Referrer → accrued unclaimed referral rewards. The per-referrer
+    /// allocation of `Ledger::referral_claimable_total`.
+    ReferralBalance(Address),
 }
 
 pub fn is_paused(env: &Env) -> bool {
@@ -103,6 +110,56 @@ pub fn save_next_entry_order_id(env: &Env, id: u64) {
 
 pub fn update_entry_order_id(env: &Env) {
     save_next_entry_order_id(env, get_next_entry_order_id(env) + 1);
+}
+
+// REFERRAL
+//
+// Three persistent maps. `ReferralBalance` and `ReferralCode`/`Referrer`
+// entries are archived (not deleted) if their TTL lapses, and are
+// restorable — so an unclaimed balance can never be lost, only deferred.
+// Every write bumps the TTL.
+
+pub fn try_get_referral_code_owner(env: &Env, code: &Symbol) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::ReferralCode(code.clone()))
+}
+
+pub fn save_referral_code_owner(env: &Env, code: &Symbol, owner: &Address) {
+    let key = StorageKey::ReferralCode(code.clone());
+    env.storage().persistent().set(&key, owner);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+}
+
+pub fn get_referrer(env: &Env, trader: &Address) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::Referrer(trader.clone()))
+}
+
+pub fn save_referrer(env: &Env, trader: &Address, referrer: &Address) {
+    let key = StorageKey::Referrer(trader.clone());
+    env.storage().persistent().set(&key, referrer);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+}
+
+pub fn get_referral_balance(env: &Env, referrer: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::ReferralBalance(referrer.clone()))
+        .unwrap_or(0)
+}
+
+pub fn save_referral_balance(env: &Env, referrer: &Address, amount: i128) {
+    let key = StorageKey::ReferralBalance(referrer.clone());
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
 }
 
 // MARKET

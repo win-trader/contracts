@@ -91,6 +91,7 @@ mod abi {
         pub min_borrow_index_delta: i128,
         pub lp_revenue_share_bps: u32,
         pub risk_keeper_revenue_share_bps: u32,
+        pub referral_fee_share_bps: u32,
         pub hard_cap_factor_limit_bps: u32,
         pub max_adl_reward: i128,
         pub max_insolvent_touch_reward: i128,
@@ -350,6 +351,10 @@ impl Protocol {
     fn new() -> Self {
         let env = Env::default();
         env.mock_all_auths();
+        // Functional tests, not metering tests: uploading the full unoptimized
+        // protocol WASMs would otherwise exhaust the host's default CPU budget
+        // at `register` time.
+        env.cost_estimate().budget().reset_unlimited();
         env.ledger().with_mut(|ledger| {
             ledger.timestamp = START_TIME;
             ledger.sequence_number = 1;
@@ -420,6 +425,7 @@ impl Protocol {
                     min_borrow_index_delta: 0,
                     lp_revenue_share_bps: 7_000,
                     risk_keeper_revenue_share_bps: 1_000,
+                    referral_fee_share_bps: 500,
                     hard_cap_factor_limit_bps: 10_000,
                     max_adl_reward: 100 * UNIT,
                     max_insolvent_touch_reward: 100 * UNIT,
@@ -552,6 +558,7 @@ impl Protocol {
                 min_borrow_index_delta: 0,
                 lp_revenue_share_bps: 7_000,
                 risk_keeper_revenue_share_bps: 1_000,
+                referral_fee_share_bps: 500,
                 hard_cap_factor_limit_bps: 10_000,
                 max_adl_reward: 100 * UNIT,
                 max_insolvent_touch_reward: 100 * UNIT,
@@ -633,10 +640,7 @@ fn closing_fee_uses_high_tier_for_worse_skew_and_low_tier_for_better_skew() {
     // Opens charge nothing regardless of skew.
     let long_id = p.open(&p.trader_a, true, 1_000 * UNIT, 300 * UNIT);
     let short_id = p.open(&p.trader_b, false, 4_000 * UNIT, 1_200 * UNIT);
-    assert_eq!(
-        manager.get_position(&long_id).stored_collateral,
-        300 * UNIT
-    );
+    assert_eq!(manager.get_position(&long_id).stored_collateral, 300 * UNIT);
 
     // 100 -> 90: the short is in profit. Halving the dominant short side
     // improves skew 6_000 -> 3_333, so the winner pays the low tier:
