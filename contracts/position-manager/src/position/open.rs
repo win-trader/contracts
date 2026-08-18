@@ -14,18 +14,29 @@ fn require_valid_input(env: &Env, size: i128, collateral: i128, execution_budget
     }
 }
 
-fn require_sufficient_collateral(
+pub(crate) fn require_valid_open_input(
     env: &Env,
-    position: &Position,
+    size: i128,
+    collateral: i128,
+    execution_budget: i128,
+) {
+    require_valid_input(env, size, collateral, execution_budget);
+}
+
+/// §12.3 — the collateral a position of `size` needs to open: at least the
+/// global minimum and at least the initial margin. Price-independent (the
+/// requirement is a share of notional), so it is checked identically at a
+/// market open and when placing an entry order.
+pub(crate) fn require_sufficient_collateral(
+    env: &Env,
+    collateral: i128,
     market_config: &MarketConfig,
     size: i128,
 ) {
-    let min_collateral = storage::get_global_config(&env).min_collateral;
-    let risk_requirement = risk::initial_requirement(&env, size, market_config);
-
-    if position.stored_collateral < min_collateral || position.stored_collateral < risk_requirement
-    {
-        panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
+    let min_collateral = storage::get_global_config(env).min_collateral;
+    let risk_requirement = risk::initial_requirement(env, size, market_config);
+    if collateral < min_collateral || collateral < risk_requirement {
+        panic_with_error!(env, PositionManagerError::InsufficientCollateral);
     }
 }
 
@@ -60,10 +71,52 @@ pub fn open_position(
     check_slippage(&env, is_long, true, price, acceptable_price);
     validate_orders(&env, is_long, take_profit, stop_loss, price);
 
+    // Market open: the owner is present, so pull collateral + budget from
+    // them directly. The fill path pulls via allowance instead, then joins
+    // the shared core below.
     let total_transfer = math::add(&env, collateral, execution_budget);
-
     ledger::receive(&env, &owner, total_transfer);
 
+    open_from_collateral(
+        env,
+        ledger,
+        market,
+        owner,
+        market_symbol,
+        is_long,
+        size,
+        collateral,
+        execution_budget,
+        take_profit,
+        stop_loss,
+        price,
+        now,
+    )
+}
+
+/// The shared open core, from "the cash is already in the vault" onward:
+/// label the funds, build and store the position, run every risk gate, and
+/// emit the open event. Used by both the market `open_position` (after a
+/// direct `ledger::receive`) and the entry-order fill (after an allowance
+/// pull). The `RiskState::Normal` gate, capacity, and market-limit checks
+/// panic on violation — a full transaction rollback that returns the
+/// already-pulled cash.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_from_collateral(
+    env: Env,
+    mut ledger: crate::ledger::Ledger,
+    mut market: shared::Market,
+    owner: Address,
+    market_symbol: Symbol,
+    is_long: bool,
+    size: i128,
+    collateral: i128,
+    execution_budget: i128,
+    take_profit: i128,
+    stop_loss: i128,
+    price: i128,
+    now: u64,
+) -> u64 {
     ledger.credit(&env, ledger::Bucket::ExecutionBudget, execution_budget);
 
     let position_id = storage::get_next_position_id(&env);
@@ -98,7 +151,7 @@ pub fn open_position(
         collateral,
     );
 
-    require_sufficient_collateral(&env, &position, &market.config, size);
+    require_sufficient_collateral(&env, position.stored_collateral, &market.config, size);
 
     let physical = ledger::physical_cash(&env);
     let equity = ledger.cash_lp_equity(&env, physical);

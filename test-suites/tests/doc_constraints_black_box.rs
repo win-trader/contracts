@@ -248,6 +248,38 @@ mod abi {
         fn set_oracle_config(env: Env, caller: Address, config: OracleConfig);
     }
 
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct EntryOrderParams {
+        pub is_long: bool,
+        pub size: i128,
+        pub collateral: i128,
+        pub execution_budget: i128,
+        pub take_profit: i128,
+        pub stop_loss: i128,
+        pub acceptable_price: i128,
+        pub trigger_price: i128,
+        pub expires_at: u64,
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    pub struct EntryOrder {
+        pub id: u64,
+        pub owner: Address,
+        pub market: Symbol,
+        pub is_long: bool,
+        pub size: i128,
+        pub collateral: i128,
+        pub execution_budget: i128,
+        pub take_profit: i128,
+        pub stop_loss: i128,
+        pub acceptable_price: i128,
+        pub trigger_price: i128,
+        pub trigger_above: bool,
+        pub expires_at: u64,
+    }
+
     #[contractclient(name = "PositionManagerClient")]
     pub trait PositionManager {
         fn set_vault(env: Env, caller: Address, vault: Address);
@@ -281,6 +313,15 @@ mod abi {
         fn deleverage_position(env: Env, caller: Address, position_id: u64);
         fn fund_execution_budget(env: Env, position_id: u64, amount: i128);
         fn withdraw_execution_budget(env: Env, position_id: u64, amount: i128);
+        fn place_entry_order(
+            env: Env,
+            owner: Address,
+            market: Symbol,
+            params: EntryOrderParams,
+        ) -> u64;
+        fn execute_entry_order(env: Env, caller: Address, order_id: u64);
+        fn cancel_entry_order(env: Env, order_id: u64);
+        fn get_entry_order(env: Env, order_id: u64) -> EntryOrder;
         fn update_indices(env: Env, caller: Address, market: Symbol);
         fn set_global_config(env: Env, caller: Address, config: GlobalConfig);
         fn set_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
@@ -338,7 +379,9 @@ mod oracle_router {
 }
 
 mod position_manager {
-    pub use super::abi::{GlobalConfig, MarketConfig, PositionManagerClient as Client};
+    pub use super::abi::{
+        EntryOrder, EntryOrderParams, GlobalConfig, MarketConfig, PositionManagerClient as Client,
+    };
     pub const WASM: &[u8] =
         include_bytes!("../../target/wasm32v1-none/release/position_manager.wasm");
 }
@@ -3492,4 +3535,154 @@ fn min_borrow_index_delta_is_bounded_above() {
         manager.try_set_global_config(&p.admin, &cfg).is_err(),
         "min_borrow_index_delta above INDEX_PRECISION must be rejected"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Limit / stop entry orders (§12.4)
+// ---------------------------------------------------------------------------
+
+/// Build a long stop/breakout entry: fills when price rises to `trigger`.
+fn long_entry(
+    size: i128,
+    collateral: i128,
+    acceptable: i128,
+    trigger: i128,
+    expires_at: u64,
+) -> position_manager::EntryOrderParams {
+    position_manager::EntryOrderParams {
+        is_long: true,
+        size,
+        collateral,
+        execution_budget: 0,
+        take_profit: 120 * UNIT,
+        stop_loss: 105 * UNIT,
+        acceptable_price: acceptable,
+        trigger_price: trigger,
+        expires_at,
+    }
+}
+
+/// Happy path: an entry order pulls collateral via the allowance and opens a
+/// position indistinguishable from a market open (TP/SL applied,
+/// last_increased_time = fill time); the order record is removed.
+#[test]
+fn entry_order_fills_like_a_market_open() {
+    let p = Protocol::new();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let size = 10_000 * UNIT;
+    let collateral = 3_000 * UNIT;
+    p.token()
+        .approve(&p.trader_a, &p.vault_id, &collateral, &500_000);
+    let params = long_entry(size, collateral, 115 * UNIT, 110 * UNIT, 1_000_000_000);
+    let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
+
+    let balance_before = p.token().balance(&p.trader_a);
+    // Not triggered at price 100.
+    assert!(manager
+        .try_execute_entry_order(&p.keeper, &order_id)
+        .is_err());
+
+    // Cross the trigger and fill.
+    p.advance(31);
+    p.set_price(110 * UNIT);
+    p.publish_round();
+    let fill_time = p.env.ledger().timestamp();
+    manager.execute_entry_order(&p.keeper, &order_id);
+
+    assert_eq!(p.token().balance(&p.trader_a), balance_before - collateral);
+    assert!(manager.try_get_entry_order(&order_id).is_err());
+    let pos = manager.get_position(&1);
+    assert!(pos.is_long);
+    assert_eq!(pos.size, size);
+    assert_eq!(pos.stored_collateral, collateral);
+    assert_eq!(pos.take_profit, 120 * UNIT);
+    assert_eq!(pos.stop_loss, 105 * UNIT);
+    assert_eq!(pos.last_increased_time, fill_time);
+}
+
+/// A fill whose price would breach the acceptable bound (a gap past the
+/// trigger) reverts and leaves the order pending, with no funds pulled.
+#[test]
+fn slipped_entry_order_stays_pending() {
+    let p = Protocol::new();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let collateral = 3_000 * UNIT;
+    p.token()
+        .approve(&p.trader_a, &p.vault_id, &collateral, &500_000);
+    // acceptable 105 < fill price 110.
+    let params = long_entry(10_000 * UNIT, collateral, 105 * UNIT, 110 * UNIT, 1_000_000_000);
+    let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
+
+    p.advance(31);
+    p.set_price(110 * UNIT);
+    p.publish_round();
+    let balance_before = p.token().balance(&p.trader_a);
+    assert!(manager
+        .try_execute_entry_order(&p.keeper, &order_id)
+        .is_err());
+    assert_eq!(p.token().balance(&p.trader_a), balance_before);
+    assert_eq!(manager.get_entry_order(&order_id).id, order_id);
+}
+
+/// An order whose collateral can't be pulled (no/revoked allowance) is
+/// removed on the fill attempt — no panic, no position, no funds moved.
+#[test]
+fn unfundable_entry_order_is_removed() {
+    let p = Protocol::new();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    // No allowance granted.
+    let params = long_entry(10_000 * UNIT, 3_000 * UNIT, 115 * UNIT, 110 * UNIT, 1_000_000_000);
+    let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
+
+    p.advance(31);
+    p.set_price(110 * UNIT);
+    p.publish_round();
+    let balance_before = p.token().balance(&p.trader_a);
+    manager.execute_entry_order(&p.keeper, &order_id); // no panic
+    assert_eq!(p.token().balance(&p.trader_a), balance_before);
+    assert!(manager.try_get_entry_order(&order_id).is_err());
+    assert!(manager.try_get_position(&1).is_err());
+}
+
+/// A past-expiry order is swept (removed) on the next fill attempt.
+#[test]
+fn expired_entry_order_is_swept() {
+    let p = Protocol::new();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let expires_at = p.env.ledger().timestamp() + 100;
+    let params = long_entry(10_000 * UNIT, 3_000 * UNIT, 115 * UNIT, 110 * UNIT, expires_at);
+    let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
+
+    p.advance(200); // past expiry
+    manager.execute_entry_order(&p.keeper, &order_id); // no panic, swept
+    assert!(manager.try_get_entry_order(&order_id).is_err());
+    assert!(manager.try_get_position(&1).is_err());
+}
+
+/// The owner can cancel a pending order; the record is removed.
+#[test]
+fn owner_cancels_pending_entry_order() {
+    let p = Protocol::new();
+    p.disable_funding();
+    p.seed_lp();
+    let manager = p.manager();
+
+    let params = long_entry(10_000 * UNIT, 3_000 * UNIT, 115 * UNIT, 110 * UNIT, 1_000_000_000);
+    let order_id = manager.place_entry_order(&p.trader_a, &p.market, &params);
+    assert_eq!(manager.get_entry_order(&order_id).id, order_id);
+
+    manager.cancel_entry_order(&order_id);
+    assert!(manager.try_get_entry_order(&order_id).is_err());
 }

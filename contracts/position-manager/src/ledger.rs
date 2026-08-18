@@ -245,6 +245,14 @@ pub fn receive(env: &Env, from: &Address, amount: i128) {
     vault(env).receive_collateral(&env.current_contract_address(), from, &amount);
 }
 
+/// Boundary move in via `from`'s pre-granted token allowance (entry-order
+/// fills). Returns `false` without panicking if the pull fails, so the
+/// caller can drop the dead order and commit. Labeling stays with the
+/// caller, as with `receive`.
+pub fn receive_via_allowance(env: &Env, from: &Address, amount: i128) -> bool {
+    vault(env).pull_from_allowance(&env.current_contract_address(), from, &amount)
+}
+
 // ---------------------------------------------------------------------------
 // Stored-collateral choke point.
 //

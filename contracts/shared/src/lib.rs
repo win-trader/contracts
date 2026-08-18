@@ -21,9 +21,10 @@ pub use oracle_router::{OracleRouter, OracleRouterClient};
 pub use position_manager::{PositionManager, PositionManagerClient};
 pub use request_router::{RequestRouter, RequestRouterClient};
 pub use types::{
-    AccountingSnapshot, FundingIndices, GlobalConfig, LpConfig, LpRequest, LpRequestKind,
-    LpRequestStatus, Market, MarketConfig, MarketSide, MigrationData, OracleConfig, OracleRound,
-    PayerSide, PendingUpgrade, Position, RiskState, RoundPrice, SettlementResult, SettlementStatus,
+    AccountingSnapshot, EntryOrder, EntryOrderParams, FundingIndices, GlobalConfig, LpConfig,
+    LpRequest, LpRequestKind, LpRequestStatus, Market, MarketConfig, MarketSide, MigrationData,
+    OracleConfig, OracleRound, PayerSide, PendingUpgrade, Position, RiskState, RoundPrice,
+    SettlementResult, SettlementStatus,
 };
 pub use upgrade::{TimelockedUpgradeable, UpgradeFailure};
 pub use vault::{VaultClient, VaultInterface};

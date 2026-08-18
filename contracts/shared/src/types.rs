@@ -53,6 +53,55 @@ pub struct Position {
     pub stop_loss: i128,
 }
 
+/// The caller-supplied fields of a `place_entry_order` request, bundled so
+/// the entry point stays within Soroban's parameter limit. `owner` and
+/// `market` are passed alongside; `id` and `trigger_above` are derived at
+/// placement.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EntryOrderParams {
+    pub is_long: bool,
+    pub size: i128,
+    pub collateral: i128,
+    pub execution_budget: i128,
+    pub take_profit: i128,
+    pub stop_loss: i128,
+    pub acceptable_price: i128,
+    pub trigger_price: i128,
+    pub expires_at: u64,
+}
+
+/// A pending limit/stop entry order: the frozen `open_position` arguments
+/// plus a trigger condition and an expiry. Placing one only writes this
+/// record — no funds move. A keeper's `execute_entry_order` pulls the
+/// collateral via the owner's token allowance and opens the position
+/// exactly as a market open would.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EntryOrder {
+    pub id: u64,
+    pub owner: Address,
+    pub market: Symbol,
+    pub is_long: bool,
+    // --- frozen open_position arguments ---
+    pub size: i128,
+    pub collateral: i128,
+    pub execution_budget: i128,
+    pub take_profit: i128,
+    pub stop_loss: i128,
+    pub acceptable_price: i128,
+    // --- trigger + lifetime ---
+    /// The oracle price at which the order becomes fillable.
+    pub trigger_price: i128,
+    /// True → fill when price ≥ trigger (stop/breakout entry); false → fill
+    /// when price ≤ trigger (limit/dip entry). Inferred at placement from
+    /// the trigger vs. the current price.
+    pub trigger_above: bool,
+    /// Ledger timestamp after which the order is dead and swept on the next
+    /// touch (user-configurable max TTL).
+    pub expires_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RiskState {

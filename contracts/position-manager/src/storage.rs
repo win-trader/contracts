@@ -7,7 +7,7 @@
 //! position via `bump_position`.
 
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
-use shared::{GlobalConfig, Market, Position};
+use shared::{EntryOrder, GlobalConfig, Market, Position};
 use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol, Vec};
 
 use crate::errors::PositionManagerError;
@@ -29,6 +29,8 @@ pub enum StorageKey {
     Position(u64),
     Market(Symbol),
     MarketDisabled(Symbol),
+    EntryOrder(u64),
+    NextEntryOrderId,
 }
 
 pub fn is_paused(env: &Env) -> bool {
@@ -61,6 +63,46 @@ pub fn save_position(env: &Env, position: &Position) {
 
 pub fn remove_position(env: &Env, id: u64) {
     env.storage().persistent().remove(&StorageKey::Position(id));
+}
+
+// ENTRY ORDER
+
+pub fn get_entry_order(env: &Env, id: u64) -> EntryOrder {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::EntryOrder(id))
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::OrderNotFound))
+}
+
+pub fn save_entry_order(env: &Env, order: &EntryOrder) {
+    let key = StorageKey::EntryOrder(order.id);
+    env.storage().persistent().set(&key, order);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+}
+
+pub fn remove_entry_order(env: &Env, id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&StorageKey::EntryOrder(id));
+}
+
+pub fn get_next_entry_order_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::NextEntryOrderId)
+        .unwrap_or(1)
+}
+
+pub fn save_next_entry_order_id(env: &Env, id: u64) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::NextEntryOrderId, &id);
+}
+
+pub fn update_entry_order_id(env: &Env) {
+    save_next_entry_order_id(env, get_next_entry_order_id(env) + 1);
 }
 
 // MARKET

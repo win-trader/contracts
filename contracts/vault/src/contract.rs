@@ -155,6 +155,20 @@ impl VaultInterface for VaultContract {
         transfer_asset(&env, &from, &env.current_contract_address(), amount);
     }
 
+    fn pull_from_allowance(env: Env, caller: Address, from: Address, amount: i128) -> bool {
+        require_pm(&env, &caller);
+        if amount <= 0 {
+            panic_with_error!(&env, VaultError::InvalidAmount);
+        }
+        // The vault is the approved spender; `try_transfer_from` catches a
+        // revoked/expired allowance or insufficient balance into `Err` so
+        // the caller can drop the order without reverting.
+        let current = env.current_contract_address();
+        TokenClient::new(&env, &asset(&env))
+            .try_transfer_from(&current, &from, &current, &amount)
+            .is_ok()
+    }
+
     fn transfer_claim(
         env: Env,
         caller: Address,

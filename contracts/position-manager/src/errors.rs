@@ -35,4 +35,8 @@ pub enum PositionManagerError {
     UpgradeTimelockNotElapsed = 24,
     /// `upgrade` called with a hash that differs from the proposal.
     UpgradeHashMismatch = 25,
+    /// No entry order exists for the given id.
+    OrderNotFound = 26,
+    /// `execute_entry_order` called before the trigger price was crossed.
+    OrderNotTriggered = 27,
 }

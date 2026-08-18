@@ -16,7 +16,10 @@
 
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
-use crate::types::{AccountingSnapshot, GlobalConfig, Market, MarketConfig, OracleRound, Position};
+use crate::types::{
+    AccountingSnapshot, EntryOrder, EntryOrderParams, GlobalConfig, Market, MarketConfig,
+    OracleRound, Position,
+};
 
 #[contractclient(name = "PositionManagerClient")]
 pub trait PositionManager {
@@ -95,6 +98,25 @@ pub trait PositionManager {
     /// Withdraw unused execution budget (owner). Blocked during a cash
     /// shortfall via the vault's conservation-checked transfer.
     fn withdraw_execution_budget(env: Env, position_id: u64, amount: i128);
+
+    /// Place a limit/stop entry order (owner, §12.4). Storage-only — no
+    /// funds move; the owner must grant the vault a token allowance covering
+    /// `collateral + execution_budget` for the keeper to pull at fill.
+    /// Returns the order id.
+    fn place_entry_order(env: Env, owner: Address, market: Symbol, params: EntryOrderParams)
+        -> u64;
+
+    /// Fill an entry order whose trigger has crossed (any caller). Pulls the
+    /// collateral via the owner's allowance and opens the position as a
+    /// market order would. Removes the order if it is expired or unfundable;
+    /// reverts (order stays) if not yet triggered, slipped, or open-blocked.
+    fn execute_entry_order(env: Env, caller: Address, order_id: u64);
+
+    /// Cancel a pending entry order (owner; permissionless once expired).
+    fn cancel_entry_order(env: Env, order_id: u64);
+
+    /// Read a pending entry order (panics `OrderNotFound` if absent).
+    fn get_entry_order(env: Env, order_id: u64) -> EntryOrder;
 
     /// Checkpoint the global indices and one market's funding indices to
     /// now (KEEPER, §10). Fee accrual is lazy; this bounds staleness.

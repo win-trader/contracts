@@ -9,15 +9,21 @@ use crate::events;
 use crate::ledger::{self, Ledger};
 use crate::{borrow, funding, math, position, risk, snapshot, storage, validation};
 use position::{
-    decrease::decrease_position, deleverage::deleverage_position, execute_order::execute_order,
-    fund_execution_budget::fund_execution_budget, increase::increase_position,
-    liquidate::liquidate_position, open::open_position, set_tp_sl::set_tp_sl,
+    decrease::decrease_position,
+    deleverage::deleverage_position,
+    entry_order::{cancel_entry_order, execute_entry_order, place_entry_order},
+    execute_order::execute_order,
+    fund_execution_budget::fund_execution_budget,
+    increase::increase_position,
+    liquidate::liquidate_position,
+    open::open_position,
+    set_tp_sl::set_tp_sl,
     withdraw_execution_budget::withdraw_execution_budget,
 };
 use shared::constants::{INDEX_PRECISION, ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER};
 use shared::{
-    AccountingSnapshot, ConfigManagerClient, GlobalConfig, Market, MarketConfig, MigrationData,
-    OracleRound, Position, PositionManager, TimelockedUpgradeable, UpgradeFailure,
+    AccountingSnapshot, ConfigManagerClient, EntryOrderParams, GlobalConfig, Market, MarketConfig,
+    MigrationData, OracleRound, Position, PositionManager, TimelockedUpgradeable, UpgradeFailure,
 };
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
@@ -138,6 +144,27 @@ impl PositionManager for PositionManagerContract {
 
     fn withdraw_execution_budget(env: Env, position_id: u64, amount: i128) {
         withdraw_execution_budget(env, position_id, amount)
+    }
+
+    fn place_entry_order(
+        env: Env,
+        owner: Address,
+        market: Symbol,
+        params: EntryOrderParams,
+    ) -> u64 {
+        place_entry_order(env, owner, market, params)
+    }
+
+    fn execute_entry_order(env: Env, caller: Address, order_id: u64) {
+        execute_entry_order(env, caller, order_id)
+    }
+
+    fn cancel_entry_order(env: Env, order_id: u64) {
+        cancel_entry_order(env, order_id)
+    }
+
+    fn get_entry_order(env: Env, order_id: u64) -> shared::EntryOrder {
+        storage::get_entry_order(&env, order_id)
     }
 
     fn update_indices(env: Env, caller: Address, market_symbol: Symbol) {

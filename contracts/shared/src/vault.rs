@@ -27,6 +27,14 @@ pub trait VaultInterface {
     /// matching claim.
     fn receive_collateral(env: Env, caller: Address, from: Address, amount: i128);
 
+    /// Pull `amount` from `from` into the vault via `from`'s pre-granted
+    /// token allowance (PositionManager only, entry-order fills). Returns
+    /// `false` — without panicking — if the pull fails (revoked/expired
+    /// allowance or insufficient balance), so the caller can drop the dead
+    /// order and still commit. The caller records the matching claim on
+    /// success.
+    fn pull_from_allowance(env: Env, caller: Address, from: Address, amount: i128) -> bool;
+
     /// Conservation-checked outgoing claim (PositionManager only):
     /// `claims_after` is the caller's post-transfer non-LP claim total, and
     /// the transfer must leave at least that much cash behind. Fails during
