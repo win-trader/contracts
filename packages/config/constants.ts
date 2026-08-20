@@ -27,11 +27,19 @@ export const PRECISION = 10_000_000n;
 
 /** Polling interval for CEX REST APIs. */
 export const ORACLE_POLL_INTERVAL_MS = 1_000;
-/** Reject CEX prints whose embedded source-timestamp is older than this. */
-export const ORACLE_KUCOIN_STALENESS_MS = 5_000;
-/** Per-tick sanity cap: reject prints whose delta vs the last published price
- *  exceeds this fraction of the prior price. Bounded so a single rogue print
- *  cannot poison the on-chain median. */
+/** Reject CEX prints whose embedded source-timestamp is older than this.
+ *  NOTE: KuCoin's level1 `time` is when the top of book last *changed*, not
+ *  when the data was served. A thin pair (XLM-USDT) legitimately holds the
+ *  same best bid/ask for tens of seconds, so a tight bound here rejects a
+ *  perfectly good price and starves that market's feed entirely. Sized for
+ *  the thinnest pair we quote, not the most liquid one. */
+export const ORACLE_KUCOIN_STALENESS_MS = 60_000;
+/** Per-tick sanity cap: reject prints whose delta vs the last *observed*
+ *  price exceeds this. Bounded so a single rogue print cannot poison the
+ *  on-chain median. Deliberately measured against the last observation
+ *  rather than the last successful push — basing it on the push makes the
+ *  gate an absorbing state, since a failed submit then freezes the baseline
+ *  forever (see ORACLE_CONFIRMING_SAMPLES). */
 export const ORACLE_MAX_DELTA_BPS_PER_TICK = 200;
 /** Minimum interval between two consecutive on-chain pushes for one symbol. */
 export const ORACLE_MIN_INTERVAL_BETWEEN_PUSHES_MS = 500;
@@ -39,9 +47,24 @@ export const ORACLE_MIN_INTERVAL_BETWEEN_PUSHES_MS = 500;
 export const ORACLE_MAX_PUSHES_PER_MINUTE = 60;
 /** HTTP fetch timeout for upstream CEX calls. */
 export const ORACLE_FETCH_TIMEOUT_MS = 2_000;
-/** Number of confirming samples a publisher must observe before pushing
- *  (defends against a single-tick anomaly). */
+/** Consecutive agreeing samples required before an out-of-band move is
+ *  accepted as genuine and the outlier baseline re-bases onto it. One rogue
+ *  print is discarded when the next tick disagrees with it; a real move is
+ *  adopted after this many samples. This is what keeps the delta gate from
+ *  latching permanently. */
 export const ORACLE_CONFIRMING_SAMPLES = 2;
+/** Publish unconditionally when the last on-chain push is older than this,
+ *  bypassing the delta gate. A stale price halts the market outright at the
+ *  router's staleness/quorum gates, whereas a moved price is still a price —
+ *  so the publisher fails toward freshness. Must stay well under the
+ *  router's `staleness_threshold`. */
+export const ORACLE_FORCE_PUBLISH_AFTER_MS = 20_000;
+/** Bounded retries for a failed on-chain submit (TRY_AGAIN_LATER and other
+ *  transient RPC/congestion failures). `set_price` is a blind overwrite, so
+ *  a duplicate landing is harmless and retrying is safe. */
+export const ORACLE_SUBMIT_RETRIES = 2;
+/** Base backoff between submit retries; doubles per attempt. */
+export const ORACLE_SUBMIT_RETRY_BACKOFF_MS = 250;
 /** User-Agent string sent to upstream CEX APIs. */
 export const ORACLE_USER_AGENT = "stellars-oracle/0.1";
 
