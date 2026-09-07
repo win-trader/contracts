@@ -1018,6 +1018,7 @@ keeper_limit_order_reward
 keeper_expiry_reward
 keeper_liquidation_reward
 keeper_adl_reward
+keeper_lp_resolve_reward
 ```
 
 Every initial value is:
@@ -1033,6 +1034,14 @@ settlement call processes one action and pays at most one keeper reward.
 The reward is an execution cost, not protocol revenue. It is transferred to
 the keeper rather than accumulated in a reserve or shared with LPs, the
 protocol, or a referrer.
+
+Where a reward's source can be smaller than the reward itself, the payment is
+capped at what that source holds and the action still completes. This applies
+to the ordinary failure reward on a position action (§7.0) and to
+`keeper_lp_resolve_reward` on a request whose escrow or released assets are
+worth less than the reward. A capped reward never draws on LP equity;
+`keeper_liquidation_reward` remains the single exception with an explicit LP
+backstop.
 
 #### 3.5.1 Open execution
 
@@ -2399,7 +2408,7 @@ LpRequest {
     escrowed_amount   # Collateral for a deposit, LP shares for a withdrawal
     requested_at
     execute_after
-    status            # Pending, Settled, Failed, or Expired
+    status            # Pending, Settled, or Failed
 }
 ```
 
@@ -2436,6 +2445,7 @@ The global keeper-reward group contains:
 | `keeper_expiry_reward` | Action escrow |
 | `keeper_liquidation_reward` | Position value, with LP gap backstop |
 | `keeper_adl_reward` | Position payable profit or collateral |
+| `keeper_lp_resolve_reward` | LP request escrow or released assets |
 
 Each field is a fixed cash amount with an initial value of `2,500,000`, or
 `$0.25`. The fields are independent even though their initial values match.
@@ -3392,6 +3402,7 @@ function keeper_reward_for(action_kind, global_config):
         Expiry      -> keeper_expiry_reward
         Liquidation -> keeper_liquidation_reward
         ADL         -> keeper_adl_reward
+        LpResolve   -> keeper_lp_resolve_reward
 ```
 
 Pay from action escrow:
@@ -3806,9 +3817,8 @@ An eligible untriggered limit or position trigger remains pending and pays no
 reward. A market-style pending action normally uses its first eligible attempt
 as its only attempt: an expected deterministic failure consumes the action,
 pays the configured action reward, refunds any action escrow, and returns a
-terminal failure result. The explicit `RequiresLiquidation` and
-`RewardUnavailable` safety outcomes remain non-terminal. An unexpected
-invariant failure reverts and leaves the action unchanged.
+terminal failure result. The explicit `RequiresLiquidation` safety outcome remains non-terminal. An
+unexpected invariant failure reverts and leaves the action unchanged.
 
 The terminal entry-failure helper is:
 
@@ -3836,10 +3846,17 @@ The corresponding terminal helper for an increase, decrease, or close is:
 ```text
 function fail_position_action(action, position, keeper, reward, reason):
     require position is not liquidatable
-    require position.stored_collateral - reward >= min_collateral
-    require effective_collateral - reward > liquidation_threshold
 
-    pay_keeper_from_position(position, side, ledger, keeper, reward)
+    payable_reward = min(
+        reward,
+        max(0, position.stored_collateral - min_collateral),
+        max(0, effective_collateral - liquidation_threshold - 1)
+    )
+
+    if payable_reward > 0:
+        pay_keeper_from_position(
+            position, side, ledger, keeper, payable_reward
+        )
 
     if action.escrowed_collateral > 0:
         refund complete action escrow to owner
@@ -3848,18 +3865,40 @@ function fail_position_action(action, position, keeper, reward, reason):
     remove pending action
     refresh market risk state and global borrow rate
     store position, market, and ledger
-    emit terminal failure result(reason, reward, refund)
+    emit terminal failure result(reason, payable_reward, refund)
 
     return Failed
 ```
 
 If the position is already liquidatable, the attempted voluntary settlement
 returns `RequiresLiquidation` without consuming the action or paying a reward.
-If the position is not liquidatable but cannot pay the failure reward while
-remaining above both minimum collateral and its liquidation threshold, it
-returns `RewardUnavailable`, also without state change or payment. The latter
-condition does not authorize liquidation; the action can be retried after
-collateral or market state changes.
+That outcome is correct and stays non-terminal: the liquidation path will
+remove the position and supersede the action.
+
+An eligible attempt on a position that is *not* liquidatable is always
+terminal. The reward is variable, the finality is not. The keeper receives
+whatever the position can pay without dropping below minimum collateral or
+into liquidation, which may be less than the configured reward and may be
+zero; the action is consumed either way.
+
+The alternative — refusing to terminate when the full reward is unpayable —
+was worse in both directions. It left an eligible action pending forever while
+`pending_mutation_action_id` blocked every further increase, decrease, or
+close on that position, and since position mutations have neither a cancel
+operation nor an expiry, the only exits were `add_collateral` or liquidation.
+It also broke the first-attempt finality the order lifecycle depends on: an
+action that survives an eligible attempt is a free retry.
+
+The variable cap is not exploitable. Suppressing the reward requires holding a
+position at minimum collateral or at its liquidation threshold, which is one
+tick from being liquidated and cannot be maintained as a strategy; the saving
+is at most one fixed reward per action. Keepers are free to skip an action
+whose payable reward is too small, and the owner can always settle it
+themselves to clear the slot.
+
+This also resolves §10.3.4 item 4 without escrowing a keeper reward at
+position-action creation: finality is unconditional, and only the reward
+amount is contingent on the position's ability to pay.
 
 ### 7.1 Create a market-open order
 
@@ -4847,7 +4886,7 @@ Create a deposit request:
 ```text
 function request_lp_deposit(owner, assets):
     require owner authorization
-    require assets > 0
+    require assets > keeper_lp_resolve_reward
     require LP requests are currently allowed
 
     transfer collateral from owner into LP request escrow outside the vault
@@ -4875,25 +4914,57 @@ function resolve_next_lp_request(executor):
     require request is Pending
 
     round = latest authenticated synchronized price round
-    require round.timestamp >= request.execute_after
 
-    assigned_round_is_unique =
-        round.previous_timestamp < request.execute_after
-
-    if not assigned_round_is_unique:
-        mark request Expired
-        advance FIFO pointer
-        refund complete escrow
-        return Failed
+    if round.timestamp < request.execute_after:
+        return NotReady without state change or reward
 
     accrue global borrow and every active market to one timestamp
     derive physical cash, claims, LP equity, synchronized marked NAV,
         free capital, utilization, and risk states
 ```
 
+Resolution is permissionless and pays `keeper_lp_resolve_reward` on every
+terminal outcome, exactly like every other settlement in this protocol. A
+deposit pays it from its asset escrow before conversion; a withdrawal pays it
+from the assets it releases. The reward is what makes prompt resolution
+somebody's job, and the request's owner may act as the executor.
+
+An earlier draft of this operation assigned each request a unique price round
+by requiring `round.previous_timestamp < request.execute_after`, and marked the
+request `Expired` when that did not hold. That rule was unsound. `round` is
+always the *latest* round, so any executor who simply waited two rounds made
+the condition impossible to satisfy and killed the request; because only the
+FIFO head can resolve, a single passive or hostile executor could stall the
+entire queue. It also gave a request exactly one chance at one round, which is
+a liveness cliff for an operation that must eventually complete.
+
+The property that rule was protecting is real: whoever picks the settlement
+moment picks the NAV, and a withdrawing LP who can choose the moment can exit
+at an inflated share price and leave the mark-to-market loss with the LPs who
+stay. It is not, however, a property that needs its own mechanism. It is the
+same problem as a trader choosing the observation that fills a market order,
+and this specification already answers that question the same way everywhere
+else: a mandatory delay fixes the earliest possible moment, and a fixed keeper
+reward makes a competing party settle at the first opportunity, so the party
+with an interest in waiting does not control the timing.
+
+Applying that answer here deletes the round-assignment machinery, the
+`previous_timestamp` accessor it needed from the oracle, and the `Expired`
+outcome that arose only from it. The residual exposure is the same one stated
+in §1.7: the guarantee rests on there being a competing executor, not on a
+protocol rule that names one round. The production delay of one day makes the
+window to compete a wide one, so this is a weaker assumption here than it is
+for a five-second trader action.
+
 Successful deposit settlement uses the pre-deposit state:
 
 ```text
+resolve_reward = min(
+    keeper_lp_resolve_reward,
+    request.escrowed_amount
+)
+deposit_assets = request.escrowed_amount - resolve_reward
+
 conversion_assets = marked_vault_nav + 1
 conversion_shares = share_supply + SHARE_SCALE
 
@@ -4904,11 +4975,16 @@ shares_to_mint = mul_div_floor(
 )
 
 require deposit eligibility and shares_to_mint > 0
-transfer complete asset escrow into the vault
+transfer resolve_reward from escrow to the executor
+transfer remaining asset escrow into the vault
 mint shares_to_mint to owner
 mark request Settled and advance FIFO pointer
 refresh global borrow rate
 ```
+
+The reward is deducted before conversion, so the depositor mints shares for
+the assets that actually reach the vault and no share is minted against value
+paid to the executor.
 
 Successful withdrawal settlement uses the pre-withdrawal state:
 
@@ -4923,15 +4999,26 @@ require assets_to_pay <= free_lp_capital
 require post-withdraw utilization <= max_withdraw_utilization_bps
 require no prohibited shortfall or restricted market state
 
+resolve_reward = min(keeper_lp_resolve_reward, assets_to_pay)
+
 burn complete escrowed shares
-transfer assets_to_pay from vault to owner
+transfer resolve_reward from vault to the executor
+transfer assets_to_pay - resolve_reward from vault to owner
 mark request Settled and advance FIFO pointer
 refresh global borrow rate
 ```
 
-An expected failed deposit or withdrawal marks the request failed, advances the
-FIFO pointer, and refunds its complete escrow. There are no partial fills and
-no persistent withdrawal cash claims. In a clean terminal vault, the final LP
+The reward comes out of the assets the withdrawal releases, after every
+capacity and health check has been satisfied on the full amount. A withdrawal
+worth less than the reward pays the executor everything it releases; it is
+never topped up from LP equity.
+
+An expected failed deposit or withdrawal pays the resolve reward, marks the
+request failed, advances the FIFO pointer, and refunds the remaining escrow.
+There is no `Expired` outcome: a request that is not yet resolvable stays
+`Pending` and is retried, and a request that becomes resolvable either settles
+or fails. There are no partial fills and no persistent withdrawal cash
+claims. In a clean terminal vault, the final LP
 may withdraw all residual cash LP equity so conversion rounding cannot strand
 ownerless assets.
 
@@ -5032,9 +5119,10 @@ else:
     perform complete settlement
 ```
 
-`RequiresLiquidation` and `RewardUnavailable` are the two non-terminal safety
-exceptions for position mutations. Entry actions pay from escrow and therefore
-do not use `RewardUnavailable`.
+`RequiresLiquidation` is the only non-terminal safety exception for position
+mutations. Every other eligible attempt terminates; when the position cannot
+pay the full failure reward, the reward is reduced rather than the action
+preserved (§7.0).
 
 The action cannot survive a failed eligible attempt and retry against a later
 price. This applies even when the expected failure is economically harmless,
@@ -5100,8 +5188,8 @@ At the first eligible attempt:
 - an expected deterministic failure pays the action-specific reward from the
   position, refunds added-collateral escrow, and removes the record;
 - if paying the ordinary failure reward would violate minimum collateral or
-  make the unchanged position liquidatable, the result is
-  `RewardUnavailable` and the action remains pending;
+  make the unchanged position liquidatable, the reward is capped at what the
+  position can pay, possibly zero, and the action still terminates;
 - an unexpected failure reverts and preserves the action; and
 - liquidation or ADL can supersede the action without paying its ordinary
   action reward.
@@ -5140,6 +5228,20 @@ it forward.
 lifetime_satisfied =
     now >= position.last_size_increase_at + min_position_lifetime
 ```
+
+The gate is measured from `last_size_increase_at`, not `opened_at`, and it
+applies uniformly to decrease, close, take-profit, and stop-loss. This is
+deliberate. A size increase therefore re-locks the position for
+`min_position_lifetime`, including against its own attached stop-loss, so for
+one minute after aggregating exposure the only available exit is liquidation.
+
+The alternative — exempting the risk-reducing stop-loss from the re-lock —
+was considered and rejected. Exempting stop-loss alone leaves take-profit as
+the obvious churn bypass unless it is exempted too, and exempting both turns
+open, take-profit just above entry, exit into a way around the minimum
+lifetime entirely. Keeping one rule for all four exits is the simpler
+invariant, and the exposure it leaves is bounded by `min_position_lifetime`
+and covered by liquidation.
 
 Both gates are inclusive and both are non-terminal. A decrease, close,
 take-profit, or stop-loss that is submitted before either boundary returns
@@ -5281,11 +5383,11 @@ These conditions are not terminal attempts:
 - no qualifying post-commit observation;
 - an untriggered limit, TP, or SL;
 - a TP or SL whose standing exit-price bound does not pass; and
-- a voluntary position action displaced by liquidation eligibility; and
-- an expected-failure path whose keeper reward cannot safely be charged from
-  the unchanged position.
+- a voluntary position action displaced by liquidation eligibility.
 
-They leave the action unchanged and pay nothing.
+They leave the action unchanged and pay nothing. An eligible attempt whose
+keeper reward the position cannot fully fund is not in this list: it
+terminates with a reduced reward (§7.0).
 
 Unexpected conditions revert atomically. These include invalid authorization,
 wrong action kind, nonexistent state, arithmetic overflow, negative pending
@@ -5331,6 +5433,7 @@ Exactly one keeper-reward field is selected per call:
 | Entry expiry cleanup | `keeper_expiry_reward` |
 | Successful liquidation | `keeper_liquidation_reward` |
 | Successful ADL | `keeper_adl_reward` |
+| Settled or failed LP request resolution | `keeper_lp_resolve_reward` |
 
 No reward is paid for creation, a not-ready call, an untriggered conditional
 order, owner cancellation, TP/SL slippage waiting, forced cleanup of a different
@@ -5999,6 +6102,7 @@ Every action has an independent fixed reward:
 | `keeper_expiry_reward` | `2,500,000` (`$0.25`) | Entry escrow |
 | `keeper_liquidation_reward` | `2,500,000` (`$0.25`) | Position value, with LP backing for a price-gap shortfall |
 | `keeper_adl_reward` | `2,500,000` (`$0.25`) | Affected position value |
+| `keeper_lp_resolve_reward` | `2,500,000` (`$0.25`) | LP request escrow or released assets |
 
 Equal initial values make each successful action equally attractive to a
 keeper. The independent fields allow later tuning without coupling unrelated
@@ -6230,14 +6334,15 @@ as implementation-complete:
    reward. Choose an explicitly reserved reward, a separately funded backstop,
    or best-effort payment language. A protocol cannot guarantee payment from
    LP equity when LP equity is already zero.
-4. **Failed position-action rewards.** `RewardUnavailable` preserves position
-   health but gives the action another opportunity to settle. If strict
-   first-attempt finality is required in every case, position-action creation
-   must escrow or otherwise reserve its keeper reward instead of sourcing that
-   reward only from future position value.
+4. **Failed position-action rewards.** *Resolved.* Finality is unconditional
+   and only the reward amount is contingent: an eligible attempt on a
+   non-liquidatable position always terminates, paying the keeper whatever the
+   position can fund without breaching minimum collateral or its liquidation
+   threshold, possibly nothing. `RewardUnavailable` no longer exists.
+   Position-action creation does not escrow a keeper reward. See §7.0.
 
-Until these choices are made, implementations must not infer a policy from
-the illustrative pseudocode.
+Items 1 through 3 remain open. Until they are decided, implementations must
+not infer a policy for them from the illustrative pseudocode.
 
 ### 10.4 Deployment defaults
 
@@ -6272,6 +6377,7 @@ keeper_sl_reward                     = 2,500,000        # $0.25
 keeper_expiry_reward                 = 2,500,000        # $0.25
 keeper_liquidation_reward            = 2,500,000        # $0.25
 keeper_adl_reward                    = 2,500,000        # $0.25
+keeper_lp_resolve_reward             = 2,500,000        # $0.25
 
 PER MARKET
 open_fee_bps                         = 0                # 0% of size added
