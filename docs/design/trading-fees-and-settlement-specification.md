@@ -238,6 +238,160 @@ Every formula multiplies before it divides and retains the widest safe
 intermediate value. Repeated fractional accrual carries its remainder instead
 of discarding it. Floating-point arithmetic is never used.
 
+#### 2.1.1 Integer widths and checked arithmetic
+
+"Widest safe intermediate" is a requirement, not a hint, so the widths are
+declared here rather than left to the implementation.
+
+| Kind of value | Stored as |
+|---|---|
+| Cash, size, base exposure, risk units | `i128` |
+| Cumulative indices, rates, decay factors, remainders | `u128` |
+| Signed skew and its EMA | `i128` |
+| Timestamps, durations, counts, identifiers | `u64` |
+| Basis-point configuration | `u32` |
+
+Every product formed on the way to a division is computed in **256-bit**,
+regardless of how small its operands look. This is the contract for the three
+helpers from §6:
+
+```text
+mul_div_floor(a, b, d):
+    require d > 0
+    p = widen_256(a) * widen_256(b)
+    q = p / d                      # truncating, exact in 256-bit
+    require q fits the declared result width
+    return narrow_128(q)
+
+mul_div_ceil(a, b, d):
+    as above with q = (p + d - 1) / d
+
+carried_div(n, d, r):
+    require d > 0
+    t = widen_256(n) + widen_256(r)
+    require t / d and t % d both fit their declared widths
+    return (narrow_128(t / d), narrow_128(t % d))
+```
+
+Every addition, subtraction, and standalone multiplication outside these
+helpers is checked and errors on overflow. An overflow is an unexpected
+failure under §8.9: it reverts, it is never a terminal business outcome, and
+no clamp or saturating operation may absorb it.
+
+A uniform 256-bit product is not paranoia. Three products in this
+specification exceed `u128` at configured parameter limits:
+
+```text
+funding weight    max_funding_rate_bps_day * A^2 * elapsed
+                  1e4 * (1e14)^2 * 3.2e7  ~= 3.2e39   > 3.4e38
+
+LP share minting  deposit_assets * (share_supply + SHARE_SCALE)
+                  1e16 * 1e22             = 1e38      ~ at the limit
+
+minimum borrow    risk_units * current_borrow_rate * min_borrow_fee_seconds
+                  1e16 * 2e18 * 900       = 1.8e37    within 20x of the limit
+```
+
+The first overflows outright at the validated maximum funding rate. The other
+two survive today's defaults only by a margin small enough that a single
+parameter change could remove it. Computing every product in 256-bit and
+checking the narrowed quotient removes the whole class of question, and the
+narrowing check is what turns a would-be silent wrap into a revert.
+
+Two validation bounds exist to keep these quantities bounded at all, and are
+part of the arithmetic contract rather than economic policy:
+
+```text
+min_borrow_fee_seconds <= 86,400
+min_position_lifetime  <= 86,400
+```
+
+#### 2.1.2 Fixed-point transcendental primitives
+
+Funding integration needs `2^-x`, the borrow curve needs `u^e`, and locating a
+funding sign change needs `log2`. All three reduce to one pair of primitives,
+both evaluated at `INDEX_PRECISION` and both fully deterministic.
+
+`exp2_neg(x)` returns `2^-x` for `x >= 0`, with `x` and the result scaled by
+`INDEX_PRECISION`. Split `x` into its whole and fractional parts, `x = n + f`:
+
+```text
+2^-x = 2^-n * 2^-f
+```
+
+`2^-n` is a right shift by `n`, saturating to zero once `n >= 128`. For the
+fractional part, expand `f` in binary as `f = sum(b_i * 2^-i)` and multiply in
+one precomputed constant per set bit:
+
+```text
+result = INDEX_PRECISION
+for i in 1 ..= 48:
+    if bit i of f is set:
+        result = mul_div_floor(result, HALF_POW[i], INDEX_PRECISION)
+```
+
+`HALF_POW[i]` is the `INDEX_PRECISION`-scaled constant `2^(-2^-i)`, a fixed
+table of 48 entries stored in the contract. The loop is bounded, branch-free
+in cost, and uses no division other than the helper's.
+
+`log2(y)` for `y >= INDEX_PRECISION` returns its base-2 logarithm at
+`INDEX_PRECISION`, by the mirror construction: take the integer part from the
+bit length, then recover the fraction one bit at a time by repeated squaring
+of the normalized mantissa, again for 48 iterations.
+
+From these:
+
+```text
+pow(u, e) = exp2_neg(mul_div_floor(e, log2(INDEX_PRECISION^2 / u),
+                                   INDEX_PRECISION))
+            for 0 < u < 1
+
+pow(0, e) = 0        for e > 0
+pow(1, e) = 1
+```
+
+`fixed_point_power` in §6.14 is this `pow`, with `u = utilization_bps / BPS`
+and `e = borrow_exponent_bps / BPS`.
+
+The declared tolerance — the value §4.6 refers to and previously left
+undefined — is:
+
+```text
+DECAY_TOLERANCE = 1e-12 relative
+```
+
+Each of the at most 48 multiplications truncates by less than one unit in
+`1e14`, so the accumulated relative error is below `48 / 1e14`, comfortably
+inside the declared bound. Every rounding in these primitives truncates, so
+the error is one-directional and a decay factor is never overstated.
+
+Three properties follow, and an implementation must test them directly:
+
+1. `exp2_neg` is monotonically non-increasing in `x`, and `exp2_neg(0)`
+   is exactly `INDEX_PRECISION`.
+2. Splitting an otherwise unchanged funding window into any number of
+   checkpoints reproduces the single-window result within
+   `checkpoint_count * DECAY_TOLERANCE` relative error. This is the concrete
+   form of invariant 10 in §4.14.
+3. The same inputs produce bit-identical outputs on every node. No step
+   consults a platform float, a transcendental library, or a wall-clock value.
+
+The funding sign change in §4.6 is located analytically rather than by search.
+With `I(t) = A + B * d(t)`, a crossing exists in the window exactly when `A`
+and `A + B` have opposite signs, and then:
+
+```text
+d_star = -A / B                       in (0, 1)
+t_star = mul_div_floor(H, log2(mul_div_floor(INDEX_PRECISION,
+                                             INDEX_PRECISION, d_star)),
+                       INDEX_PRECISION)
+```
+
+`t_star` is used at this precision and is not rounded to a whole second before
+the two subintervals are integrated. Its residual error is second order: the
+integrand `I(t)^2` vanishes at the crossing, so a small error in `t_star`
+perturbs each subinterval's contribution by an amount quadratic in that error.
+
 ### 2.2 Physical vault cash
 
 Physical vault cash is the collateral-token balance actually held by the
@@ -1665,17 +1819,21 @@ its sign does not select one payer for an interval containing both signs.
 For an interval on which `I(t)` keeps one sign, that sign selects the payer and
 the non-negative quadratic integral determines the amount. Because `I(t)` is
 monotonic while live skew is constant, it has at most one zero crossing in a
-checkpoint interval. When a crossing exists, deterministically solve for its
-fixed-point elapsed duration, integrate the two subintervals independently,
-and carry each result to the corresponding payer stream. The crossing uses the
-same declared decay quantization as the EMA calculation; it is not rounded to
-an arbitrary whole-second boundary before integration.
+checkpoint interval. A crossing exists exactly when `A` and `A + B` have
+opposite signs; §2.1.2 gives the closed form for `t_star`. Integrate the two
+subintervals independently and carry each result to the corresponding payer
+stream. The crossing uses the same declared decay quantization as the EMA
+calculation; it is not rounded to an arbitrary whole-second boundary before
+integration.
 
-The decay function is evaluated deterministically in fixed point. Splitting an
-unchanged interval into multiple checkpoints must reproduce the one-window
-result within the declared decay-quantization tolerance. When the instant
-weight is 100%, the EMA contributes nothing and the result is exactly
-checkpoint-frequency independent apart from carried integer division.
+The decay function is evaluated deterministically in fixed point by
+`exp2_neg`, and the crossing is located analytically by `log2`; both
+primitives, their bounded iteration counts, and `DECAY_TOLERANCE` are
+specified in §2.1.2. Splitting an unchanged interval into multiple checkpoints
+must reproduce the one-window result within that tolerance, multiplied by the
+number of checkpoints. When the instant weight is 100%, the EMA contributes
+nothing and the result is exactly checkpoint-frequency independent apart from
+carried integer division.
 
 ### 4.7 Global checkpoint
 
@@ -2422,8 +2580,8 @@ next_lp_request_to_resolve
 Only the FIFO head can resolve, and every terminal resolution advances the
 pointer exactly once. A deposit's collateral remains outside vault physical
 cash until successful settlement. A withdrawal's escrowed shares remain in
-total share supply until they are burned on success. Failed or expired requests
-return their complete escrow.
+total share supply until they are burned on success. A failed request returns
+its escrow less the resolve reward.
 
 There is no persistent pending-withdrawal cash claim and no partial LP fill. A
 request settles fully or refunds fully, so LP request escrow is not included in
@@ -3613,7 +3771,7 @@ function refresh_borrow_rate(ledger, physical_cash, global_config):
     variable_factor = fixed_point_power(
         utilization / BPS,
         global_config.borrow_exponent_bps / BPS
-    )
+    )   # the pow of §2.1.2, at INDEX_PRECISION
 
     rate_bps_day =
           global_config.base_borrow_rate_bps_day
@@ -4927,7 +5085,17 @@ Resolution is permissionless and pays `keeper_lp_resolve_reward` on every
 terminal outcome, exactly like every other settlement in this protocol. A
 deposit pays it from its asset escrow before conversion; a withdrawal pays it
 from the assets it releases. The reward is what makes prompt resolution
-somebody's job, and the request's owner may act as the executor.
+somebody's job.
+
+No LP ever depends on a third party to get their request resolved. `executor`
+is any authenticated account, including the request's own owner, so an owner
+whose request is not being picked up can always resolve it themselves and
+collect the reward. Because only the FIFO head is resolvable, an owner whose
+request sits behind others clears the queue by calling the operation once per
+request ahead of theirs; each of those calls is a normal terminal resolution
+that pays the caller its reward, so working down the queue is self-funding
+rather than a cost. This is the manual path, and it is always available — the
+keeper reward exists to make it unnecessary, not to make it exclusive.
 
 An earlier draft of this operation assigned each request a unique price round
 by requiring `round.previous_timestamp < request.execute_after`, and marked the
@@ -6180,8 +6348,16 @@ At seven-decimal notional precision, the initial size ceiling is
 ### 10.3 Parameter validation
 
 Validation occurs both when configuration is activated and when an individual
-market is added or updated. Every configured integer must fit the widest
-intermediate arithmetic used by its formulas.
+market is added or updated. The declared widths in §2.1.1 make "fits its
+formulas" checkable rather than aspirational: every product on the way to a
+division is formed in 256-bit and its quotient is range-checked on the way
+back to 128 bits, so validation's job is to bound the inputs that feed those
+products, not to re-derive their headroom.
+
+The bounds that exist for arithmetic rather than economic reasons are the two
+duration caps in §2.1.1 and the ceilings on size and base exposure in §10.2.3.
+A configuration that satisfies every rule below cannot overflow any formula in
+this specification.
 
 #### 10.3.1 Global validation
 
@@ -6192,8 +6368,8 @@ keeper_open_reward <= min_collateral
 keeper_limit_order_reward <= min_collateral
 keeper_expiry_reward <= min_collateral
 
-min_position_lifetime >= 0
-min_borrow_fee_seconds > 0
+0 <= min_position_lifetime  <= 86,400
+0 <  min_borrow_fee_seconds <= 86,400
 
 60 <= funding_half_life_seconds <= 31,536,000
 
