@@ -1275,9 +1275,12 @@ The global minimum collateral must be greater than the configured liquidation
 reward. With the initial defaults, minimum collateral is `$1.00` and the reward
 is `$0.25`.
 
-A price gap can jump past the reserved value. The keeper still receives the
-full fixed reward and LP equity covers its shortfall. Liquidation pays no
-closing fee.
+A price gap can jump past the reserved value. The position's remaining
+collateral pays what it can and LP residual equity covers the rest, so in
+every ordinary case the keeper receives the full fixed reward. When LP equity
+is itself exhausted the payment is capped at what exists and the liquidation
+still completes; removing the risk always outranks paying for the removal.
+Liquidation pays no closing fee.
 
 #### 3.5.10 Automatic deleveraging
 
@@ -1419,7 +1422,7 @@ LPs are the residual backstop. In particular, LP equity absorbs:
 - trader profit paid by the vault;
 - negative position equity that remains after collateral is exhausted;
 - unpaid guaranteed receiver-backed funding;
-- a guaranteed liquidation reward after a price gap; and
+- a liquidation reward after a price gap, to the extent LP equity exists; and
 - accounting residue assigned to the vault residual.
 
 Uncollected LP-backed funding and borrow are not recorded as earned revenue.
@@ -2601,7 +2604,7 @@ The global keeper-reward group contains:
 | `keeper_tp_reward` | Position value |
 | `keeper_sl_reward` | Position value |
 | `keeper_expiry_reward` | Action escrow |
-| `keeper_liquidation_reward` | Position value, with LP gap backstop |
+| `keeper_liquidation_reward` | Position value, then LP residual, capped at what exists |
 | `keeper_adl_reward` | Position payable profit or collateral |
 | `keeper_lp_resolve_reward` | LP request escrow or released assets |
 
@@ -3598,14 +3601,18 @@ function pay_liquidation_keeper(
     from_position = min(position.stored_collateral, reward)
     remove_position_collateral(position, side, ledger, from_position)
 
-    lp_backstop = reward - from_position
-    require derive_cash_lp_equity(ledger, physical_cash) >= lp_backstop
+    lp_backstop = min(
+        reward - from_position,
+        derive_cash_lp_equity(ledger, physical_cash)
+    )
 
-    transfer_cash(keeper, reward)
+    paid = from_position + lp_backstop
+    transfer_cash(keeper, paid)
 
     return KeeperPayment {
         from_position,
-        from_lp_backstop: lp_backstop
+        from_lp_backstop: lp_backstop,
+        unpaid: reward - paid
     }
 ```
 
@@ -3897,11 +3904,52 @@ function evaluate_side_risk_state(side, market_config, price, cash_lp_equity):
 
 Applying a transition updates the stored side state and adjusts
 `restricted_market_side_count` if the side crosses between `Normal` and a
-restricted state. ADL execution is permitted only under the applicable
-restricted-side policy and uses one assessment snapshot for candidate
-eligibility, payable PnL, keeper reward, and exposure removal. Candidate
-selection and the external ADL operation are specified with the user-facing
-functions rather than hidden inside this pure assessment.
+restricted state. ADL execution uses one assessment snapshot for candidate
+eligibility, payable PnL, keeper reward, and exposure removal.
+
+#### 6.16.1 What a risk state restricts
+
+A side's risk state answers one question: may this side take on more exposure?
+
+```text
+function side_accepts_new_exposure(side):
+    return side.risk_state in { Normal, Warning }
+```
+
+This is the predicate §7.2 and §7.8 call "market still accepts new exposure",
+and it is evaluated on the side the action would add to, after the risk state
+has been refreshed from the action's own price snapshot.
+
+The states mean:
+
+| State | New exposure on this side | Meaning |
+|---|---|---|
+| `Normal` | Allowed | Aggregate profit on this side is a small fraction of LP equity |
+| `Warning` | Allowed | Elevated, and the side cannot return to `Normal` until it falls below the recovery threshold |
+| `ADL` | Blocked | Forced deleveraging of this side is permitted |
+| `HardCap` | Blocked | Payouts on this side are additionally scaled by the side factor |
+
+Two consequences are deliberate.
+
+`Warning` restricts nothing by itself. It exists to make recovery sticky: once
+latched, a side stays at least in `Warning` until its factor falls below
+`recovery_pnl_factor_bps`, which prevents a side from oscillating in and out of
+restriction on small price moves. Blocking exposure there would cost volume in
+a band that usually resolves on its own.
+
+The opposite side is never restricted by this side's state. A trader opening
+against a restricted side reduces market skew and reduces that side's net
+aggregate PnL, which is exactly the trade that resolves the condition.
+Blocking both sides would leave closure as the only path back to `Normal`.
+
+`restricted_market_side_count` counts every side that is not `Normal`, so a
+nonzero count means at least one side is latched, not necessarily that one is
+blocking. It is the cheap global reader that avoids scanning the market
+registry; the blocking question is always answered per side by
+`side_accepts_new_exposure`.
+
+Candidate selection for ADL is specified with the user-facing operation in
+§7.14 rather than hidden inside this pure assessment.
 
 ### 6.17 Release residual accounting dust
 
@@ -4063,7 +4111,8 @@ amount is contingent on the position's ability to pay.
 ```text
 function create_market_open_order(owner, request):
     require owner authorization
-    require system and market accept new exposure
+    require not paused
+    require side_accepts_new_exposure(target side)   # §6.16.1
     require request.size > 0
     require request.submitted_collateral > 0
     validate direction, acceptable price, and optional TP/SL prices
@@ -4164,7 +4213,7 @@ Run a complete preflight against the hypothetical post-settlement state:
 ```text
 expected checks:
     entry_price_allowed(...)
-    market still accepts new exposure
+    side_accepts_new_exposure(target side)          # §6.16.1
     collateral_after_charges >= min_collateral
     collateral_after_charges
         >= initial_margin(action.size) + projected_minimum_borrow
@@ -4487,7 +4536,8 @@ function settle_increase(action_id, keeper):
             Slippage
         )
 
-    preflight the complete resulting position, capacity, and market caps
+    preflight side_accepts_new_exposure(position side), the complete
+        resulting position, capacity, and market caps
 
     if an expected preflight check fails:
         return fail_position_action(
@@ -4900,7 +4950,7 @@ function liquidate(position_id, keeper):
 
     settle terminal funding, PnL, and borrow in priority order
     pay keeper_liquidation_reward from remaining position value,
-        using LP residual cash for any gap
+        using LP residual cash for any gap, capped at what exists
     charge no closing fee
 
     remove complete position exposure and state
@@ -4915,6 +4965,7 @@ function liquidate(position_id, keeper):
         threshold
         keeper reward from position
         keeper reward from LP backstop
+        unpaid keeper reward, if the two sources could not cover it
         bad debt and unpaid senior amounts
 ```
 
@@ -4972,6 +5023,28 @@ function execute_adl(position_id, keeper):
 The caller supplies one candidate position. The action processes only that
 position. ADL pays no liquidation or close reward in addition to its own fixed
 reward.
+
+Candidate selection is deliberately unranked. Any position on the restricted
+side with positive raw PnL is eligible, and the protocol does not require the
+keeper to pick the largest winner, the most leveraged one, or any particular
+order. Ranking would mean either sorting positions on chain, whose cost grows
+with the number of traders and which §4.1 rules out for exactly that reason,
+or an eligibility rule elaborate enough to need its own accounting. Neither is
+worth it here.
+
+What bounds the mechanism is the state gate, not the selection. `require
+side_assessment.next_state is ADL or HardCap` is re-evaluated from the current
+book on every call, so each execution that removes profitable exposure lowers
+the side's PnL factor, and once it falls below `adl_pnl_factor_bps` no further
+ADL is permitted on that side. A keeper cannot keep taking positions after the
+condition has cleared, and cannot use ADL against a side that was never
+restricted.
+
+The accepted cost is fairness between winners: a keeper may take a small
+profitable position while a larger one remains open, so being deleveraged is
+not proportional to how much of the liability a trader represents. The
+protection a trader has is the state gate and the fixed, capped reward, not a
+queue position.
 
 ### 7.15 Register or change a referrer
 
@@ -5165,7 +5238,8 @@ assets_to_pay = mul_div_floor(
 
 require assets_to_pay <= free_lp_capital
 require post-withdraw utilization <= max_withdraw_utilization_bps
-require no prohibited shortfall or restricted market state
+require vault_shortfall == 0
+require no active market side is in ADL or HardCap
 
 resolve_reward = min(keeper_lp_resolve_reward, assets_to_pay)
 
@@ -5180,6 +5254,18 @@ The reward comes out of the assets the withdrawal releases, after every
 capacity and health check has been satisfied on the full amount. A withdrawal
 worth less than the reward pays the executor everything it releases; it is
 never topped up from LP equity.
+
+The two gates above were previously stated as "no prohibited shortfall or
+restricted market state" without either term being defined. A withdrawal
+removes LP equity, and LP equity is the denominator of every side's PnL
+factor, so paying one out mechanically pushes every side closer to
+restriction. It is therefore refused while the vault is already short of its
+claims, and while any active side is in `ADL` or `HardCap`. `Warning` does not
+block it, for the same reason it does not block new exposure (§6.16.1): it is
+a latch that makes recovery sticky, not a stop.
+
+A deposit is not gated on side risk state at all. It adds LP equity and
+therefore lowers every side's factor, which is the direction the vault wants.
 
 An expected failed deposit or withdrawal pays the resolve reward, marks the
 request failed, advances the FIFO pointer, and refunds the remaining escrow.
@@ -5534,7 +5620,8 @@ error. Examples include:
 - slippage outside a committed bound;
 - unavailable global capacity;
 - a market-side exposure cap;
-- a market state that blocks new risk;
+- a market side in `ADL` or `HardCap`, which blocks new risk on that side
+  (§6.16.1);
 - insufficient post-charge initial margin;
 - insufficient post-action maintenance for a surviving position; and
 - another deterministic validation that can legitimately change between
@@ -5613,8 +5700,8 @@ superseded voluntary action or an expiry reward.
 
 Entry and expiry rewards come from action escrow. Increase, decrease, close,
 TP, and SL rewards come from position value. ADL uses payable position value or
-collateral. Liquidation alone has an LP-backed guarantee for a price-gap
-shortfall.
+collateral. Liquidation alone may draw on LP residual equity for a price-gap
+shortfall, and only as far as that equity reaches.
 
 ### 8.12 Liquidation and ADL precedence
 
@@ -6007,9 +6094,25 @@ impossible: a discontinuous price move or delayed settlement can jump through
 the threshold. Liquidation therefore pays from remaining position collateral
 first and uses LP residual equity only for the reward gap.
 
-The keeper always receives at most the configured fixed liquidation reward,
-never a percentage of collateral, size, target health, or trader loss. A
-liquidation that reverts pays nothing.
+The payment is best-effort at that second step, and deliberately so. The
+reward is capped at position collateral plus whatever cash LP equity exists,
+so a keeper can receive less than the configured amount, or nothing, when both
+sources are empty. The liquidation completes regardless.
+
+Promising the full reward unconditionally was not implementable and was worse
+than useless. A protocol cannot pay out of LP equity that is zero, and the
+earlier formulation turned that impossibility into a revert — which would have
+blocked liquidation precisely in the state where an unliquidated position is
+most dangerous, and left the position accruing borrow against a vault that had
+already run out of cash. Capping the payment keeps the risk-removal path open
+at all times; the incentive degrades before the mechanism does.
+
+The bound in the other direction is unchanged and absolute. The keeper
+receives at most the configured fixed liquidation reward, never a percentage
+of collateral, size, target health, or trader loss. Any unpaid remainder is
+reported in the liquidation result as forgone keeper revenue; it creates no
+claim, no receivable, and no bad debt. A liquidation that reverts pays
+nothing.
 
 ### 9.11 Escrow isolation
 
@@ -6268,7 +6371,7 @@ Every action has an independent fixed reward:
 | `keeper_tp_reward` | `2,500,000` (`$0.25`) | Position value |
 | `keeper_sl_reward` | `2,500,000` (`$0.25`) | Position value |
 | `keeper_expiry_reward` | `2,500,000` (`$0.25`) | Entry escrow |
-| `keeper_liquidation_reward` | `2,500,000` (`$0.25`) | Position value, with LP backing for a price-gap shortfall |
+| `keeper_liquidation_reward` | `2,500,000` (`$0.25`) | Position value, then LP residual as far as it reaches |
 | `keeper_adl_reward` | `2,500,000` (`$0.25`) | Affected position value |
 | `keeper_lp_resolve_reward` | `2,500,000` (`$0.25`) | LP request escrow or released assets |
 
@@ -6505,11 +6608,10 @@ as implementation-complete:
    settlement makes payouts depend on settlement order and does not impose one
    stable aggregate cap. Choose a snapshotted side-wide payout epoch or replace
    the dynamic payout factor with a deterministic position-local bound.
-3. **Liquidation-reward guarantee.** The current payment primitive requires
-   enough LP cash for a reward gap, while the prose promises the complete fixed
-   reward. Choose an explicitly reserved reward, a separately funded backstop,
-   or best-effort payment language. A protocol cannot guarantee payment from
-   LP equity when LP equity is already zero.
+3. **Liquidation-reward guarantee.** *Resolved.* Best-effort payment: the
+   reward is capped at position collateral plus available cash LP equity, and
+   the liquidation completes even when that sum is zero. No reserved reward
+   and no separately funded backstop. See §9.10.
 4. **Failed position-action rewards.** *Resolved.* Finality is unconditional
    and only the reward amount is contingent: an eligible attempt on a
    non-liquidatable position always terminates, paying the keeper whatever the
@@ -6517,8 +6619,11 @@ as implementation-complete:
    threshold, possibly nothing. `RewardUnavailable` no longer exists.
    Position-action creation does not escrow a keeper reward. See §7.0.
 
-Items 1 through 3 remain open. Until they are decided, implementations must
-not infer a policy for them from the illustrative pseudocode.
+Items 1 and 2 remain open. Both concern how aggregate trader profit is
+recognized and allocated — marked-NAV loss recognition and the hard-cap payout
+factor — and both need a decision before the LP accounting and the hard-cap
+path can be called complete. Until they are decided, implementations must not
+infer a policy for them from the illustrative pseudocode.
 
 ### 10.4 Deployment defaults
 
