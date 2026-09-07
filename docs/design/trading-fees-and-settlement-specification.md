@@ -525,6 +525,21 @@ derived from resulting size, and the removed risk is the difference from the
 old canonical value. A final close removes every residual unit, so repeated
 partial decreases cannot strand exposure or risk.
 
+This one rule is a conservation rule rather than a direction rule, and the
+table above does not apply to it. The removed and remaining base always sum to
+exactly the pre-reduction base, so the sub-unit allocated by the rounding is
+not created or destroyed; it only moves between the portion realized now and
+the portion still open. For a long, rounding the removed base up realizes a
+sub-unit of exposure earlier and leaves the survivor with exactly that much
+less; for a short the sign is reversed. Neither direction leaks value, and
+repeated decreases cannot accumulate an advantage because the total is
+conserved at every step and a final close removes the remainder exactly.
+
+What does protect the vault here is the split itself. Because `floor(x) +
+floor(y) <= floor(x + y)`, valuing two portions separately can only produce
+less trader value than valuing the whole position once. A partial reduction is
+therefore weakly conservative regardless of how the sub-unit is allocated.
+
 Any negative pending fee obtained by subtracting a stored debt baseline from a
 monotonic index is an invariant violation. A floor or cap must never hide it.
 
@@ -1558,6 +1573,49 @@ Remainders from different divisions or payer directions are never combined.
 Each has its own unit and divisor and can only be reused by the exact
 calculation and directional stream that produced it.
 
+#### 4.5.1 A carried remainder is only valid for a constant divisor
+
+A carried remainder encodes an undistributed fraction of one divisor. Reusing
+it under a different divisor changes the value it represents and is therefore
+forbidden.
+
+Three of the four funding remainders divide by a constant: both payer-index
+divisions use `BPS * SECONDS_PER_DAY`, and the guaranteed-liability division
+uses `INDEX_PRECISION`. Their carries may persist for the lifetime of the
+payer stream.
+
+The receiver-distribution division is the exception. It divides by
+`receiver.size_open_interest`, which changes whenever a position on the
+receiving side is opened, increased, decreased, or removed. A remainder
+produced modulo a large receiver size represents a small fraction of a large
+base; carried into a division by a smaller receiver size it is credited as a
+much larger fraction of a smaller base, and receivers can then be credited
+more than the receiver-backed accrual that justifies it.
+
+The rule is therefore:
+
+```text
+when a market side's size_open_interest changes, reset the
+receiver_distribution_remainder of the opposite side's payer stream to zero
+```
+
+The reset runs after the checkpoint and before the exposure mutation, so every
+carry lives entirely inside a window of constant receiver size. Because the
+checkpoint always precedes the mutation (§4.9), no accrual is lost by the
+reset itself.
+
+The discarded fraction is strictly less than one whole cash unit of receiver
+credit. It is never re-credited to receivers, so the reset can only
+under-distribute. Its guaranteed-liability counterpart remains in
+`market.pending_receiver_funding` and is released to LPs by the empty-book
+rule in §4.13.
+
+With a constant divisor the cumulative identity is exact: the value
+distributed through the receiver index over any sequence of checkpoints equals
+the accrued backing minus the final retained remainder, so the aggregate
+receiver credit can never exceed the recognized liability. §9.4's guarantee
+depends on this reset and does not hold without it.
+
 ### 4.6 Funding EMA and exact window integration
 
 Between market checkpoints, long and short exposure are constant. The funding
@@ -1757,14 +1815,17 @@ Every state-changing action follows one time boundary:
 4. Calculate the affected position's old pending obligations.
 5. Apply the action's settlement waterfall, exposure changes, and claim changes.
 6. Update position, market-side, market, and global aggregates together.
-7. Refresh market display and risk state from the resulting book.
-8. Refresh the global borrow rate from resulting risk units and LP cash equity.
-9. Store the completed state atomically.
+7. Reset the receiver-distribution remainder of the opposite payer stream for
+   every market side whose size changed (§4.5.1).
+8. Refresh market display and risk state from the resulting book.
+9. Refresh the global borrow rate from resulting risk units and LP cash equity.
+10. Store the completed state atomically.
 ```
 
 The order prevents two forms of retroactive accounting. New exposure never
 earns or owes funding from before it existed, and a utilization change never
-reprices borrow time that elapsed before the mutation.
+reprices borrow time that elapsed before the mutation. Step 7 keeps every
+carried division inside a window of constant divisor.
 
 An action touching one market checkpoints only that market. An LP action that
 calculates marked vault NAV checkpoints the global index and every active
@@ -2818,22 +2879,38 @@ function calculate_payable_pnl(
         )
 
         side_positive_pnl = max(side_raw_pnl, 0)
-        require side_positive_pnl > 0
 
-        hard_cap_value = mul_div_floor(
-            cash_lp_equity,
-            market_config.hard_cap_pnl_factor_bps,
-            BPS
-        )
+        if side_positive_pnl > 0:
+            hard_cap_value = mul_div_floor(
+                cash_lp_equity,
+                market_config.hard_cap_pnl_factor_bps,
+                BPS
+            )
 
-        capped_pnl = mul_div_floor(
-            position_raw_pnl,
-            min(hard_cap_value, side_positive_pnl),
-            side_positive_pnl
-        )
+            capped_pnl = mul_div_floor(
+                position_raw_pnl,
+                min(hard_cap_value, side_positive_pnl),
+                side_positive_pnl
+            )
 
     return min(capped_pnl, cash_lp_equity)
 ```
+
+A latched `HardCap` side with no aggregate positive PnL applies no side factor.
+This is a normal state, not an invariant violation, and must not revert.
+
+The risk state is a stored latch while `side_positive_pnl` is derived from the
+current price and the current book, so the two disagree routinely. A single
+profitable position on a side whose net aggregate PnL is zero or negative is
+the ordinary case, and the latch also survives a price move that removes the
+aggregate liability entirely until a recovery transition clears it. Rejecting
+that combination would make every settlement path that prices a position on
+the latched side revert, including liquidation, voluntary close, TP, SL, ADL,
+and the read-only quote in §4.12 — that is, the protocol would lose the
+ability to reduce risk exactly while a side is flagged as its riskiest.
+
+The position-level LP-equity clamp still applies in this branch, so a payout
+can never exceed the cash available to back it.
 
 For a partial decrease, first derive `size_removed` and `base_removed`, then run
 the same raw and payable calculations on those removed quantities. The
@@ -2866,7 +2943,9 @@ function apply_payable_pnl(
 
 Removing collateral for a trader loss credits LP residual equity. An
 uncollectible remainder is reported during terminal settlement and cannot be
-left attached to a surviving position.
+left attached to a surviving position. A caller on a surviving path must
+therefore assert `uncollectible_loss == 0` and revert otherwise; only terminal
+settlement may consume a nonzero remainder and report it as bad debt.
 
 ### 6.6 Calculate effective collateral
 
@@ -3426,9 +3505,27 @@ function add_exposure(position, side, ledger, size_added, base_added, risk_added
     side.risk_units += risk_added
 
     ledger.total_risk_units += risk_added
+
+    reset_receiver_distribution_remainder(market, side.direction)
 ```
 
 Opening also increments `open_position_count`. A full removal decrements it.
+
+Any change to a side's `size_open_interest` invalidates the carried divisor of
+the opposite payer stream's receiver-distribution division:
+
+```text
+function reset_receiver_distribution_remainder(market, changed_direction):
+    if changed_direction == Long:
+        market.short_payer_remainders.receiver_distribution_remainder = 0
+    else:
+        market.long_payer_remainders.receiver_distribution_remainder = 0
+```
+
+The long-payer stream distributes to short receivers and the short-payer
+stream distributes to long receivers, so a change on one side clears the carry
+of the stream that divides by that side's size. §4.5.1 states why this is
+required and why discarding the carry is safe.
 
 For a partial decrease:
 
@@ -3472,6 +3569,8 @@ side.base_exposure -= removal.base_removed
 side.risk_units -= removal.risk_removed
 
 ledger.total_risk_units -= removal.risk_removed
+
+reset_receiver_distribution_remainder(market, side.direction)
 ```
 
 A full close removes the exact remaining size, base exposure, and risk units;
@@ -3870,7 +3969,8 @@ expected checks:
     entry_price_allowed(...)
     market still accepts new exposure
     collateral_after_charges >= min_collateral
-    collateral_after_charges >= initial_margin(action.size)
+    collateral_after_charges
+        >= initial_margin(action.size) + projected_minimum_borrow
     resulting global risk is within capacity
     resulting market side is within size and base caps
     resulting position is healthy after every charge
@@ -3878,6 +3978,35 @@ expected checks:
 
 If any expected check fails, call `fail_entry_action` with
 `keeper_open_reward`. The first eligible attempt is terminal.
+
+`projected_minimum_borrow` is the monetary minimum that
+`initialize_borrow_window` will quote for this position. The borrow window is
+opened after the health checks, so without this term a position could be
+admitted exactly at initial margin and be below it the moment its window is
+quoted — pending borrow includes the active minimum-borrow floor (§2.9), and
+that floor exists from the first second of the window.
+
+The value is deterministic at preflight because every input is already known
+from the projected post-settlement state:
+
+```text
+projected_risk_units  = exposure.risk_added
+projected_equity      = cash LP equity after this action's claim changes
+projected_rate        = borrow rate at (total_risk_units + projected_risk_units,
+                                        projected_equity)
+
+projected_minimum_borrow = mul_div_ceil(
+    projected_risk_units * projected_rate,
+    min_borrow_fee_seconds,
+    INDEX_PRECISION * BPS * SECONDS_PER_DAY
+)
+```
+
+At the initial parameters the term is small — at most about `2.9` bps of size
+against an initial margin of `500` bps — but it is not zero, and including it
+is what makes "resulting position is healthy after every charge" literally
+true. The same term belongs in the increase preflight in §7.8, evaluated
+against the full resulting risk units rather than only the added ones.
 
 On success:
 
@@ -4215,7 +4344,8 @@ exposure = derive_added_exposure(
 add_exposure(position, side, ledger, exposure...)
 
 require resulting collateral >= min_collateral
-require resulting effective collateral >= initial_margin(resulting size)
+require resulting effective collateral
+    >= initial_margin(resulting size) + projected_minimum_borrow
 enforce global capacity and market exposure caps
 
 position.last_size_increase_at = now
@@ -4261,7 +4391,8 @@ function settle_decrease(action_id, keeper):
     require keeper authorization
     load matching action and position
     require now >= action.execute_after
-    require now >= position.last_size_increase_at + min_position_lifetime
+    if now < position.last_size_increase_at + min_position_lifetime:
+        return NotReady without state change or reward
 
     fill = read_fresh_uncached_stamped_price(position.market_id)
     if fill.observed_at <= action.commit_observed_at:
@@ -4311,24 +4442,33 @@ On success:
 
 ```text
 senior = capitalize_for_surviving_mutation(...)
-apply_payable_pnl(position, side, ledger, payable_pnl, cash_lp_equity)
+
+pnl_result = apply_payable_pnl(
+    position,
+    side,
+    ledger,
+    payable_pnl,
+    cash_lp_equity
+)
+require pnl_result.uncollectible_loss == 0
 
 reward = keeper_decrease_reward
 pay_keeper_from_position(position, side, ledger, keeper, reward)
 
 closing = calculate_closing_fee(
     removal.size_removed,
-    payable_pnl,
+    max(payable_pnl, 0),
     pending_funding,
     pending_borrow.due,
     reward,
     market.config
 )
 
-remove_position_collateral(position, side, ledger, closing.collectible)
+closing_collected = min(closing.collectible, position.stored_collateral)
+remove_position_collateral(position, side, ledger, closing_collected)
 distribute_open_close_revenue(
     ledger,
-    closing.collectible,
+    closing_collected,
     current_referrer(position.owner),
     global_config
 )
@@ -4350,6 +4490,17 @@ store state and emit decrease result
 
 Realized residual profit remains position collateral. A separate immediate
 collateral-withdrawal operation is not part of this decrease.
+
+Two guards in this sequence exist to keep the surviving path and the terminal
+path from diverging. `require pnl_result.uncollectible_loss == 0` enforces
+§6.5: a surviving position may never carry a loss its collateral could not
+absorb, and if preflight admitted one, the action must revert rather than
+leave the deficit attached. The `min` against stored collateral mirrors the
+terminal path in §6.10 so both paths debit the same way; preflight already
+guarantees the fee is payable, so the clamp is defence in depth and not a
+licence to collect a partial fee where a full one was due. Passing
+`max(payable_pnl, 0)` matches the close path and makes the call site agree
+with the sign convention `calculate_closing_fee` already applies internally.
 
 ### 7.10 Create and settle a voluntary close
 
@@ -4374,7 +4525,8 @@ function settle_close(action_id, keeper):
     require keeper authorization
     load matching action and position
     require now >= action.execute_after
-    require now >= position.last_size_increase_at + min_position_lifetime
+    if now < position.last_size_increase_at + min_position_lifetime:
+        return NotReady without state change or reward
 
     fill = read_fresh_uncached_stamped_price(position.market_id)
     if fill.observed_at <= action.commit_observed_at:
@@ -4454,7 +4606,8 @@ function execute_take_profit(position_id, keeper):
     require keeper authorization
     load position and take-profit instruction
     require now >= instruction.execute_after
-    require now >= position.last_size_increase_at + min_position_lifetime
+    if now < position.last_size_increase_at + min_position_lifetime:
+        return NotReady without state change or reward
 
     fill = read_fresh_uncached_stamped_price(position.market_id)
     if fill.observed_at <= instruction.commit_observed_at:
@@ -4499,7 +4652,10 @@ stop_loss_crossed =
 ```text
 function execute_stop_loss(position_id, keeper):
     require keeper authorization
-    require delay, fresh observation, minimum lifetime, and trigger
+    require delay, fresh observation, and trigger, each with the same
+        non-terminal outcome as take-profit
+    if the minimum position lifetime has not elapsed:
+        return NotReady without state change or reward
     if the exit slippage bound is not satisfied:
         return Pending without state change or reward
     checkpoint and calculate complete-position funding, borrow, and PnL
@@ -4792,7 +4948,7 @@ Trader actions use these logical states:
 | State | Stored? | Meaning |
 |---|---|---|
 | `Pending` | Yes | The commitment can still become executable |
-| `NotReady` | No; action remains `Pending` | Delay or fresh-observation requirement is not yet satisfied |
+| `NotReady` | No; action remains `Pending` | Execution delay, minimum position lifetime, or fresh-observation requirement is not yet satisfied |
 | `WaitingForTrigger` | No; action remains `Pending` | A limit, TP, or SL trigger has not crossed |
 | `Executed` | Terminal result | The requested economic mutation completed |
 | `Failed` | Terminal result | An eligible market-style attempt failed an expected deterministic check |
@@ -4812,13 +4968,21 @@ eligible =
       now >= execute_after
   and fill_observed_at > commit_observed_at
   and, for expiring entries, now < expires_at
+  and, for actions that remove exposure,
+      now >= position.last_size_increase_at + min_position_lifetime
 ```
+
+Every clause of this predicate is a timing gate, so failing any of them yields
+`NotReady`. None of them is an execution attempt, and none consumes the action
+or pays a reward. In particular, calling a decrease, close, take-profit, or
+stop-loss before the minimum position lifetime has elapsed is not an error: it
+is a settlement that is not due yet, and it must not revert.
 
 The principal transitions are:
 
 ```text
 Pending
-  ├─ delay or fresh observation missing ───────────────> Pending
+  ├─ delay, lifetime, or fresh observation missing ────> Pending
   ├─ conditional trigger not crossed ─────────────────> Pending
   ├─ eligible successful execution ───────────────────> Executed
   ├─ eligible market-style expected failure ──────────> Failed
@@ -4851,7 +5015,9 @@ The first eligible ordinary execution attempt that is not displaced by
 liquidation and can safely fund its configured reward is terminal:
 
 ```text
-if not delay_satisfied or not fresh_for_commit:
+if not delay_satisfied
+   or not lifetime_satisfied
+   or not fresh_for_commit:
     remain Pending
     pay no reward
 
@@ -4964,6 +5130,21 @@ Delay uses an inclusive boundary:
 too_early = now < execute_after
 delay_satisfied = now >= execute_after
 ```
+
+An action that removes exposure has a second, independent timing gate. Unlike
+`execute_after`, it is not frozen at creation: it is read from the position at
+settlement, so a size increase that lands between creation and settlement moves
+it forward.
+
+```text
+lifetime_satisfied =
+    now >= position.last_size_increase_at + min_position_lifetime
+```
+
+Both gates are inclusive and both are non-terminal. A decrease, close,
+take-profit, or stop-loss that is submitted before either boundary returns
+`NotReady`; it does not revert, does not consume the action, and pays no
+reward.
 
 Market and limit entries additionally freeze `expires_at`, which must be
 strictly later than `execute_after`. Expiry uses:
@@ -5096,6 +5277,7 @@ effects and incorrectly leave the trader with a free retry.
 These conditions are not terminal attempts:
 
 - execution delay not elapsed;
+- minimum position lifetime not elapsed;
 - no qualifying post-commit observation;
 - an untriggered limit, TP, or SL;
 - a TP or SL whose standing exit-price bound does not pass; and
@@ -5374,6 +5556,25 @@ that position's `market.pending_receiver_funding` and the global total, then
 increase position collateral by the same whole-cash amount. Both claim totals
 must be sufficient before the move, and neither may underflow.
 
+That sufficiency is a property of the arithmetic, not a check that may fail in
+normal operation. It holds because both sides of the split derive from the same
+`receiver_backing_scaled` value, because the receiver-side division carries its
+remainder under a constant divisor within each window (§4.5.1), and because
+each position's credit is floored at its own boundary. Over any sequence of
+checkpoints the value distributed through the receiver index equals the accrued
+backing minus the retained remainder, and each floored position read is at most
+its exact share, so:
+
+```text
+sum(receiver credits taken) <= sum(receiver_liability_delta recognized)
+```
+
+If an implementation omits the §4.5.1 reset, this bound is violated by up to
+`receiver_size / INDEX_PRECISION` whole cash units and the sufficiency check in
+`credit_received_funding` reverts, which would prevent a receiver position from
+being settled. The reset is what makes the check unreachable rather than merely
+defensive; it must not be replaced by a clamp that hides the deficit.
+
 Receiver-backed funding is collected before negative PnL, LP-backed funding,
 borrow, keeper rewards, closing fees, and trader payout. If a forced terminal
 settlement cannot collect it from the payer, LP residual equity absorbs the
@@ -5492,7 +5693,10 @@ effective_collateral =
 ```
 
 An open or increase must leave the resulting position at or above initial
-margin after all entry/increase charges. A partial decrease must pay every
+margin after all entry/increase charges and after the minimum-borrow floor
+that its new window will quote. The floor is part of pending borrow from the
+first second of the window, so admitting a position without it would accept a
+position that is already below initial margin. A partial decrease must pay every
 completed senior obligation and leave the survivor with at least minimum
 collateral and maintenance margin. Debt baselines cannot reset while any old
 window obligation remains unpaid.
@@ -5685,7 +5889,9 @@ Rounding follows ownership and risk direction consistently:
 - long value used for PnL rounds down;
 - short buyback value used for PnL rounds up;
 - remaining base exposure after a partial reduction rounds down, with the
-  removed portion receiving the difference;
+  removed portion receiving the difference — a conservation rule, not a
+  direction rule, because the two portions always sum to the pre-reduction
+  base (§2.11);
 - remaining risk units are re-derived from resulting size;
 - LP and referral percentage shares round down; and
 - the protocol receives fee-split remainder;
@@ -6154,7 +6360,11 @@ position collateral = $5,100.00 - $0.00 - $0.25
 initial margin       = ceil($100,000 * 5%)
                     = $5,000.00
 
-$5,099.75 >= $5,000.00                      => margin passes
+projected minimum borrow at 25 bps/day on $10,000 risk units
+                     = ceil($10,000 * 25 / 10,000 * 900 / 86,400)
+                     = $0.0260417
+
+$5,099.75 >= $5,000.0260417                 => margin passes
 post-settlement risk units pass capacity    => capacity passes
 ```
 
