@@ -5206,8 +5206,9 @@ reward makes a competing party settle at the first opportunity, so the party
 with an interest in waiting does not control the timing.
 
 Applying that answer here deletes the round-assignment machinery, the
-`previous_timestamp` accessor it needed from the oracle, and the `Expired`
-outcome that arose only from it. The residual exposure is the same one stated
+reliance on a round's `previous_timestamp`, and the `Expired` outcome that
+arose only from it. The field itself stays on the round record, where it is
+useful for reconstructing the round sequence off chain. The residual exposure is the same one stated
 in §1.7: the guarantee rests on there being a competing executor, not on a
 protocol rule that names one round. The production delay of one day makes the
 window to compete a wide one, so this is a weaker assumption here than it is
@@ -5555,6 +5556,11 @@ that the price contains information created after commitment.
 The observation stamp is the oldest source timestamp contributing to the
 accepted aggregate. This conservative choice ensures every source supporting
 the fill is newer than the commitment cursor.
+
+Both reads bypass the oracle's price cache. §12.7.2 explains why the
+commitment read in particular cannot use it: a cached stamp is backdated by up
+to a full cache window, which satisfies the comparison without any new
+observation having arrived.
 
 If no qualifying observation exists:
 
@@ -7195,7 +7201,8 @@ same way.
 Sections 2 through 11 define the economics. This section defines what the
 surrounding system must provide for those economics to hold: the token the
 vault holds, what pausing means, who may change what, how state survives an
-upgrade, how failures are reported, and what the protocol emits.
+upgrade, how failures are reported, what the protocol emits, and what it
+requires of the oracle.
 
 Reentrancy is deliberately absent from this section. The Soroban host rejects
 an attempt to re-enter a contract already on the call stack, so the ordering
@@ -7416,7 +7423,10 @@ Errors are part of the interface. A caller that cannot distinguish "your price
 bound was missed" from "the oracle has too few sources" cannot report anything
 useful, and a front end that guesses will guess wrong.
 
-Each contract owns a disjoint numeric range, assigned once and never reused:
+Every contract in this system currently numbers its errors from `1`, so the
+ranges overlap completely and a raw code is ambiguous without knowing which
+contract produced it. The required layout is a disjoint range per contract,
+assigned once and never reused:
 
 | Range | Owner |
 |---|---|
@@ -7437,6 +7447,15 @@ oracle outage as a slippage rejection:
    position manager calls the oracle router and the call fails, it returns its
    own error carrying the underlying one. Propagating the inner code unchanged
    is what makes a foreign code look native.
+
+The concrete collision is code `9`: `SlippageExceeded` in the position manager
+and `InsufficientSources` in the oracle router. It is the reason an oracle
+losing quorum was reported to traders as a rejected price bound — a message
+that tells them to widen a tolerance that was never the problem.
+
+Renumbering is a breaking interface change. Bindings, the off-chain consumers,
+and any client that maps codes to messages must move in the same release, and
+the migration in §12.4 is the natural place to gate it.
 
 Codes are grouped by cause so a caller can react to a class without
 enumerating every member:
@@ -7509,3 +7528,151 @@ Three requirements make these usable rather than decorative:
   checkable from the event stream alone.
 - `event_version` is bumped whenever a field's meaning changes, never silently
   reused. Consumers pin the version they understand.
+
+### 12.7 Oracle interface
+
+Every price-sensitive rule in this specification rests on two things the
+oracle must supply: an authenticated price, and an **observation stamp** that
+says when the data behind that price was produced. §8.6 defines the stamp as
+the oldest source timestamp contributing to the accepted aggregate, and the
+entire fresh-price guarantee of §1.13 is a comparison between two such stamps.
+
+The router this protocol calls aggregates a median across SEP-40 sources,
+rejecting any source that is stale beyond `staleness_threshold`, future-dated,
+non-positive, or scaled at other than seven decimals, then rejecting the whole
+aggregate if fewer than `min_required_sources` survived or if the spread
+exceeds `max_deviation_bps`. That is the right shape. What it does not do is
+return the stamp.
+
+#### 12.7.1 Required read interface
+
+```text
+StampedPrice {
+    price          # i128 at PRICE_PRECISION
+    observed_at    # oldest contributing source timestamp
+}
+
+get_stamped_price(symbol)       -> StampedPrice   # may serve the cache
+get_fresh_stamped_price(symbol) -> StampedPrice   # never serves the cache
+latest_round_id()               -> u64
+get_round(round_id)             -> OracleRound
+```
+
+The three price primitives named throughout sections 7 and 8 map onto these:
+
+| Specification name | Required call |
+|---|---|
+| `read_authenticated_stamped_price` | `get_fresh_stamped_price` |
+| `read_fresh_uncached_stamped_price` | `get_fresh_stamped_price` |
+| `read_authenticated_current_price` | `get_stamped_price` |
+
+Only the last may use the cache, because liquidation and ADL compare a price
+against a threshold rather than against an earlier observation.
+
+The router already computes everything this needs. Its cached entry carries
+`oldest_source_update` alongside the median, which is exactly `observed_at`,
+and its uncached aggregation path exists and is already used to stamp rounds.
+Neither is reachable from outside: the public read returns a bare `i128`, and
+the uncached path is internal. Until both are exposed, `commit_observed_at`
+and `fill_observed_at` cannot be populated, and every rule that depends on
+them — the fresh-price requirement, the `NotReady` outcome, the terminal
+first-attempt semantics — has nothing to compare.
+
+#### 12.7.2 Why the commitment cursor may not come from the cache
+
+It is not enough for the fill to bypass the cache. The commitment cursor must
+bypass it too, and this is the subtle half.
+
+A cached entry can be up to `cache_duration` old and still be served. If a
+trader's commitment records that entry's stamp, `commit_observed_at` is
+already backdated by up to a full cache window at the moment it is written. A
+fill then satisfies `fill_observed_at > commit_observed_at` against an
+observation that may itself predate the commitment — the test passes without
+any new information having arrived, which is the exact thing §1.13 exists to
+prevent.
+
+The cache is also permissionless to fill. Anyone may call the cached read and
+write the entry, so an actor who can choose when that write happens can choose
+which observation later commitments are measured against.
+
+Both reads therefore use the uncached path. Creation is already a state-
+changing transaction, so paying for a fresh aggregation there costs nothing
+structurally.
+
+#### 12.7.3 Rounds
+
+Synchronized rounds are a separate mechanism with a separate purpose: they
+stamp every active market at one timestamp so LP accounting can mark the whole
+vault consistently (§4.9). A round is built from uncached aggregation for each
+active market and records `id`, `timestamp`, `previous_id`,
+`previous_timestamp`, and one price per symbol.
+
+Round publication is permissioned — it requires the keeper role — while
+everything else in this protocol is permissionless. That is a real liveness
+dependency and belongs in the operational picture: if rounds stop, LP deposits
+and withdrawals stop with them, though positions continue to trade and
+liquidate normally on per-symbol prices.
+
+Rounds are also the reason `max_active_markets` is bounded. A round iterates
+every active market and aggregates each from scratch, so the registry bound of
+§5.1 is what keeps that operation inside a transaction budget.
+
+#### 12.7.4 Failure behaviour, and what it costs
+
+Every rejection is a panic, so the calling operation reverts:
+
+| Condition | Meaning |
+|---|---|
+| No configured sources | The symbol was never set up |
+| Every source stale, future-dated, or non-positive | Total feed outage |
+| Fewer than `min_required_sources` valid | Quorum lost |
+| Spread exceeds `max_deviation_bps` | Sources disagree |
+| Median or deviation arithmetic overflows | A source returned an absurd value |
+
+For trader actions a revert is the correct outcome and costs little: the
+action stays pending, nothing is charged, and it settles when prices return.
+The only difference from a `NotReady` return is that a revert emits nothing,
+so an off-chain consumer sees an unexplained failed transaction rather than a
+reason.
+
+For forced actions the cost is real. Liquidation and ADL both need a price,
+and both revert without one, so **during an oracle outage the protocol cannot
+reduce risk while borrow and funding keep accruing** (§4.7). Positions that
+should have been liquidated are liquidated later, at whatever price returns,
+with the interim accrual still owed and LP equity absorbing whatever the
+collateral no longer covers.
+
+The deviation guard deserves specific attention, because it has already caused
+this in production: sources disagreeing past `max_deviation_bps` rejects the
+aggregate, and if the disagreement persists the state is absorbing — every
+open and every close reverts together, and the protocol cannot trade its way
+out. A guard that exists to stop the vault pricing *new* risk badly should not
+also block the operations that *remove* risk. This specification states the
+requirement and does not prescribe the mechanism:
+
+> A risk-reducing operation must not be blocked by a guard whose purpose is to
+> protect risk-adding operations.
+
+Whether that is met by a wider bound for liquidation, a documented fallback
+aggregate, or an explicit degraded mode is an oracle-side decision. What is
+not acceptable is the current coupling, where one guard governs both
+directions.
+
+#### 12.7.5 Configuration owned elsewhere
+
+These values are enforced by the router, not by this protocol, and every
+number in sections 2 and 10 assumes them:
+
+| Value | Requirement |
+|---|---|
+| Source price decimals | Exactly `7`, matching `PRICE_PRECISION`; validated when sources are set |
+| `min_required_sources` | At least `2` |
+| `max_deviation_bps` | At most `10,000` |
+| Source count | At most `16` |
+| `cache_duration` | Greater than zero and at most `staleness_threshold` |
+
+`staleness_threshold` is the one to choose deliberately. It bounds how old the
+data behind an accepted fill can be, so it is the real width of the window a
+trader is committing against — the execution delay of §8.5 measures the wait,
+and this measures the freshness. Setting it far above the oracle's publication
+cadence widens that window silently, without any parameter in §10 changing.
