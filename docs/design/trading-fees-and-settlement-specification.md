@@ -2196,6 +2196,7 @@ Global configuration applies to the complete vault.
 | `fee_lp_revenue_share_bps` | Bps | LP share of collected opening and closing fees; initial value `9,000` |
 | `borrow_lp_revenue_share_bps` | Bps | LP share of collected borrow; initial value `9,000` |
 | `referral_fee_share_bps` | Bps | Referral share of collected opening and closing fees; initial value `250` and carved from protocol revenue |
+| `config_timelock_seconds` | Seconds | Delay between proposing and applying a parameter change; initial value `172,800` |
 | `max_active_markets` | Count | Hard bound on the active-market registry and any synchronized LP-accounting loop |
 | `global_hard_cap_factor_limit_bps` | Bps | Bound on aggregate configured hard-cap exposure across market sides |
 
@@ -2257,15 +2258,23 @@ active_market_ids
 initialized
 paused
 configuration_authority
+pause_authority
+unpause_authority
 oracle_authority
+protocol_recipient
 vault_asset
 state_version
 ```
 
+The authorities are distinct roles with distinct powers (§12.3), `vault_asset`
+must satisfy the token requirements in §12.1, and `state_version` is the
+migration guard defined in §12.4.
+
 The monotonically increasing ID counters prevent identifier reuse. The active
 market registry contains each market with live accounting state exactly once
-and never exceeds `max_active_markets`. Pausing blocks the configured mutation
-paths but does not alter either accrual timestamp.
+and never exceeds `max_active_markets`. Pausing blocks every path that adds
+exposure and none that removes it, and does not alter either accrual
+timestamp; §12.2 gives the complete rule.
 
 ### 5.3 Market configuration
 
@@ -2757,7 +2766,9 @@ Cleanup is part of every terminal transition:
 
 No live position, pending action, escrow, referral balance, or protocol claim
 may disappear because of storage expiry. Storage lifetime must be extended or
-the state must remain restorable for as long as the economic obligation exists.
+the state must remain restorable for as long as the economic obligation
+exists. §12.4 assigns each of these a storage class and requires every
+persistent entry to be extendable permissionlessly.
 
 ## 6. Core accounting algorithms
 
@@ -3913,8 +3924,13 @@ A side's risk state answers one question: may this side take on more exposure?
 
 ```text
 function side_accepts_new_exposure(side):
-    return side.risk_state in { Normal, Warning }
+    return not ledger.paused
+       and side.risk_state in { Normal, Warning }
 ```
+
+A pause is folded into this one predicate rather than checked separately at
+every call site, so pausing behaves as a vault-wide restricted state; §12.2
+explains what follows from that.
 
 This is the predicate §7.2 and §7.8 call "market still accepts new exposure",
 and it is evaluated on the side the action would add to, after the risk state
@@ -6384,6 +6400,7 @@ user-selected execution budget exists.
 
 | Parameter | Unit | Initial value | Meaning |
 |---|---:|---:|---|
+| `config_timelock_seconds` | Seconds | `172,800` | Delay between proposing and applying a parameter change (§12.3) |
 | `max_active_markets` | Count | `8` | Maximum active markets included in synchronized vault operations |
 | `global_hard_cap_factor_limit_bps` | Bps | `10,000` | Maximum sum of configured side hard-cap factors across active markets |
 | `max_withdraw_utilization_bps` | Bps | `8,000` | Maximum post-withdrawal utilization |
@@ -6490,6 +6507,7 @@ borrow_lp_revenue_share_bps <= BPS
 max_active_markets > 0
 0 < global_hard_cap_factor_limit_bps <= BPS
 lp_request_delay_seconds > 0
+config_timelock_seconds > 0
 ```
 
 All fixed keeper rewards must be non-negative cash amounts. The three entry-
@@ -6549,7 +6567,9 @@ the profit caps provide the economic bound.
 
 #### 10.3.3 Configuration-update boundaries
 
-A parameter update follows these rules:
+A parameter update is proposed and applied in two phases separated by
+`config_timelock_seconds`, with the exemptions listed in §12.3. Each phase
+follows these rules:
 
 1. Authenticate the configuration authority.
 2. Validate the complete proposed configuration and every cross-parameter
@@ -6642,6 +6662,7 @@ borrow_exponent_bps                  = 20,000          # exponent 2.0
 fee_lp_revenue_share_bps             = 9,000           # 90%
 borrow_lp_revenue_share_bps          = 9,000           # 90%
 referral_fee_share_bps               = 250             # 2.5%
+config_timelock_seconds              = 172,800         # 48 hours
 max_active_markets                   = 8
 global_hard_cap_factor_limit_bps     = 10,000
 max_withdraw_utilization_bps         = 8,000           # 80%
@@ -7168,3 +7189,323 @@ escrow claim are removed, no exposure or fee revenue is created, and the order
 cannot later execute. A valid later reward increase would use the new active
 expiry reward, bounded by `min_collateral`, with the remainder refunded in the
 same way.
+
+## 12. Operational contract
+
+Sections 2 through 11 define the economics. This section defines what the
+surrounding system must provide for those economics to hold: the token the
+vault holds, what pausing means, who may change what, how state survives an
+upgrade, how failures are reported, and what the protocol emits.
+
+Reentrancy is deliberately absent from this section. The Soroban host rejects
+an attempt to re-enter a contract already on the call stack, so the ordering
+rules in §4.9 and §6.10 exist for accounting clarity — accrue before mutate,
+credit before collect — and not as a reentrancy defence. An implementation
+must not weaken those orderings on the grounds that reentrancy is impossible;
+they are load-bearing for correctness on their own.
+
+### 12.1 Collateral and share token requirements
+
+The vault holds exactly one collateral token, `vault_asset`, and its balance is
+the sole authority for physical cash (§2.2). That makes the token part of the
+trust boundary, so its properties are requirements rather than assumptions.
+
+```text
+decimals(vault_asset) == 7
+```
+
+Every cash amount in this specification is stated at `PRICE_PRECISION = 10^7`
+and compared directly against the token balance. A token with different
+decimals would make every claim wrong by a power of ten, and no conversion
+factor is permitted, because §2.2 forbids maintaining a second authoritative
+cash counter that a conversion would amount to. Seven decimals is also the
+Stellar convention, so this is a check rather than a constraint.
+
+The token must further satisfy:
+
+- **No transfer fee.** §9.1 requires a transfer into the vault to increase
+  physical cash and exactly one ownership label by the same amount. A token
+  that delivers less than it debits breaks that identity on the first deposit.
+- **No rebasing and no balance change outside transfers.** An unsolicited
+  increase is tolerated and belongs to LPs (§2.2), but a decrease the vault did
+  not authorize creates a silent shortfall against claims it has already
+  recognized.
+- **No supply or precision change after activation.**
+
+Two properties are trusted rather than required, and the consequences are
+stated here rather than discovered later. The issuer can freeze or blacklist an
+account, and a transfer can fail for reasons the vault cannot inspect. A failed
+transfer reverts the whole operation (§8.9), which is correct for accounting
+and bad for liveness: a blacklisted trader's liquidation reverts, and the
+position keeps accruing borrow while nobody can remove it.
+
+An implementation that cannot accept that dependency should convert terminal
+payouts to a pull model — credit an owed balance and let the owner withdraw it
+separately — at the cost of a sixth entry in the claim equation of §2.5. This
+specification does not take that step; it records the exposure so the choice is
+explicit.
+
+The LP share token is a separate token controlled by the vault:
+
+```text
+decimals(share_token) == 13        # 7 collateral decimals + SHARE_SCALE
+mint and burn authority == vault only
+```
+
+Shares are ordinary transferable tokens. A holder who acquires shares outside
+the request queue still redeems them through it, so the FIFO delay, the
+free-capital bound, and the withdrawal gates of §7.17 apply to every holder
+identically. A secondary market may therefore price shares below their marked
+value whenever the queue is long or withdrawals are gated; that discount is
+information about the queue, not a claim against the vault.
+
+### 12.2 Pause semantics
+
+`paused` was previously described only as blocking "the configured mutation
+paths", which named no paths. The rule is:
+
+**A pause stops the vault taking on risk. It never stops anyone shedding it.**
+
+That single principle decides every operation, and it is implemented through
+one existing predicate rather than a check scattered across the call sites:
+
+```text
+function side_accepts_new_exposure(side):
+    return not ledger.paused
+       and side.risk_state in { Normal, Warning }
+```
+
+Making a pause equivalent to a vault-wide restricted state means every path
+that adds exposure already knows what to do. A pending market open, limit
+open, or increase that becomes eligible during a pause takes the ordinary
+expected-failure route of §8.9: it terminates, pays its action reward, refunds
+its escrow, charges no opening fee, and creates no position. A pause therefore
+*drains* the pending risk-adding queue instead of freezing it, and no order is
+left stranded waiting for an unpause that may never come.
+
+| Operation | While paused |
+|---|---|
+| Create any entry order or increase | Rejected at creation |
+| Settle a pending entry or increase | Terminates as an expected failure |
+| Cancel a limit order, clean up an expired order | Allowed |
+| Add collateral | Allowed |
+| Decrease, close, take-profit, stop-loss | Allowed |
+| Liquidation, ADL | Allowed |
+| Create or resolve an LP request | Rejected; pending requests wait |
+| Claim referral revenue | Allowed |
+| Claim protocol revenue | Rejected |
+| Global and market checkpoints | Always run |
+
+`require LP requests are currently allowed` in §7.17 means `not paused`.
+Pending LP requests are safe to leave waiting precisely because the `Expired`
+outcome no longer exists: the queue resumes where it stopped, with every
+request's escrow intact.
+
+Two entries in that table need their reasons stated. Protocol revenue claims
+are blocked because the same authority can generally pause; leaving both
+available at once creates a pause-and-drain path that costs nothing to close.
+Referral balances are ordinary user funds and are not withheld.
+
+Accrual never pauses. The global borrow index, every market's funding index,
+and both checkpoint clocks advance across a pause exactly as they would
+otherwise, and §4.7 already states this for borrow. That is only fair because
+exits stay open: a trader who does not want to keep paying borrow through an
+incident can close, and a position that becomes unhealthy can still be
+liquidated. A pause that blocked exits while continuing to charge for time
+would be charging for a service it had withdrawn.
+
+### 12.3 Authorization and governance
+
+Four authorities appear in the storage model. They are distinct roles and
+should be distinct keys.
+
+| Authority | May |
+|---|---|
+| `configuration_authority` | Propose and apply parameter changes, register markets |
+| `pause_authority` | Set `paused`; may not clear it |
+| `unpause_authority` | Clear `paused` |
+| `oracle_authority` | Name the contract that supplies authenticated prices |
+| `protocol_recipient` | Claim accumulated protocol revenue |
+
+Pausing and unpausing are split on purpose. Pausing is a safety action whose
+worst case is lost volume, so it should sit behind a fast key that can act
+without ceremony. Unpausing re-admits risk, so it belongs with the slower
+authority alongside configuration.
+
+Parameter changes are two-phase and delayed:
+
+```text
+propose_configuration(authority, proposal):
+    validate the complete proposal under §10.3
+    store it with effective_at = now + config_timelock_seconds
+
+apply_configuration(proposal_id):
+    require now >= proposal.effective_at
+    checkpoint every accumulator the change affects, under the old value
+    store the new values
+    emit old and new values with the effective timestamp
+```
+
+The delay exists because almost every parameter here can move value between
+parties who cannot react instantly. Raising `close_pnl_fee_bps` taxes open
+positions at settlement; lowering `hard_cap_pnl_factor_bps` reduces payouts on
+a side that is already restricted; changing `maintenance_margin_bps` makes
+positions liquidatable that were not. A timelock does not prevent any of that,
+but it makes it observable in advance, which is the difference between a
+governance action and a surprise.
+
+```text
+config_timelock_seconds initial value: 172,800   # 48 hours
+```
+
+Two categories are exempt, and only these two: setting `paused`, and any
+change that is validated to move a bound in the more conservative direction —
+lowering an exposure ceiling, lowering `risk_capacity_limit_bps`, raising a
+margin requirement. A protocol that must wait 48 hours to become safer has the
+timelock pointed the wrong way. Every exempt change still checkpoints under
+the old value first, and still emits.
+
+Nothing in this specification grants an authority the ability to move position
+collateral, escrow, referral balances, or LP equity directly. There is no
+administrative transfer, no forced position closure outside liquidation and
+ADL, and no path from any authority to a trader's funds other than the
+economics defined in sections 3 and 6.
+
+### 12.4 Storage lifetime, upgrade, and migration
+
+§5.14 requires that no live position, pending action, escrow, referral
+balance, or protocol claim disappears through storage expiry. On Soroban that
+is a statement about storage type and TTL, so it is made concrete here.
+
+| State | Storage | TTL |
+|---|---|---|
+| Global ledger, configuration, authorities | Instance | Extended on every operation |
+| Position, pending action, LP request | Persistent | Extended on every touch |
+| Market configuration and accounting | Persistent | Extended on every touch |
+| Referral code owner, referrer map, balance | Persistent | Extended on every touch |
+
+Nothing economic is stored as temporary. Every persistent entry must be
+extendable permissionlessly, because a position whose owner has gone quiet
+must still be liquidatable, and a referral balance must survive its owner's
+inactivity. An implementation that lets an entry expire has destroyed a claim,
+which no rule in §9 permits.
+
+`state_version` is the migration guard:
+
+```text
+STATE_VERSION = the version this build understands
+
+every operation:
+    require ledger.state_version == STATE_VERSION
+```
+
+An upgrade that changes any stored layout ships with a migration that is the
+only operation permitted to run against the previous version, and that
+advances `state_version` when it completes. Until it has run, every other
+entry point rejects. This is deliberately blunt: a half-migrated vault whose
+aggregates no longer equal the sum of their records violates §5.11, and there
+is no safe way to keep trading through that.
+
+A migration that cannot complete in one transaction must be resumable and must
+leave the vault rejecting operations until it finishes. It may not interleave
+with settlement.
+
+### 12.5 Error taxonomy
+
+Errors are part of the interface. A caller that cannot distinguish "your price
+bound was missed" from "the oracle has too few sources" cannot report anything
+useful, and a front end that guesses will guess wrong.
+
+Each contract owns a disjoint numeric range, assigned once and never reused:
+
+| Range | Owner |
+|---|---|
+| `1–99` | Position manager |
+| `100–199` | Vault |
+| `200–299` | Oracle router |
+| `300–399` | Configuration manager |
+
+Two rules follow, and both exist because of a failure this system has already
+had in production, where one numeric code meant `SlippageExceeded` in one
+contract and `InsufficientSources` in another, and the interface reported an
+oracle outage as a slippage rejection:
+
+1. **A code is never reused across contracts.** Disjoint ranges make a raw
+   code globally unambiguous without needing to know which contract produced
+   it.
+2. **A cross-contract error is wrapped, never passed through.** When the
+   position manager calls the oracle router and the call fails, it returns its
+   own error carrying the underlying one. Propagating the inner code unchanged
+   is what makes a foreign code look native.
+
+Codes are grouped by cause so a caller can react to a class without
+enumerating every member:
+
+| Class | Meaning for the caller |
+|---|---|
+| Authorization | The caller is not who this operation requires |
+| Not found | The identifier does not exist or was already consumed |
+| State | The vault or market is in a state that forbids this operation, including paused |
+| Validation | The arguments are structurally invalid |
+| Oracle | No qualifying price: stale, unavailable, or insufficiently corroborated |
+| Accounting | An invariant from §9 would be violated; always a bug or corruption |
+| Arithmetic | Overflow or a failed narrowing check from §2.1.1 |
+
+The `Accounting` and `Arithmetic` classes must never be reachable through
+ordinary use. If either can be triggered by a well-formed call, that is a
+defect in this specification or its implementation, not a user error.
+
+Expected terminal failures are not errors. Slippage, insufficient capacity, an
+exposure cap, and a blocked market side all complete successfully and record
+`Failed` with a reason (§8.9). They appear in results, not in error codes.
+
+### 12.6 Emitted results
+
+Every terminal outcome emits exactly one structured event. Events are the only
+durable record of a terminal state — §5.6 removes the pending record and §5.14
+removes the position — so an off-chain consumer that misses an event cannot
+reconstruct it from state.
+
+Every event carries a common envelope:
+
+```text
+EventHeader {
+    event_version
+    ledger_timestamp
+    market_id            # absent for vault-wide events
+    actor                # the caller credited with the action
+}
+```
+
+The required events and the fields a consumer cannot do without:
+
+| Event | Required fields |
+|---|---|
+| `ActionCommitted` | action id, kind, owner, payload, `execute_after`, `commit_observed_at`, escrow |
+| `ActionSettled` | action id, kind, resulting position id, fill price, `fill_observed_at`, keeper reward |
+| `ActionFailed` | action id, kind, reason, keeper reward paid, owner refund |
+| `ActionCancelled` / `ActionExpired` | action id, refund, keeper reward |
+| `PositionOpened` | position id, owner, direction, size, base exposure, collateral, entry price |
+| `PositionChanged` | position id, size and base delta, realized payable PnL, every senior item collected, closing fee, resulting state |
+| `PositionClosed` | position id, reason, payable PnL, senior items, closing fee, payout, unpaid amounts |
+| `Liquidated` | position id, effective collateral, threshold, reward from position, reward from LP, unpaid reward, bad debt |
+| `Deleveraged` | position id, side factor before and after, payout factor applied, payable PnL, reward |
+| `FundingCheckpoint` | market, payer side per segment, index deltas, liability delta, EMA after |
+| `BorrowCheckpoint` | index delta, rate applied, rate after |
+| `RiskStateChanged` | market, side, previous state, next state, PnL factor |
+| `RevenueDistributed` | source, collected amount, LP, protocol, and referral shares |
+| `LpRequestCreated` / `LpRequestResolved` | request id, owner, kind, escrow, shares, assets, NAV used, reward |
+| `ConfigurationProposed` / `ConfigurationApplied` | field, old value, new value, effective timestamp |
+
+Three requirements make these usable rather than decorative:
+
+- Amounts are emitted as **collected**, never as nominal. A waived closing fee
+  and an uncollected borrow are reported as what they were, zero collected,
+  with the waived amount separate. This mirrors §3.7: shares are calculated
+  from what was collected, and an indexer that sums nominal fees will not
+  reconcile against the ledger.
+- Every event that changes cash ownership carries enough to reproduce the
+  change. The sum of an event's parts equals the amount it moved, so §9.1 is
+  checkable from the event stream alone.
+- `event_version` is bumped whenever a field's meaning changes, never silently
+  reused. Consumers pin the version they understand.
