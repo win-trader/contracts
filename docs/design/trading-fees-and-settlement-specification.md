@@ -108,6 +108,7 @@
   - [7.15 Register or change a referrer](#715-register-or-change-a-referrer)
   - [7.16 Claim referral revenue](#716-claim-referral-revenue)
   - [7.17 Deposit and withdraw LP liquidity](#717-deposit-and-withdraw-lp-liquidity)
+  - [7.18 Initialize the vault and register a market](#718-initialize-the-vault-and-register-a-market)
 - [8. Order lifecycle and failure behavior](#8-order-lifecycle-and-failure-behavior)
   - [8.1 Order states](#81-order-states)
   - [8.2 Market-order lifecycle](#82-market-order-lifecycle)
@@ -525,19 +526,35 @@ in cost, and uses no division other than the helper's.
 bit length, then recover the fraction one bit at a time by repeated squaring
 of the normalized mantissa, again for 48 iterations.
 
-From these:
+From these, with `u`, `e`, and the result all at `INDEX_PRECISION`, so that
+`INDEX_PRECISION` denotes one whole in each of them:
 
 ```text
-pow(u, e) = exp2_neg(mul_div_floor(e, log2(INDEX_PRECISION^2 / u),
-                                   INDEX_PRECISION))
-            for 0 < u < 1
+pow(u, e) = exp2_neg(
+                mul_div_floor(
+                    e,
+                    log2(mul_div_floor(INDEX_PRECISION, INDEX_PRECISION, u)),
+                    INDEX_PRECISION
+                )
+            )
+            for 0 < u < INDEX_PRECISION
 
-pow(0, e) = 0        for e > 0
-pow(1, e) = 1
+pow(0, e)                = 0                 for e > 0
+pow(INDEX_PRECISION, e)  = INDEX_PRECISION
 ```
 
-`fixed_point_power` in §6.14 is this `pow`, with `u = utilization_bps / BPS`
-and `e = borrow_exponent_bps / BPS`.
+The inner `mul_div_floor` forms `1/u` at `INDEX_PRECISION`, which is at least
+one whole, so `log2` receives an argument in its declared domain and returns a
+non-negative value.
+
+§6.14 calls this `pow` after converting utilization and the borrow exponent
+from basis points to `INDEX_PRECISION`.
+
+One further constant is required, by the window integral in §4.6:
+
+```text
+LN2 = 69,314,718,055,994          # ln(2) * INDEX_PRECISION, truncated
+```
 
 The declared tolerance, which §4.6 refers to, is:
 
@@ -1408,13 +1425,15 @@ The reward is an execution cost, not protocol revenue. It is transferred to
 the keeper rather than accumulated in a reserve or shared with LPs, the
 protocol, or a referrer.
 
-Where a reward's source can be smaller than the reward itself, the payment is
-capped at what that source holds and the action still completes. This applies
-to the ordinary failure reward on a position action (§7.0) and to
-`keeper_lp_resolve_reward` on a request whose escrow or released assets are
-worth less than the reward. A capped reward never draws on LP equity.
-`keeper_liquidation_reward` is the single reward that may, and only as far as
-that equity reaches (§9.10).
+Three payments are capped at what their source holds and complete anyway: the
+failure reward on a position action (§7.0), `keeper_lp_resolve_reward` on a
+request worth less than the reward, and `keeper_liquidation_reward` (§9.10).
+Each pays for an action that must not be blocked by its own cost.
+
+Every other reward is required in full, and its action reverts if the position
+cannot fund it: a voluntary settlement that cannot pay for itself should not
+complete. Of the three capped payments, only the liquidation reward may draw
+on LP equity, and only as far as that equity reaches.
 
 #### 3.5.1 Open execution
 
@@ -1964,9 +1983,9 @@ A carried remainder encodes an undistributed fraction of one divisor. Reusing
 it under a different divisor changes the value it represents.
 
 Three of the four funding remainders divide by a constant — both payer-index
-divisions by `BPS * SECONDS_PER_DAY`, the guaranteed-liability division by
-`INDEX_PRECISION` — so their carries may persist for the lifetime of the payer
-stream.
+divisions by `INDEX_PRECISION * BPS * SECONDS_PER_DAY`, the
+guaranteed-liability division by `INDEX_PRECISION` — so their carries may
+persist for the lifetime of the payer stream.
 
 The receiver-distribution division is the exception: it divides by
 `receiver.size_open_interest`, which changes whenever a position on the
@@ -2015,8 +2034,8 @@ At elapsed time `dt`:
 
 ```text
 d  = 2^(-dt / H)
-J1 = H / ln(2)     * (1 - d)
-J2 = H / (2 ln(2)) * (1 - d^2)
+J1 = H * INDEX_PRECISION / LN2   * (1 - d) / INDEX_PRECISION
+J2 = H * INDEX_PRECISION / LN2   * (1 - d^2) / (2 * INDEX_PRECISION)
 
 quadratic_integral =
     A^2 * dt + 2*A*B*J1 + B^2*J2
@@ -2027,10 +2046,33 @@ funding_weight =
 linear_integral = A * dt + B * J1
 ```
 
+The scale of each quantity here is load-bearing and is fixed as follows.
+`A` and `B` are skew fractions at `INDEX_PRECISION`. `d`, being a decay factor
+in `[0, 1]`, is also at `INDEX_PRECISION`. `J1` and `J2` are in seconds. The
+products `A^2`, `A*B` and `B^2` therefore carry `INDEX_PRECISION^2`, and so:
+
+```text
+quadratic_integral   is INDEX_PRECISION^2 * seconds
+funding_weight       is INDEX_PRECISION^2 * bps * seconds
+```
+
+`funding_weight` is **not** `INDEX_PRECISION`-scaled. Converting it to an
+index delta — cumulative fee per unit of size at `INDEX_PRECISION` — divides
+by `INDEX_PRECISION * BPS * SECONDS_PER_DAY`: one `INDEX_PRECISION` to undo
+the squared skew, `BPS` to turn basis points into a fraction, and
+`SECONDS_PER_DAY` to turn a daily rate into a per-second one. §6.2 performs
+exactly that division.
+
+`LN2` is the `INDEX_PRECISION`-scaled natural logarithm of two, a stored
+constant:
+
+```text
+LN2 = 69,314,718,055,994          # ln(2) * INDEX_PRECISION, truncated
+```
+
 `linear_integral` is useful for locating and validating a zero crossing, but
 its sign does not select one payer for an interval containing both signs.
 
-`funding_weight` is the `INDEX_PRECISION`-scaled integral of bps times seconds.
 For an interval on which `I(t)` keeps one sign, that sign selects the payer and
 the non-negative quadratic integral determines the amount. Because `I(t)` is
 monotonic while live skew is constant, it has at most one zero crossing in a
@@ -2714,8 +2756,9 @@ next_lp_request_to_resolve
 Only the FIFO head can resolve, and every terminal resolution advances the
 pointer exactly once. A deposit's collateral remains outside vault physical
 cash until successful settlement. A withdrawal's escrowed shares remain in
-total share supply until they are burned on success. A failed request returns
-its escrow less the resolve reward.
+total share supply until they are burned on success. A failed deposit returns its
+collateral escrow less the resolve reward; a failed withdrawal returns its
+escrowed shares in full and pays no reward (§7.17).
 
 There is no persistent pending-withdrawal cash claim and no partial LP fill. A
 request settles fully or refunds fully, so LP request escrow is not included in
@@ -2761,14 +2804,19 @@ min_collateral > keeper_liquidation_reward
 Entry-order creation must also guarantee that its actual escrow can pay the
 applicable open, limit, or expiry reward.
 
-The blanket bound covers the seven rewards that are paid from position value
-or released assets rather than from escrow — increase, decrease, close, TP,
-SL, ADL, and LP resolution. They are capped at what their source holds rather
-than guaranteed (§3.5), so an oversized value cannot strand a position; what
-it can do is let one failed action strip a position down to `min_collateral`.
-Bounding every reward by `min_collateral` keeps the worst case a single
-minimum position's worth of value, which is the same bound the escrow-funded
-rewards already carry.
+Only three payments are capped at what their source holds: the failure reward
+on a position action (§7.0), `keeper_lp_resolve_reward`, and
+`keeper_liquidation_reward`. Every other payment through
+`pay_keeper_from_position` requires its full amount and reverts if the
+position cannot fund it — a voluntary settlement that cannot pay for itself
+should not complete.
+
+That makes the blanket bound load-bearing rather than cosmetic. Without it,
+raising `keeper_close_reward` above `keeper_liquidation_reward` would create
+positions that are neither liquidatable, because their effective collateral is
+above the liquidation threshold, nor closeable, because
+`pay_keeper_from_position` reverts. Bounding every reward by `min_collateral`,
+which is itself above `keeper_liquidation_reward`, keeps that gap empty.
 
 ### 5.11 Aggregate exposure and risk state
 
@@ -3018,13 +3066,13 @@ lp_weight = segment.funding_weight - receiver_weight
 
 (receiver_payer_delta, payer_stream.receiver_payer_remainder) = carried_div(
     receiver_weight,
-    BPS * SECONDS_PER_DAY,
+    INDEX_PRECISION * BPS * SECONDS_PER_DAY,
     payer_stream.receiver_payer_remainder
 )
 
 (lp_payer_delta, payer_stream.lp_payer_remainder) = carried_div(
     lp_weight,
-    BPS * SECONDS_PER_DAY,
+    INDEX_PRECISION * BPS * SECONDS_PER_DAY,
     payer_stream.lp_payer_remainder
 )
 
@@ -3971,23 +4019,31 @@ function refresh_borrow_rate(ledger, physical_cash, global_config):
         equity
     )
 
-    variable_factor = fixed_point_power(
-        utilization / BPS,
-        global_config.borrow_exponent_bps / BPS
-    )   # the pow of §2.1.2, at INDEX_PRECISION
+    u = mul_div_floor(utilization, INDEX_PRECISION, BPS)
+    e = mul_div_floor(
+        global_config.borrow_exponent_bps,
+        INDEX_PRECISION,
+        BPS
+    )
 
-    rate_bps_day =
-          global_config.base_borrow_rate_bps_day
-        + global_config.max_variable_borrow_bps_day * variable_factor
+    variable_factor = pow(u, e)          # §2.1.2, at INDEX_PRECISION
 
     ledger.current_borrow_rate =
-        rate_bps_day * INDEX_PRECISION
+          global_config.base_borrow_rate_bps_day * INDEX_PRECISION
+        + global_config.max_variable_borrow_bps_day * variable_factor
 ```
 
-The calculation keeps `variable_factor` at fixed precision rather than
-performing either displayed division as integer truncation. Refresh runs
-after every completed mutation that changes total risk units, physical cash,
-or any non-LP claim affecting cash LP equity.
+`current_borrow_rate` is bps per day at `INDEX_PRECISION` (§4.2), and both
+addends are formed at that scale before they are summed. The base rate is a
+plain bps number and is scaled explicitly; the variable term is a bps number
+multiplied by an already-scaled factor, so it arrives at the same scale
+without a second multiplication. At full utilization with the initial
+parameters the result is `275 * INDEX_PRECISION`.
+
+`u` and `e` are converted to `INDEX_PRECISION` before the call rather than
+written as `utilization / BPS`, which as an integer division would collapse to
+`0` or `1`. Refresh runs after every completed mutation that changes total
+risk units, physical cash, or any non-LP claim affecting cash LP equity.
 
 ### 6.15 Evaluate liquidation eligibility
 
@@ -4206,6 +4262,10 @@ Every operation executes atomically and processes one action. A settlement
 caller cannot submit an array or combine unrelated opens, closes,
 liquidations, or ADL actions in one call.
 
+The two operations that must run before any of the rest — initializing the
+vault and registering a market — are specified last, in §7.18, because every
+value they establish is defined by the sections in between.
+
 `require keeper authorization` means the caller authenticates the address that
 will receive the reward. It does not require membership in a privileged keeper
 allowlist; execution remains permissionless.
@@ -4386,8 +4446,10 @@ execution or expiry.
 function settle_market_open(action_id, keeper):
     require keeper authorization
     action = load pending MarketOpen action
-    require now < action.expires_at
-    require now >= action.execute_after
+    if now >= action.expires_at:
+        return Expired without state change or reward
+    if now < action.execute_after:
+        return NotReady without state change or reward
 
     fill = read_fresh_uncached_stamped_price(action.market_id)
 
@@ -4562,8 +4624,10 @@ reward is collected at creation.
 function settle_limit_open(action_id, keeper):
     require keeper authorization
     action = load pending LimitOpen action
-    require now < action.expires_at
-    require now >= action.execute_after
+    if now >= action.expires_at:
+        return Expired without state change or reward
+    if now < action.execute_after:
+        return NotReady without state change or reward
 
     fill = read_fresh_uncached_stamped_price(action.market_id)
 
@@ -4719,7 +4783,8 @@ function settle_increase(action_id, keeper):
     require keeper authorization
     load matching pending action and position
     require position.pending_mutation_action_id == action_id
-    require now >= action.execute_after
+    if now < action.execute_after:
+        return NotReady without state change or reward
 
     fill = read_fresh_uncached_stamped_price(position.market_id)
     if fill.observed_at <= action.commit_observed_at:
@@ -4858,7 +4923,8 @@ Successful settlement:
 function settle_decrease(action_id, keeper):
     require keeper authorization
     load matching action and position
-    require now >= action.execute_after
+    if now < action.execute_after:
+        return NotReady without state change or reward
     if now < position.last_size_increase_at + min_position_lifetime:
         return NotReady without state change or reward
 
@@ -4894,7 +4960,8 @@ function settle_decrease(action_id, keeper):
     payable_pnl = calculate payable PnL for the removed exposure
 
     preflight full capitalization, keeper reward, closing fee,
-        remaining health, and minimum collateral
+        remaining health, minimum collateral, and that cash LP equity
+        covers the payable profit to be credited
 
     if an expected preflight check fails:
         return fail_position_action(
@@ -4927,6 +4994,7 @@ pnl_result = apply_payable_pnl(
     cash_lp_equity
 )
 require pnl_result.uncollectible_loss == 0
+require pnl_result.unpaid_profit == 0
 
 reward = keeper_decrease_reward
 pay_keeper_from_position(position, side, ledger, keeper, reward)
@@ -4952,7 +5020,7 @@ distribute_open_close_revenue(
 apply removal to position, side, and global risk aggregates
 
 require surviving position collateral >= min_collateral
-require surviving effective collateral >= maintenance margin
+require surviving effective collateral > liquidation_threshold
 
 reset funding debts for resulting size
 refresh market display and risk state
@@ -4967,13 +5035,18 @@ store state and emit decrease result
 Realized residual profit remains position collateral. A separate immediate
 collateral-withdrawal operation is not part of this decrease.
 
-Two guards keep this path and the terminal path from diverging.
-`require pnl_result.uncollectible_loss == 0` enforces §6.5: a surviving
-position may never carry a loss its collateral could not absorb, so the action
-reverts rather than leaving the deficit attached. The `min` against stored
-collateral mirrors §6.10 so both paths debit the same way; preflight already
-guarantees the fee is payable, so it is defence in depth, not a licence to
-collect a partial fee where a full one was due.
+Three guards keep this path and the terminal path from diverging.
+`uncollectible_loss == 0` enforces §6.5: a surviving position may never carry
+a loss its collateral could not absorb, so the action reverts rather than
+leaving the deficit attached. `unpaid_profit == 0` is its mirror: a surviving
+position may not realize profit the vault could not pay, because unlike a
+terminal settlement it has no result in which to report the shortfall and its
+closing fee would be computed from profit that was never credited. The
+decrease preflight therefore checks that cash LP equity covers the payable
+profit, and the action takes the ordinary expected-failure path if it does
+not. The `min` against stored collateral mirrors §6.10 so both paths debit the
+same way; preflight already guarantees the fee is payable, so it is defence in
+depth, not a licence to collect a partial fee where a full one was due.
 
 ### 7.10 Create and settle a voluntary close
 
@@ -4997,7 +5070,8 @@ Settlement:
 function settle_close(action_id, keeper):
     require keeper authorization
     load matching action and position
-    require now >= action.execute_after
+    if now < action.execute_after:
+        return NotReady without state change or reward
     if now < position.last_size_increase_at + min_position_lifetime:
         return NotReady without state change or reward
 
@@ -5078,7 +5152,8 @@ Execution:
 function execute_take_profit(position_id, keeper):
     require keeper authorization
     load position and take-profit instruction
-    require now >= instruction.execute_after
+    if now < instruction.execute_after:
+        return NotReady without state change or reward
     if now < position.last_size_increase_at + min_position_lifetime:
         return NotReady without state change or reward
 
@@ -5426,7 +5501,9 @@ shares_to_mint = mul_div_floor(
     conversion_assets
 )
 
-require deposit_eligible and shares_to_mint > 0
+if not deposit_eligible or shares_to_mint == 0:
+    fail_lp_request(request, executor, reason)
+
 transfer resolve_reward from escrow to the executor
 transfer remaining asset escrow into the vault
 mint shares_to_mint to owner
@@ -5475,10 +5552,11 @@ assets_to_pay = mul_div_floor(
     share_supply + SHARE_SCALE
 )
 
-require assets_to_pay <= free_lp_capital
-require post-withdraw utilization <= max_withdraw_utilization_bps
-require vault_shortfall == 0
-require no active market side is in ADL or HardCap
+if assets_to_pay > free_lp_capital
+   or post-withdraw utilization > max_withdraw_utilization_bps
+   or vault_shortfall > 0
+   or any active market side is in ADL or HardCap:
+    fail_lp_request(request, executor, reason)
 
 resolve_reward = min(keeper_lp_resolve_reward, assets_to_pay)
 
@@ -5504,14 +5582,133 @@ sticky, not a stop.
 A deposit is not gated on side risk state at all. It adds LP equity and
 therefore lowers every side's factor, which is the direction the vault wants.
 
-An expected failed deposit or withdrawal pays the resolve reward, marks the
-request failed, advances the FIFO pointer, and refunds the remaining escrow.
+A failed resolution is an expected terminal outcome, not a revert:
+
+```text
+function fail_lp_request(request, executor, reason):
+    if request.kind == Deposit:
+        reward = min(keeper_lp_resolve_reward, request.escrowed_amount)
+        transfer reward from escrow to the executor
+        refund the remaining collateral escrow to the owner
+    else:
+        reward = 0
+        return the complete escrowed shares to the owner
+
+    mark request Failed
+    advance the FIFO pointer
+    emit the terminal result(reason, reward)
+```
+
+A failed *withdrawal* pays no reward. Its escrow is shares, not cash, and a
+failed withdrawal releases no assets, so there is nothing to pay from; taking
+the reward in shares would confiscate part of an LP's stake for an outcome
+they did not cause. The executor is compensated by the deposits and successful
+withdrawals in the same queue, and a queue standing on a failing withdrawal is
+cleared by the owner themselves at the cost of gas alone (§7.17).
+
+Failing rather than reverting is what keeps the queue moving. Only the FIFO
+head is resolvable, so a `require` here would let one unsatisfiable request —
+a withdrawal larger than free capital, or any request while a side is latched
+— block every LP behind it for as long as that condition held.
+
 There is no `Expired` outcome: a request that is not yet resolvable stays
 `Pending` and is retried, and a request that becomes resolvable either settles
 or fails. There are no partial fills and no persistent withdrawal cash
 claims. In a clean terminal vault, the final LP
 may withdraw all residual cash LP equity so conversion rounding cannot strand
 ownerless assets.
+
+### 7.18 Initialize the vault and register a market
+
+These are the two operations that must exist before any other can be called,
+and they are the only ones the configuration authority performs on the
+economic state.
+
+```text
+function initialize_vault(authority, config, vault_asset, share_token,
+                          oracle, authorities):
+    require not ledger.initialized
+
+    validate the complete global configuration under §10.3.1
+    require decimals(vault_asset) == 7          # §12.1
+    require decimals(share_token) == 13
+
+    store the configuration and the four authorities
+    ledger.borrow_index            = 0
+    ledger.borrow_index_remainder  = 0
+    ledger.current_borrow_rate     = base_borrow_rate_bps_day
+                                     * INDEX_PRECISION
+    ledger.last_global_checkpoint  = now
+    every claim total                = 0
+    ledger.total_risk_units          = 0
+    ledger.open_position_count       = 0
+    ledger.restricted_market_side_count = 0
+    next_position_id = next_action_id = next_lp_request_id = 1
+    next_lp_request_to_resolve       = 1
+    active_market_ids                = empty
+    ledger.paused                    = false
+    ledger.state_version             = STATE_VERSION
+    ledger.initialized               = true
+```
+
+The global borrow clock starts at the moment of initialization, so the first
+position opened does not inherit index growth from an epoch that had no
+positions in it. The rate starts at the base rate because utilization is zero.
+
+```text
+function register_market(authority, market_id, market_config):
+    require configuration authority
+    require ledger.initialized
+    require market_id is not already registered
+    require len(active_market_ids) < max_active_markets
+
+    validate market_config under §10.3.2
+    require the resulting sum of hard-cap factors over every active
+        market side stays within global_hard_cap_factor_limit_bps
+
+    for each side in { Long, Short }:
+        size_open_interest      = 0
+        base_exposure           = 0
+        stored_collateral_total = 0
+        risk_units              = 0
+        risk_state              = Normal
+        hard_cap_payout_factor  = INDEX_PRECISION
+
+    all six funding indices  = 0
+    skew_ema                 = 0
+    both remainder groups    = zeroed
+    pending_receiver_funding = 0
+    current_payer_side       = None
+    current_payer_rate       = 0
+    last_funding_checkpoint  = now
+
+    append market_id to active_market_ids
+    emit market-registered result
+```
+
+A market's funding indices start at zero and its checkpoint starts at the
+moment of registration, which is why §4.13's empty-book rule seeds `skew_ema`
+from the first position's live skew rather than leaving it at zero: an empty
+book has no skew, and starting a one-sided market from a balanced history
+would hand it a temporary funding discount.
+
+Removing a market is the mirror and is permitted only from a fully quiet
+state:
+
+```text
+function deregister_market(authority, market_id):
+    require configuration authority
+    require both sides have zero size_open_interest and zero base_exposure
+    require market.pending_receiver_funding == 0
+    require both sides are Normal
+    require no pending action references this market
+
+    remove market_id from active_market_ids
+```
+
+Its cumulative indices and checkpoint timestamp are retained, not reset, so a
+later re-registration cannot rewind an index that a historical position was
+priced against.
 
 ## 8. Order lifecycle and failure behavior
 
@@ -5550,11 +5747,16 @@ eligible =
       now >= position.last_size_increase_at + min_position_lifetime
 ```
 
-Every clause of this predicate is a timing gate, so failing any of them yields
-`NotReady`. None of them is an execution attempt, and none consumes the action
-or pays a reward. In particular, calling a decrease, close, take-profit, or
-stop-loss before the minimum position lifetime has elapsed is not an error: it
-is a settlement that is not due yet, and it must not revert.
+The first, second and fourth clauses are timing gates that a later call can
+satisfy, so failing one yields `NotReady`. None of them is an execution
+attempt, none consumes the action, and none pays a reward — calling a
+decrease, close, take-profit, or stop-loss before the minimum position
+lifetime has elapsed is a settlement that is not due yet, and it must not
+revert.
+
+The expiry clause is different in direction. An expired entry never becomes
+ready, so failing it yields `Expired` rather than `NotReady`, and the only
+operation it admits is the cleanup path of §7.6.
 
 The principal transitions are:
 
