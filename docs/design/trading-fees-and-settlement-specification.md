@@ -301,8 +301,10 @@ position value disappears.
 
 Liquidation is a safety action, not a voluntary trade. It pays a fixed keeper
 reward but no closing fee. The position's remaining collateral pays its losses,
-accrued obligations, and keeper reward as far as possible. LP equity covers a
-shortfall if a violent price movement jumps past the liquidation buffer.
+accrued obligations, and keeper reward as far as possible. If a violent price
+movement jumps past the liquidation buffer, LP equity covers the reward
+shortfall as far as that equity reaches; the liquidation completes either
+way.
 
 ### 1.10 Automatic deleveraging
 
@@ -537,8 +539,7 @@ pow(1, e) = 1
 `fixed_point_power` in §6.14 is this `pow`, with `u = utilization_bps / BPS`
 and `e = borrow_exponent_bps / BPS`.
 
-The declared tolerance — the value §4.6 refers to and previously left
-undefined — is:
+The declared tolerance, which §4.6 refers to, is:
 
 ```text
 DECAY_TOLERANCE = 1e-12 relative
@@ -937,6 +938,7 @@ Aggregate counters are stored only to make bounded accounting possible. Each
 aggregate must equal the sum of the records it represents, and every mutation
 must update the individual record and its aggregate in the same atomic
 operation.
+
 ## 3. Fees and rewards
 
 The protocol has four economic mechanisms: opening and closing fees collect
@@ -948,7 +950,7 @@ From the trader's perspective, the signed funding term is funding owed minus
 funding received:
 
 ```text
-entry_deductions = opening_fee + keeper_entry_reward
+entry_deductions = opening_fee + applicable entry keeper reward
 
 settlement_deductions =
       borrow_fee
@@ -1049,6 +1051,7 @@ pnl_fee = ceil(
 The base is price PnL after any hard-cap payout factor. It is not reduced
 again by the payment-time cash limit, which applies to the transfer rather
 than to the amount recognized.
+
 Funding received does not create eligibility for a closing fee, and neither
 stored collateral nor added collateral is part of this fee base.
 
@@ -1409,9 +1412,9 @@ Where a reward's source can be smaller than the reward itself, the payment is
 capped at what that source holds and the action still completes. This applies
 to the ordinary failure reward on a position action (§7.0) and to
 `keeper_lp_resolve_reward` on a request whose escrow or released assets are
-worth less than the reward. A capped reward never draws on LP equity;
-`keeper_liquidation_reward` remains the single exception with an explicit LP
-backstop.
+worth less than the reward. A capped reward never draws on LP equity.
+`keeper_liquidation_reward` is the single reward that may, and only as far as
+that equity reaches (§9.10).
 
 #### 3.5.1 Open execution
 
@@ -1426,8 +1429,8 @@ opening fee. An ineligible call or reverted transaction pays nothing.
 #### 3.5.2 Increase execution
 
 A successful size increase pays `keeper_increase_reward` from stored position
-collateral. The reward is included in the post-action health check.
-It is separate from the opening fee on added size.
+collateral. The reward is included in the post-action health check and is
+separate from the opening fee on added size.
 
 #### 3.5.3 Decrease execution
 
@@ -2049,139 +2052,47 @@ carried integer division.
 
 ### 4.7 Global checkpoint
 
-The global checkpoint advances borrow to `now`:
+A global checkpoint advances the borrow index from `last_global_checkpoint` to
+a given timestamp, using `current_borrow_rate` for the whole elapsed interval
+and carrying the division remainder. `accrue_global_borrow` in §6.1 is the
+operation.
 
-```text
-function checkpoint_global(now):
-    require now >= last_global_checkpoint
+It never derives a new rate. Past time is accounted for with the rate already
+stored for that interval; refreshing the rate is a separate final step after
+every mutation that can change utilization (§6.14). Reversing that order would
+reprice history.
 
-    if now == last_global_checkpoint:
-        return
-
-    elapsed = now - last_global_checkpoint
-
-    numerator =
-        current_borrow_rate * elapsed
-        + borrow_index_remainder
-
-    borrow_index += floor(
-        numerator / (BPS * SECONDS_PER_DAY)
-    )
-
-    borrow_index_remainder =
-        numerator % (BPS * SECONDS_PER_DAY)
-
-    last_global_checkpoint = now
-```
-
-This operation never derives a new rate. It accounts for past time using the
-rate already stored for that interval. Rate refresh is a separate final step
-after all mutations that can change utilization.
-
-A pause does not stop this clock. The next checkpoint includes all elapsed
+Calling it twice at the same timestamp does nothing the second time, and the
+clock does not stop for a pause: the next checkpoint includes all elapsed
 wall-clock time while positions remained open.
 
 ### 4.8 Market checkpoint
 
-The market checkpoint advances one market's funding state to `now`:
+A market checkpoint advances one market's funding state to a given timestamp.
+`accrue_market_funding` in §6.2 is the operation, and it does four things in
+order.
 
-```text
-function checkpoint_market(market, now):
-    require now >= market.last_funding_checkpoint
+First it integrates the window. The blended skew `I(t)` moves continuously as
+the EMA decays, so the interval is integrated in closed form rather than
+sampled (§4.6), and it is split at a sign change so each subinterval accrues
+to the side that was actually paying during it. This yields one or two
+segments, each with a payer side and a non-negative funding weight.
 
-    if now == market.last_funding_checkpoint:
-        return
+Second it divides each segment's weight between receivers and LPs, in
+proportion to how much opposing base exposure exists. A side with no
+offsetting exposure sends its whole flow to LPs; a side fully offset sends all
+of it to receivers.
 
-    elapsed = now - market.last_funding_checkpoint
+Third it advances the indices. The two payer-side indices take their weights
+through carried divisions, and both the guaranteed receiver liability and the
+receiver credit index derive from the same scaled backing so neither can
+exceed the other's justification. Recognizing that liability changes non-LP
+claims and therefore cash LP equity, which is why the global borrow rate is
+refreshed after the enclosing action rather than inside the checkpoint.
 
-    segments = integrate_funding_window_by_sign(
-        long_base,
-        short_base,
-        skew_ema,
-        instant_weight,
-        half_life,
-        max_funding_rate,
-        elapsed
-    )
-```
-
-`segments` contains one segment if blended skew keeps one sign and two segments
-if it crosses zero. Each segment contains its payer side, non-negative funding
-weight, elapsed bounds, and EMA after the segment. Process the segments in time
-order. If a segment's selected payer side has nonzero size, its funding weight
-is split:
-
-```text
-receiver_weight =
-    if receiver_size == 0 or receiver_base == 0:
-        0
-    else if receiver_base >= payer_base:
-        segment.funding_weight
-    else:
-        floor(segment.funding_weight * receiver_base / payer_base)
-
-lp_weight = segment.funding_weight - receiver_weight
-```
-
-The carried payer-index divisions are:
-
-```text
-(receiver_payer_index_delta, payer_stream.receiver_payer_remainder) = carried_div(
-    receiver_weight,
-    BPS * SECONDS_PER_DAY,
-    payer_stream.receiver_payer_remainder
-)
-
-(lp_payer_index_delta, payer_stream.lp_payer_remainder) = carried_div(
-    lp_weight,
-    BPS * SECONDS_PER_DAY,
-    payer_stream.lp_payer_remainder
-)
-```
-
-The corresponding payer-side indices increase by these deltas. The guaranteed
-receiver liability and receiver credit index both derive from the exact scaled
-backing represented by the receiver-backed payer-index delta:
-
-```text
-receiver_backing_scaled =
-    payer_size * receiver_payer_index_delta
-
-(receiver_liability_delta, payer_stream.receiver_liability_remainder) = carried_div(
-    receiver_backing_scaled,
-    INDEX_PRECISION,
-    payer_stream.receiver_liability_remainder
-)
-
-pending_receiver_funding_total += receiver_liability_delta
-market.pending_receiver_funding += receiver_liability_delta
-
-if receiver_size > 0:
-    (receiver_index_delta, payer_stream.receiver_distribution_remainder) = carried_div(
-        receiver_backing_scaled,
-        receiver_size,
-        payer_stream.receiver_distribution_remainder
-    )
-else:
-    receiver_index_delta = 0
-```
-
-The receiver-side index increases by `receiver_index_delta`. If there is no
-selected payer exposure, no funding index advances, but the EMA and checkpoint
-time still advance so historical skew continues to decay correctly.
-
-Finally:
-
-```text
-market.skew_ema = segments.ema_after
-market.current_payer_side = payer_side_after_checkpoint
-market.current_payer_rate = displayed_rate_after_checkpoint
-market.last_funding_checkpoint = now
-```
-
-Recognizing `receiver_liability_delta` changes non-LP claims and can therefore
-change cash LP equity. The global borrow rate is refreshed after the complete
-action, not inside the market checkpoint.
+Fourth it advances the EMA, the display fields, and the timestamp. These
+advance even when no funding accrued — when no payer side has exposure — so
+historical skew keeps decaying correctly.
 
 ### 4.9 Checkpoint and mutation order
 
@@ -2430,10 +2341,10 @@ LP request policy is global:
 Fixed keeper rewards are also global and independently configurable. They are
 listed separately below because they form one coherent configuration group.
 
-The removed global fields are equally important: there is no minimum borrow
-index delta, user-selected execution budget, keeper revenue share, keeper
-reserve, percentage liquidation reward, percentage ADL reward, maximum ADL
-reward, or insolvency-touch reward.
+What global configuration deliberately does not contain is equally important.
+There is no minimum borrow index delta, user-selected execution budget, keeper
+revenue share, keeper reserve, percentage liquidation reward, percentage ADL
+reward, maximum ADL reward, and no insolvency-touch reward.
 
 ### 5.2 Global accounting state
 
@@ -2843,12 +2754,8 @@ The configuration stores no generic execution reward and no user override.
 Every settlement kind maps to exactly one field. Validation requires:
 
 ```text
-min_collateral > keeper_liquidation_reward
-keeper_open_reward <= min_collateral
-keeper_limit_order_reward <= min_collateral
-keeper_expiry_reward <= min_collateral
-
 every keeper reward <= min_collateral
+min_collateral > keeper_liquidation_reward
 ```
 
 Entry-order creation must also guarantee that its actual escrow can pay the
@@ -3714,7 +3621,9 @@ function settle_terminal_position(inputs):
         inputs.global_config
     )
 
-    pay_selected_keeper_reward(inputs.keeper_policy)
+    pay the reward selected by
+        keeper_reward_for(inputs.action_kind, inputs.global_config),
+        from the source §5.10 assigns it
 
     if inputs.close_reason permits closing fee:
         closing_fee = calculate_closing_fee(
@@ -6783,10 +6692,6 @@ this specification.
 ```text
 min_collateral > 0
 min_collateral > keeper_liquidation_reward
-keeper_open_reward <= min_collateral
-keeper_limit_order_reward <= min_collateral
-keeper_expiry_reward <= min_collateral
-
 every keeper reward <= min_collateral
 
 0 <= min_position_lifetime  <= 86,400
@@ -6977,10 +6882,10 @@ public test environment              = 3,600            # 1 hour
 production environment               = 86,400           # 1 day
 ```
 
-The removed parameters are not set to zero and retained as dead configuration;
-they do not exist. This includes skew-tiered opening or closing fees, a minimum
-borrow index delta, a keeper revenue share, a keeper reserve, user execution
-budgets, percentage liquidation or ADL rewards, a maximum ADL reward, and an
+Parameters this protocol does not have are absent rather than present and set
+to zero: there are no skew-tiered opening or closing fees, no minimum borrow
+index delta, no keeper revenue share, no keeper reserve, no user execution
+budget, no percentage liquidation or ADL reward, no maximum ADL reward, and no
 insolvency-touch reward.
 
 ## 11. End-to-end examples
