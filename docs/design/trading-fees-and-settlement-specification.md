@@ -2879,10 +2879,21 @@ min_collateral > keeper_liquidation_reward
 keeper_open_reward <= min_collateral
 keeper_limit_order_reward <= min_collateral
 keeper_expiry_reward <= min_collateral
+
+every keeper reward <= min_collateral
 ```
 
 Entry-order creation must also guarantee that its actual escrow can pay the
 applicable open, limit, or expiry reward.
+
+The blanket bound covers the seven rewards that are paid from position value
+or released assets rather than from escrow — increase, decrease, close, TP,
+SL, ADL, and LP resolution. They are capped at what their source holds rather
+than guaranteed (§3.5), so an oversized value cannot strand a position; what
+it can do is let one failed action strip a position down to `min_collateral`.
+Bounding every reward by `min_collateral` keeps the worst case a single
+minimum position's worth of value, which is the same bound the escrow-funded
+rewards already carry.
 
 ### 5.11 Aggregate exposure and risk state
 
@@ -4355,8 +4366,9 @@ An eligible untriggered limit or position trigger remains pending and pays no
 reward. A market-style pending action normally uses its first eligible attempt
 as its only attempt: an expected deterministic failure consumes the action,
 pays the configured action reward, refunds any action escrow, and returns a
-terminal failure result. The explicit `RequiresLiquidation` safety outcome remains non-terminal. An
-unexpected invariant failure reverts and leaves the action unchanged.
+terminal failure result. The explicit `RequiresLiquidation` safety outcome
+remains non-terminal. An unexpected invariant failure reverts and leaves the
+action unchanged.
 
 The terminal entry-failure helper is:
 
@@ -4545,7 +4557,8 @@ Run a complete preflight against the hypothetical post-settlement state:
 
 ```text
 expected checks:
-    entry_price_allowed(...)
+    entry_price_allowed(action.direction, fill.price,
+                        action.acceptable_price)
     side_accepts_new_exposure(target side)          # §6.16.1
     collateral_after_charges >= min_collateral
     collateral_after_charges
@@ -4891,7 +4904,15 @@ liquidation path rather than charged for an ordinary failed attempt.
 On success:
 
 ```text
-senior = capitalize_for_surviving_mutation(...)
+senior = capitalize_for_surviving_mutation(
+    position,
+    side,
+    ledger,
+    market,
+    pending_funding,
+    pending_borrow,
+    global_config
+)
 
 if action.collateral_added > 0:
     move complete action escrow into position collateral
@@ -4921,7 +4942,14 @@ exposure = derive_added_exposure(
     fill.price,
     market.config
 )
-add_exposure(position, side, ledger, exposure...)
+add_exposure(
+    position,
+    side,
+    ledger,
+    exposure.size_added,
+    exposure.base_added,
+    exposure.risk_added
+)
 
 require resulting collateral >= min_collateral
 require resulting effective collateral
@@ -5021,7 +5049,15 @@ function settle_decrease(action_id, keeper):
 On success:
 
 ```text
-senior = capitalize_for_surviving_mutation(...)
+senior = capitalize_for_surviving_mutation(
+    position,
+    side,
+    ledger,
+    market,
+    pending_funding,
+    pending_borrow,
+    global_config
+)
 
 pnl_result = apply_payable_pnl(
     position,
@@ -5526,8 +5562,9 @@ with an interest in waiting does not control the timing.
 Applying that answer here deletes the round-assignment machinery, the
 reliance on a round's `previous_timestamp`, and the `Expired` outcome that
 arose only from it. The field itself stays on the round record, where it is
-useful for reconstructing the round sequence off chain. The residual exposure is the same one stated
-in §1.7: the guarantee rests on there being a competing executor, not on a
+useful for reconstructing the round sequence off chain. The residual exposure
+is the same one stated in §1.7: the guarantee rests on there being a competing
+executor, not on a
 protocol rule that names one round. The production delay of one day makes the
 window to compete a wide one, so this is a weaker assumption here than it is
 for a five-second trader action.
@@ -6825,6 +6862,8 @@ keeper_open_reward <= min_collateral
 keeper_limit_order_reward <= min_collateral
 keeper_expiry_reward <= min_collateral
 
+every keeper reward <= min_collateral
+
 0 <= min_position_lifetime  <= 86,400
 0 <  min_borrow_fee_seconds <= 86,400
 0 <  max_order_lifetime_seconds <= 2,592,000
@@ -7040,7 +7079,7 @@ max_long_base_exposure               = 1,000,000,000,000,000,000
 max_short_base_exposure              = 1,000,000,000,000,000,000
 order_execution_delay_seconds        = 5
 
-LP REQUEST DELAY PROFILE
+lp_request_delay_seconds  BY DEPLOYMENT PROFILE
 local development                    = 60               # 1 minute
 public test environment              = 3,600            # 1 hour
 production environment               = 86,400           # 1 day
