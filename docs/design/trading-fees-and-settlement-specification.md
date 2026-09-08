@@ -424,15 +424,11 @@ cash_lp_equity = max(physical_cash - non_lp_claims, 0)
 ```
 
 Cash LP equity is not the same as marked vault value. Open trader PnL must also
-be recognized when valuing LP shares. For each market side, trader profit is
-recognized in full while trader loss is recognized only up to the collateral
-stored by that side:
+be recognized when valuing LP shares, and it is recognized in one direction
+only:
 
 ```text
-if raw_side_pnl >= 0:
-    recognized_side_pnl = raw_side_pnl
-else:
-    recognized_side_pnl = -min(abs(raw_side_pnl), side_stored_collateral)
+recognized_side_pnl = max(raw_side_pnl, 0)
 
 marked_vault_nav = max(
     cash_lp_equity - sum(recognized_side_pnl),
@@ -440,10 +436,37 @@ marked_vault_nav = max(
 )
 ```
 
-Positive trader PnL reduces LP value because it is a liability of the vault.
-Collectible trader loss increases LP value. Loss beyond stored collateral is
-not treated as an LP receivable because the trader cannot be forced to pay it.
-Uncollected future borrow and funding are likewise excluded from marked value.
+Positive trader PnL reduces LP value because it is a liability the vault will
+have to pay. Unrealized trader *loss* is not recognized at all. It raises LP
+value only when it is actually collected, at which point it is already in
+`cash_lp_equity` and needs no separate recognition. Uncollected future borrow
+and funding are excluded for the same reason.
+
+This is deliberately conservative, and the alternative was unsound. Capping an
+aggregate side loss by that side's aggregate stored collateral — recognizing
+`-min(abs(raw_side_pnl), side_stored_collateral)` — treats every position's
+collateral as available to cover every other position's loss. A side holding
+one healthy position with `$100` of collateral and one failing position with
+`$10` of collateral against a `$500` loss would recognize `$110` of collectible
+loss when only `$10` can ever be collected, because the healthy trader's
+collateral is theirs and will be returned to them.
+
+Fixing that per position is not possible within the cost model of §4.1: the
+collectible amount is `min(loss_i, collateral_i)` for each position, which
+moves continuously with price and therefore cannot be maintained as a stored
+aggregate. Recognizing nothing is the only bounded rule that cannot overstate.
+
+Two consequences are worth stating plainly, because they are the price of the
+rule rather than accidents of it:
+
+- LP share price understates while traders are collectively losing, and steps
+  up as those losses are realized rather than accruing smoothly. A depositor
+  during a trader drawdown gets slightly more shares than a mark-to-market
+  valuation would give, and a withdrawer gets slightly less.
+- That asymmetry is the point. An LP can no longer withdraw against
+  unrealized trader losses that may never be collected, so the exit-timing
+  advantage — leave while traders are underwater, let the remaining LPs
+  discover the loss was never collectible — does not exist.
 
 A third quantity, free LP capital, measures cash that is not locked as risk
 backing:
@@ -575,24 +598,34 @@ A positive value is trader profit and a negative value is trader loss.
 Negative PnL always passes through without a payout reduction.
 
 Payable PnL is the amount the settlement system is permitted to recognize for
-the position. For a positive raw PnL, the active market-side payout factor is
-applied first and the result is then limited by available LP equity:
+the position. For a positive raw PnL, the market side's stored payout factor
+is applied:
 
 ```text
 if raw_pnl <= 0:
     payable_pnl = raw_pnl
 else:
-    factor_adjusted_pnl = floor(
-        raw_pnl * active_payout_factor / INDEX_PRECISION
+    payable_pnl = floor(
+        raw_pnl * side_hard_cap_payout_factor / INDEX_PRECISION
     )
-
-    payable_pnl = min(factor_adjusted_pnl, cash_lp_equity)
 ```
 
-The normal payout factor is one whole. A hard-cap risk state can lower it
-uniformly for every profitable position on the affected market side. The LP
-equity clamp also applies outside the hard-cap state so no individual profit
-credit can exceed the cash backing available when it is credited.
+The stored factor is one whole unless the side is latched in `HardCap`, in
+which case it is the value snapshotted when the side entered that state
+(§6.5). It is uniform across every profitable position on the side, so no
+position's recognized profit depends on when it settles relative to another's.
+
+Recognition is separate from payment. What the vault can actually pay is
+additionally limited by cash on hand at the moment of payment:
+
+```text
+paid_pnl = min(payable_pnl, cash_lp_equity)
+```
+
+That limit belongs to the payment step alone. It is not part of payable PnL,
+and therefore not part of effective collateral, margin, or liquidation
+eligibility — a position's health does not depend on how much cash the vault
+happens to hold.
 
 Fees that use profit as their base use positive payable price PnL, not raw PnL,
 funding credits, or stored collateral.
@@ -613,6 +646,11 @@ effective_collateral =
 
 Pending borrow includes the active minimum-borrow floor. Each pending amount is
 calculated from current indices without first changing stored collateral.
+
+`payable_pnl` here is the recognized amount of §2.8 — raw PnL after the side's
+stored hard-cap factor — and never the payment-time cash limit. Health is a
+property of the position and its market, not of the vault's cash balance at
+this instant.
 
 Effective collateral can therefore fall even when the stored collateral field
 has not changed. Every health-sensitive action must use this live value after
@@ -832,7 +870,9 @@ pnl_fee = ceil(
 )
 ```
 
-The base is price PnL after any hard-cap payout factor and LP-equity clamp.
+The base is price PnL after any hard-cap payout factor. It is not reduced
+again by the payment-time cash limit, which applies to the transfer rather
+than to the amount recognized.
 Funding received does not create eligibility for a closing fee, and neither
 stored collateral nor added collateral is part of this fee base.
 
@@ -2334,6 +2374,7 @@ Each market has a long side and a short side. Each side stores:
 | `stored_collateral_total` | Cash | Sum of stored collateral owned by positions on the side |
 | `risk_units` | Risk units | Sum of position risk units on the side |
 | `risk_state` | Enum | One of `Normal`, `Warning`, `ADL`, or `HardCap` |
+| `hard_cap_payout_factor` | Index | `INDEX_PRECISION` unless the side is latched in `HardCap`; snapshotted on entry (§6.5) and never revised while latched |
 
 The market-level funding record stores:
 
@@ -2727,7 +2768,7 @@ The following values must be recalculated from authoritative state:
 | Utilization | Total risk units and cash LP equity |
 | Next borrow rate | Utilization and global curve parameters |
 | Position entry price | Position size and base exposure |
-| Raw and payable PnL | Position exposure, price, market risk state, and LP equity |
+| Raw and payable PnL | Position exposure, price, and the side's stored payout factor |
 | Pending funding | Position size, market indices, and funding debts |
 | Pending borrow | Position risk units, global index, borrow debt, and stored minimum |
 | Effective collateral | Stored collateral, payable PnL, and pending fees |
@@ -3040,59 +3081,96 @@ Payable PnL applies the side-wide hard cap only to positive raw PnL, then
 applies the independent LP-equity clamp:
 
 ```text
-function calculate_payable_pnl(
-    position_raw_pnl,
-    market_side,
-    market_config,
-    mark_price,
-    cash_lp_equity
-):
+function calculate_payable_pnl(position_raw_pnl, market_side):
     if position_raw_pnl <= 0:
         return position_raw_pnl
 
-    capped_pnl = position_raw_pnl
+    if market_side.risk_state != HardCap:
+        return position_raw_pnl
 
-    if market_side.risk_state == HardCap:
-        side_raw_pnl = calculate_raw_pnl(
-            market_side.direction,
-            market_side.size_open_interest,
-            market_side.base_exposure,
-            mark_price
-        )
-
-        side_positive_pnl = max(side_raw_pnl, 0)
-
-        if side_positive_pnl > 0:
-            hard_cap_value = mul_div_floor(
-                cash_lp_equity,
-                market_config.hard_cap_pnl_factor_bps,
-                BPS
-            )
-
-            capped_pnl = mul_div_floor(
-                position_raw_pnl,
-                min(hard_cap_value, side_positive_pnl),
-                side_positive_pnl
-            )
-
-    return min(capped_pnl, cash_lp_equity)
+    return mul_div_floor(
+        position_raw_pnl,
+        market_side.hard_cap_payout_factor,
+        INDEX_PRECISION
+    )
 ```
 
-A latched `HardCap` side with no aggregate positive PnL applies no side factor.
-This is a normal state, not an invariant violation, and must not revert.
+The factor is read, not recomputed. It is snapshotted once when the side
+enters `HardCap` and stays fixed for as long as the side remains there:
 
-The risk state is a stored latch while `side_positive_pnl` is derived from the
-current price and the current book, so the two disagree routinely. A single
-profitable position on a side whose net aggregate PnL is zero or negative is
-the ordinary case, and the latch also survives a price move that removes the
-aggregate liability entirely until a recovery transition clears it. Rejecting
-that combination would make every settlement path that prices a position on
-the latched side revert, including liquidation, voluntary close, TP, SL, ADL,
-and the read-only quote in §4.12 — that is, the protocol would lose the
-ability to reduce risk exactly while a side is flagged as its riskiest.
+```text
+function snapshot_hard_cap_factor(side, market_config, price, cash_lp_equity):
+    side_positive_pnl = max(
+        calculate_raw_pnl(
+            side.direction,
+            side.size_open_interest,
+            side.base_exposure,
+            price
+        ),
+        0
+    )
 
-The position-level LP-equity clamp still applies in this branch, so a payout
-can never exceed the cash available to back it.
+    hard_cap_value = mul_div_floor(
+        cash_lp_equity,
+        market_config.hard_cap_pnl_factor_bps,
+        BPS
+    )
+
+    if side_positive_pnl <= hard_cap_value:
+        side.hard_cap_payout_factor = INDEX_PRECISION
+    else:
+        side.hard_cap_payout_factor = mul_div_floor(
+            hard_cap_value,
+            INDEX_PRECISION,
+            side_positive_pnl
+        )
+```
+
+`snapshot_hard_cap_factor` runs exactly on the transition into `HardCap`, as
+part of applying the risk-state change in §6.16. Leaving `HardCap` clears the
+factor back to `INDEX_PRECISION`. A side that re-enters later takes a fresh
+snapshot from the book at that moment.
+
+Recomputing the factor at every settlement, as an earlier draft did, produced
+a cap that capped nothing. Each settlement pays out and removes exposure, so
+both `cash_lp_equity` and the side's aggregate positive PnL move, and the next
+position is measured against a different denominator. The result was
+order-dependent — two traders with identical positions received different
+payouts depending on who a keeper reached first — and the aggregate actually
+paid had no relationship to `hard_cap_value`, because each payout was
+proportioned against a total that the previous payout had already shrunk.
+
+One snapshot fixes both. Every position on the side is scaled by the same
+number, so settlement order cannot change any individual outcome, and the sum
+of all payouts is bounded by the `hard_cap_value` measured when the side
+latched.
+
+Two properties of the snapshot are deliberate. It cannot exceed
+`INDEX_PRECISION`, so a side entering `HardCap` while its aggregate profit is
+still below the cap simply pays in full until that changes. And it is not
+revised downward if LP equity falls further while the side stays latched: the
+per-position clamp below is what keeps a payout inside the cash that actually
+exists, and re-snapshotting on every price move would reintroduce the
+order-dependence the snapshot exists to remove.
+
+Payable PnL is what settlement may recognize. What it may actually *pay* is
+additionally limited by cash on hand, and that limit belongs to the payment,
+not to the valuation:
+
+```text
+paid_pnl = min(payable_pnl, cash_lp_equity_at_payment)
+```
+
+This clamp is applied by `apply_payable_pnl` and by terminal settlement. It is
+deliberately **not** part of `calculate_payable_pnl`, and therefore not part
+of effective collateral or any health check. A position's health is a property
+of that position; it must not change because the vault is temporarily short of
+cash. Folding the clamp into the valuation had a sharp consequence: a position
+with large unrealized profit and thin stored collateral would see its
+effective collateral collapse as LP equity fell, becoming liquidatable while
+in profit, and would then be liquidated for a payout the clamp had already
+reduced to nothing. Vault cash shortage is answered by ADL and by the hard-cap
+factor, not by liquidating winners.
 
 For a partial decrease, first derive `size_removed` and `base_removed`, then run
 the same raw and payable calculations on those removed quantities. The
@@ -3109,9 +3187,13 @@ function apply_payable_pnl(
     available_cash_lp_equity
 ):
     if payable_pnl > 0:
-        require available_cash_lp_equity >= payable_pnl
-        add_position_collateral(position, side, ledger, payable_pnl)
-        return PnlResult { credited: payable_pnl, uncollectible_loss: 0 }
+        credited = min(payable_pnl, available_cash_lp_equity)
+        add_position_collateral(position, side, ledger, credited)
+        return PnlResult {
+            credited,
+            unpaid_profit: payable_pnl - credited,
+            uncollectible_loss: 0
+        }
 
     loss = abs(payable_pnl)
     collected_loss = min(loss, position.stored_collateral)
@@ -3122,6 +3204,15 @@ function apply_payable_pnl(
         uncollectible_loss: loss - collected_loss
     }
 ```
+
+This is where the payment-time cash limit of §2.8 is applied, and the only
+place it is applied. Crediting is capped by the equity that exists at the
+moment of the credit, and any shortfall is returned as `unpaid_profit` so the
+caller can report it. Profit the vault could not pay is neither a claim nor a
+receivable — the vault has no cash to owe it from — but it is never silently
+dropped either: every terminal settlement emits it (§12.6), because a trader
+receiving less than their recognized profit is the single outcome most likely
+to be mistaken for an accounting error.
 
 Removing collateral for a trader loss credits LP residual equity. An
 uncollectible remainder is reported during terminal settlement and cannot be
@@ -3396,13 +3487,14 @@ function settle_terminal_position(inputs):
     )
 
     if inputs.payable_pnl > 0:
-        apply_payable_pnl(
+        pnl_result = apply_payable_pnl(
             position,
             side,
             ledger,
             inputs.payable_pnl,
             inputs.available_cash_lp_equity
         )
+        # pnl_result.unpaid_profit is reported, never carried
 
     receiver_collected = collect_up_to_position_value(
         position,
@@ -3827,10 +3919,7 @@ function evaluate_liquidation(
 
     payable_pnl = calculate_payable_pnl(
         raw_pnl,
-        side_for(position),
-        market.config,
-        price,
-        derive_cash_lp_equity(ledger, physical_cash)
+        side_for(position)
     )
 
     effective = calculate_effective_collateral(
@@ -3915,8 +4004,22 @@ function evaluate_side_risk_state(side, market_config, price, cash_lp_equity):
 
 Applying a transition updates the stored side state and adjusts
 `restricted_market_side_count` if the side crosses between `Normal` and a
-restricted state. ADL execution uses one assessment snapshot for candidate
-eligibility, payable PnL, keeper reward, and exposure removal.
+restricted state. Two transitions additionally move the payout factor:
+
+```text
+entering HardCap from any other state:
+    snapshot_hard_cap_factor(side, market_config, price, cash_lp_equity)
+
+leaving HardCap for any other state:
+    side.hard_cap_payout_factor = INDEX_PRECISION
+```
+
+No other transition touches it, and no settlement recomputes it. A side that
+stays latched in `HardCap` across many settlements keeps the factor it was
+given on entry (§6.5).
+
+ADL execution uses one assessment snapshot for candidate eligibility, payable
+PnL, keeper reward, and exposure removal.
 
 #### 6.16.1 What a risk state restricts
 
@@ -6619,21 +6722,22 @@ position, the entry follows the normal terminal expected-failure path: pay the
 active action reward, refund the remainder, charge no opening fee, and create
 no position.
 
-#### 10.3.4 Required design resolutions
+#### 10.3.4 Resolved design questions
 
-The following policies must be resolved before this specification is treated
-as implementation-complete:
+Four policies were left open by earlier drafts of this specification. All four
+are now decided; each entry records the decision and why the alternatives were
+rejected, so a later reader does not reopen a settled question:
 
-1. **Marked-NAV loss recognition.** Capping aggregate side loss by aggregate
-   side collateral can count collateral belonging to one position as
-   collectible against another position's loss. Choose either conservative NAV
-   that ignores unrealized trader losses, per-position collectible-loss
-   accounting with bounded aggregates, or another rule that cannot socialize
-   position collateral implicitly.
-2. **Hard-cap payout allocation.** Recomputing a side payout factor after each
-   settlement makes payouts depend on settlement order and does not impose one
-   stable aggregate cap. Choose a snapshotted side-wide payout epoch or replace
-   the dynamic payout factor with a deterministic position-local bound.
+1. **Marked-NAV loss recognition.** *Resolved.* Conservative NAV: only
+   positive side PnL is recognized, and unrealized trader loss is not
+   recognized at all until it is collected. Per-position collectible loss
+   cannot be maintained as a bounded aggregate because it moves with price.
+   See §2.3.
+2. **Hard-cap payout allocation.** *Resolved.* The side payout factor is
+   snapshotted once on the transition into `HardCap` and stored on the side,
+   so every position is scaled by the same number and the aggregate paid is
+   bounded by the cap measured when the side latched. The payment-time cash
+   limit moved out of payable PnL and out of every health check. See §6.5.
 3. **Liquidation-reward guarantee.** *Resolved.* Best-effort payment: the
    reward is capped at position collateral plus available cash LP equity, and
    the liquidation completes even when that sum is zero. No reserved reward
@@ -6645,11 +6749,11 @@ as implementation-complete:
    threshold, possibly nothing. `RewardUnavailable` no longer exists.
    Position-action creation does not escrow a keeper reward. See §7.0.
 
-Items 1 and 2 remain open. Both concern how aggregate trader profit is
-recognized and allocated — marked-NAV loss recognition and the hard-cap payout
-factor — and both need a decision before the LP accounting and the hard-cap
-path can be called complete. Until they are decided, implementations must not
-infer a policy for them from the illustrative pseudocode.
+No policy in this specification is undecided. Where a rule states a residual
+risk rather than eliminating it — keeper competition closing the settlement
+option (§1.7, §7.17), an oracle outage blocking forced actions (§12.7.4), a
+token issuer freezing an account (§12.1) — that is the decision, recorded
+deliberately, and not an omission awaiting resolution.
 
 ### 10.4 Deployment defaults
 
@@ -7152,9 +7256,12 @@ Cash LP equity is `$1,000,000`, and one market side has `$80,000` of aggregate
 positive PnL. Its PnL factor is `8%`, above the `6%` hard-cap threshold:
 
 ```text
-hard-cap value = $1,000,000 * 6% = $60,000
-side payout factor = $60,000 / $80,000 = 0.75
+hard-cap value     = $1,000,000 * 6%      = $60,000
+side payout factor = $60,000 / $80,000    = 0.75
 ```
+
+That factor is stored on the side at the moment it latches into `HardCap` and
+does not move again while it stays there.
 
 A position selected for ADL has `$5,000` stored collateral and `$10,000` raw
 positive PnL. It owes `$25` of borrow and no funding:
@@ -7169,10 +7276,32 @@ trader payout = $5,000 + $7,500 - $25 - $0.25
               = $12,474.75
 ```
 
-The uniform hard-cap factor applies before the position-specific settlement.
+Now suppose a second position on the same side, identical in every respect,
+is deleveraged immediately afterwards. The first settlement moved cash LP
+equity twice: down `$7,500` for the profit credited to the position label, and
+up `$22.50` for the borrow collected, of which `$2.50` became a protocol
+claim. The side's aggregate positive PnL fell by the `$10,000` of raw profit
+that left with the position:
+
+```text
+cash LP equity   = $1,000,000 - $7,500 + $22.50 = $992,522.50
+hard-cap value   = $992,522.50 * 6%             =    $59,551.35
+side positive    = $80,000 - $10,000            =    $70,000.00
+recomputed factor = $59,551.35 / $70,000        =     0.8507336
+```
+
+A factor recomputed at this point would pay the second trader
+`$8,507.3357142`, against the `$7,500` the first received for an identical
+position — a difference of over `$1,000` decided by nothing but which one a
+keeper reached first. The stored snapshot is what makes both receive `$7,500`,
+and what keeps the total paid across the side bounded by the `$60,000`
+measured when it latched.
+
 ADL removes the complete position, pays only the fixed ADL reward from its
 value, charges no closing fee, and clears its pending mutation and triggers.
-The side risk state is recalculated after exposure is removed.
+The side risk state is recalculated after exposure is removed, and if that
+recalculation takes the side out of `HardCap` the stored factor returns to one
+whole.
 
 ### 11.11 Expired-order cleanup
 
@@ -7506,7 +7635,7 @@ The required events and the fields a consumer cannot do without:
 | `ActionCancelled` / `ActionExpired` | action id, refund, keeper reward |
 | `PositionOpened` | position id, owner, direction, size, base exposure, collateral, entry price |
 | `PositionChanged` | position id, size and base delta, realized payable PnL, every senior item collected, closing fee, resulting state |
-| `PositionClosed` | position id, reason, payable PnL, senior items, closing fee, payout, unpaid amounts |
+| `PositionClosed` | position id, reason, payable PnL, profit the vault could not pay, senior items, closing fee, payout, unpaid amounts |
 | `Liquidated` | position id, effective collateral, threshold, reward from position, reward from LP, unpaid reward, bad debt |
 | `Deleveraged` | position id, side factor before and after, payout factor applied, payable PnL, reward |
 | `FundingCheckpoint` | market, payer side per segment, index deltas, liability delta, EMA after |
