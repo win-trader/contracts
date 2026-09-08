@@ -383,25 +383,10 @@ state and pays no reward.
 This section defines the quantities used throughout the specification. A name
 has one meaning and one unit everywhere it appears.
 
-Where a rule appears in more than one place, exactly one statement of it is
-normative and the others describe or constrain it. The normative homes are:
-
-| Rule | Normative in |
-|---|---|
-| Rounding direction per quantity | §2.11 |
-| Opening fee | §6.8 |
-| Closing fee | §6.9 |
-| Borrow accrual and the minimum-borrow floor | §3.3, §6.3 |
-| Funding integration and its split | §4.6, §6.2 |
-| Settlement order | §3.8 |
-| Effective collateral | §2.9 |
-| Payable PnL and the payout factor | §6.5 |
-| Risk-state meaning and admission | §6.16, §6.16.1 |
-| Parameter values and validation | §10 |
-
-Section 9 states invariants over these rules rather than restating them, and
-section 11 illustrates them. If a worked example and a normative section
-disagree, the normative section governs and the example is a defect.
+Each rule is stated once, in section 2 through 8 or section 10. Section 9
+states invariants over those rules rather than restating them, and section 11
+illustrates them with worked figures. Where an example and a rule disagree,
+the rule governs.
 
 ### 2.1 Numerical precision and units
 
@@ -651,21 +636,17 @@ loss when only `$10` can ever be collected, because the healthy trader's
 collateral is theirs and will be returned to them.
 
 Fixing that per position is not possible within the cost model of §4.1: the
-collectible amount is `min(loss_i, collateral_i)` for each position, which
-moves continuously with price and therefore cannot be maintained as a stored
-aggregate. Recognizing nothing is the only bounded rule that cannot overstate.
+collectible amount is `min(loss_i, collateral_i)` per position, which moves
+continuously with price and cannot be a stored aggregate. Recognizing nothing
+is the only bounded rule that cannot overstate.
 
-Two consequences are worth stating plainly, because they are the price of the
-rule rather than accidents of it:
-
-- LP share price understates while traders are collectively losing, and steps
-  up as those losses are realized rather than accruing smoothly. A depositor
-  during a trader drawdown gets slightly more shares than a mark-to-market
-  valuation would give, and a withdrawer gets slightly less.
-- That asymmetry is the point. An LP can no longer withdraw against
-  unrealized trader losses that may never be collected, so the exit-timing
-  advantage — leave while traders are underwater, let the remaining LPs
-  discover the loss was never collectible — does not exist.
+Two consequences follow. LP share price understates while traders are
+collectively losing, and steps up as those losses are realized rather than
+accruing smoothly, so a depositor during a trader drawdown gets slightly more
+shares than a mark-to-market valuation would give and a withdrawer slightly
+less. That asymmetry is the point: an LP cannot withdraw against unrealized
+trader losses that may never be collected, so there is no advantage in leaving
+while traders are underwater.
 
 A third quantity, free LP capital, measures cash that is not locked as risk
 backing:
@@ -916,20 +897,16 @@ derived from resulting size, and the removed risk is the difference from the
 old canonical value. A final close removes every residual unit, so repeated
 partial decreases cannot strand exposure or risk.
 
-This one rule is a conservation rule rather than a direction rule, and the
-table above does not apply to it. The removed and remaining base always sum to
-exactly the pre-reduction base, so the sub-unit allocated by the rounding is
-not created or destroyed; it only moves between the portion realized now and
-the portion still open. For a long, rounding the removed base up realizes a
-sub-unit of exposure earlier and leaves the survivor with exactly that much
-less; for a short the sign is reversed. Neither direction leaks value, and
-repeated decreases cannot accumulate an advantage because the total is
-conserved at every step and a final close removes the remainder exactly.
+This is a conservation rule, not a direction rule, and the table above does
+not apply to it. Removed and remaining base always sum to exactly the
+pre-reduction base, so the sub-unit is moved between the portion realized now
+and the portion still open, never created. Repeated decreases cannot
+accumulate an advantage, because the total is conserved at every step and a
+final close removes the remainder exactly.
 
-What does protect the vault here is the split itself. Because `floor(x) +
-floor(y) <= floor(x + y)`, valuing two portions separately can only produce
-less trader value than valuing the whole position once. A partial reduction is
-therefore weakly conservative regardless of how the sub-unit is allocated.
+What protects the vault is the split itself: since `floor(x) + floor(y) <=
+floor(x + y)`, valuing two portions separately can only produce less trader
+value than valuing the whole position once.
 
 Any negative pending fee obtained by subtracting a stored debt baseline from a
 monotonic index is an invariant violation. A floor or cap must never hide it.
@@ -1981,21 +1958,20 @@ calculation and directional stream that produced it.
 #### 4.5.1 A carried remainder is only valid for a constant divisor
 
 A carried remainder encodes an undistributed fraction of one divisor. Reusing
-it under a different divisor changes the value it represents and is therefore
-forbidden.
+it under a different divisor changes the value it represents.
 
-Three of the four funding remainders divide by a constant: both payer-index
-divisions use `BPS * SECONDS_PER_DAY`, and the guaranteed-liability division
-uses `INDEX_PRECISION`. Their carries may persist for the lifetime of the
-payer stream.
+Three of the four funding remainders divide by a constant — both payer-index
+divisions by `BPS * SECONDS_PER_DAY`, the guaranteed-liability division by
+`INDEX_PRECISION` — so their carries may persist for the lifetime of the payer
+stream.
 
-The receiver-distribution division is the exception. It divides by
+The receiver-distribution division is the exception: it divides by
 `receiver.size_open_interest`, which changes whenever a position on the
 receiving side is opened, increased, decreased, or removed. A remainder
-produced modulo a large receiver size represents a small fraction of a large
-base; carried into a division by a smaller receiver size it is credited as a
-much larger fraction of a smaller base, and receivers can then be credited
-more than the receiver-backed accrual that justifies it.
+produced modulo a large receiver size is a small fraction of a large base;
+carried into a division by a smaller receiver size it becomes a much larger
+fraction of a smaller base, and receivers can be credited more than the
+receiver-backed accrual that justifies it.
 
 The rule is therefore:
 
@@ -2005,21 +1981,15 @@ receiver_distribution_remainder of the opposite side's payer stream to zero
 ```
 
 The reset runs after the checkpoint and before the exposure mutation, so every
-carry lives entirely inside a window of constant receiver size. Because the
-checkpoint always precedes the mutation (§4.9), no accrual is lost by the
-reset itself.
+carry lives inside a window of constant receiver size and no accrual is lost
+by the reset itself (§4.9).
 
-The discarded fraction is strictly less than one whole cash unit of receiver
-credit. It is never re-credited to receivers, so the reset can only
-under-distribute. Its guaranteed-liability counterpart remains in
-`market.pending_receiver_funding` and is released to LPs by the empty-book
-rule in §4.13.
-
-With a constant divisor the cumulative identity is exact: the value
-distributed through the receiver index over any sequence of checkpoints equals
-the accrued backing minus the final retained remainder, so the aggregate
-receiver credit can never exceed the recognized liability. §9.4's guarantee
-depends on this reset and does not hold without it.
+The discarded fraction is less than one whole cash unit of receiver credit and
+is never re-credited, so the reset can only under-distribute. Its
+guaranteed-liability counterpart stays in `market.pending_receiver_funding`
+and is released to LPs by the empty-book rule in §4.13. With a constant
+divisor the cumulative identity is exact, which is what §9.4's guarantee
+rests on.
 
 ### 4.6 Funding EMA and exact window integration
 
@@ -2840,15 +2810,13 @@ There is no persistent pending-withdrawal cash claim and no partial LP fill. A
 request settles fully or refunds fully, so LP request escrow is not included in
 the vault's non-LP cash claims.
 
-That exclusion is only correct because the escrow is held outside the vault's
-token balance. A deposit's collateral sits with the request contract until
-settlement transfers it in, so it never appears in `physical_cash` and never
-needs a claim label to offset it. Holding it inside the vault instead would
-make it indistinguishable from LP residual equity, and a pending deposit would
-silently raise cash LP equity, lower utilization, and enlarge risk capacity
-before its owner had bought a single share. Withdrawal escrow is the mirror
-case: shares, not cash, and they remain in total supply until they are burned
-on success.
+That exclusion holds only because the escrow sits outside the vault's token
+balance, with the request contract, so it never appears in `physical_cash` and
+needs no claim label to offset it. Held inside the vault it would be
+indistinguishable from LP residual equity, and a pending deposit would raise
+cash LP equity, lower utilization, and enlarge risk capacity before its owner
+had bought a single share. Withdrawal escrow is the mirror case: shares, not
+cash, remaining in total supply until burned on success.
 
 ### 5.10 Keeper reward configuration
 
@@ -3353,19 +3321,14 @@ part of applying the risk-state change in §6.16. Leaving `HardCap` clears the
 factor back to `INDEX_PRECISION`. A side that re-enters later takes a fresh
 snapshot from the book at that moment.
 
-Recomputing the factor at every settlement, as an earlier draft did, produced
-a cap that capped nothing. Each settlement pays out and removes exposure, so
-both `cash_lp_equity` and the side's aggregate positive PnL move, and the next
-position is measured against a different denominator. The result was
-order-dependent — two traders with identical positions received different
-payouts depending on who a keeper reached first — and the aggregate actually
-paid had no relationship to `hard_cap_value`, because each payout was
-proportioned against a total that the previous payout had already shrunk.
-
-One snapshot fixes both. Every position on the side is scaled by the same
-number, so settlement order cannot change any individual outcome, and the sum
-of all payouts is bounded by the `hard_cap_value` measured when the side
-latched.
+The factor must not be recomputed at settlement. Each settlement pays out and
+removes exposure, so both `cash_lp_equity` and the side's aggregate positive
+PnL move; a factor derived again afterwards measures the next position against
+a shrunken denominator. Payouts would become order-dependent, and their sum
+would bear no relation to `hard_cap_value`. With one snapshot, every position
+on the side is scaled by the same number, settlement order cannot change any
+individual outcome, and the total paid is bounded by the `hard_cap_value`
+measured when the side latched.
 
 Two properties of the snapshot are deliberate. It cannot exceed
 `INDEX_PRECISION`, so a side entering `HardCap` while its aggregate profit is
@@ -3387,12 +3350,11 @@ This clamp is applied by `apply_payable_pnl` and by terminal settlement. It is
 deliberately **not** part of `calculate_payable_pnl`, and therefore not part
 of effective collateral or any health check. A position's health is a property
 of that position; it must not change because the vault is temporarily short of
-cash. Folding the clamp into the valuation had a sharp consequence: a position
-with large unrealized profit and thin stored collateral would see its
-effective collateral collapse as LP equity fell, becoming liquidatable while
-in profit, and would then be liquidated for a payout the clamp had already
-reduced to nothing. Vault cash shortage is answered by ADL and by the hard-cap
-factor, not by liquidating winners.
+cash. Were the clamp part of the valuation, a position with large unrealized
+profit and thin stored collateral would become liquidatable as LP equity fell
+— liquidated while in profit, for a payout the same clamp had already reduced
+to nothing. Vault cash shortage is answered by ADL and by the hard-cap factor,
+not by liquidating winners.
 
 For a partial decrease, first derive `size_removed` and `base_removed`, then run
 the same raw and payable calculations on those removed quantities. The
@@ -4270,24 +4232,18 @@ The states mean:
 | `ADL` | Blocked | Forced deleveraging of this side is permitted |
 | `HardCap` | Blocked | Payouts on this side are additionally scaled by the side factor |
 
-Two consequences are deliberate.
-
-`Warning` restricts nothing by itself. It exists to make recovery sticky: once
-latched, a side stays at least in `Warning` until its factor falls below
-`recovery_pnl_factor_bps`, which prevents a side from oscillating in and out of
-restriction on small price moves. Blocking exposure there would cost volume in
-a band that usually resolves on its own.
-
-The opposite side is never restricted by this side's state. A trader opening
-against a restricted side reduces market skew and reduces that side's net
-aggregate PnL, which is exactly the trade that resolves the condition.
-Blocking both sides would leave closure as the only path back to `Normal`.
+Two consequences are deliberate. `Warning` restricts nothing by itself: it
+makes recovery sticky, keeping a side latched until its factor falls below
+`recovery_pnl_factor_bps` so it cannot oscillate in and out of restriction on
+small price moves. And the opposite side is never restricted by this side's
+state, because opening against a restricted side reduces skew and reduces that
+side's net aggregate PnL — the trade that resolves the condition. Blocking
+both sides would leave closure as the only path back to `Normal`.
 
 `restricted_market_side_count` counts every side that is not `Normal`, so a
-nonzero count means at least one side is latched, not necessarily that one is
-blocking. It is the cheap global reader that avoids scanning the market
-registry; the blocking question is always answered per side by
-`side_accepts_new_exposure`.
+nonzero count means at least one side is latched, not that one is blocking. It
+is the cheap global reader that avoids scanning the market registry; the
+blocking question is answered per side by `side_accepts_new_exposure`.
 
 Candidate selection for ADL is specified with the user-facing operation in
 §7.14 rather than hidden inside this pure assessment.
@@ -4431,24 +4387,19 @@ whatever the position can pay without dropping below minimum collateral or
 into liquidation, which may be less than the configured reward and may be
 zero; the action is consumed either way.
 
-The alternative — refusing to terminate when the full reward is unpayable —
-was worse in both directions. It left an eligible action pending forever while
-`pending_mutation_action_id` blocked every further increase, decrease, or
-close on that position, and since position mutations have neither a cancel
-operation nor an expiry, the only exits were `add_collateral` or liquidation.
-It also broke the first-attempt finality the order lifecycle depends on: an
-action that survives an eligible attempt is a free retry.
+Refusing to terminate when the full reward is unpayable would leave an
+eligible action pending indefinitely while `pending_mutation_action_id` blocks
+every further increase, decrease, or close on that position — and position
+mutations have neither a cancel operation nor an expiry, so the only exits
+would be `add_collateral` or liquidation. It would also break first-attempt
+finality: an action that survives an eligible attempt is a free retry.
 
 The variable cap is not exploitable. Suppressing the reward requires holding a
-position at minimum collateral or at its liquidation threshold, which is one
-tick from being liquidated and cannot be maintained as a strategy; the saving
-is at most one fixed reward per action. Keepers are free to skip an action
-whose payable reward is too small, and the owner can always settle it
-themselves to clear the slot.
-
-This also resolves §10.3.4 item 4 without escrowing a keeper reward at
-position-action creation: finality is unconditional, and only the reward
-amount is contingent on the position's ability to pay.
+position at minimum collateral or at its liquidation threshold, one tick from
+liquidation, which cannot be maintained as a strategy; the saving is at most
+one fixed reward per action. Keepers may skip an action whose payable reward
+is too small, and the owner can always settle it themselves to clear the slot.
+No keeper reward is escrowed at position-action creation.
 
 ### 7.1 Create a market-open order
 
@@ -5107,16 +5058,13 @@ store state and emit decrease result
 Realized residual profit remains position collateral. A separate immediate
 collateral-withdrawal operation is not part of this decrease.
 
-Two guards in this sequence exist to keep the surviving path and the terminal
-path from diverging. `require pnl_result.uncollectible_loss == 0` enforces
-§6.5: a surviving position may never carry a loss its collateral could not
-absorb, and if preflight admitted one, the action must revert rather than
-leave the deficit attached. The `min` against stored collateral mirrors the
-terminal path in §6.10 so both paths debit the same way; preflight already
-guarantees the fee is payable, so the clamp is defence in depth and not a
-licence to collect a partial fee where a full one was due. Passing
-`max(payable_pnl, 0)` matches the close path and makes the call site agree
-with the sign convention `calculate_closing_fee` already applies internally.
+Two guards keep this path and the terminal path from diverging.
+`require pnl_result.uncollectible_loss == 0` enforces §6.5: a surviving
+position may never carry a loss its collateral could not absorb, so the action
+reverts rather than leaving the deficit attached. The `min` against stored
+collateral mirrors §6.10 so both paths debit the same way; preflight already
+guarantees the fee is payable, so it is defence in depth, not a licence to
+collect a partial fee where a full one was due.
 
 ### 7.10 Create and settle a voluntary close
 
@@ -5530,44 +5478,26 @@ deposit pays it from its asset escrow before conversion; a withdrawal pays it
 from the assets it releases. The reward is what makes prompt resolution
 somebody's job.
 
-No LP ever depends on a third party to get their request resolved. `executor`
-is any authenticated account, including the request's own owner, so an owner
-whose request is not being picked up can always resolve it themselves and
-collect the reward. Because only the FIFO head is resolvable, an owner whose
-request sits behind others clears the queue by calling the operation once per
-request ahead of theirs; each of those calls is a normal terminal resolution
-that pays the caller its reward, so working down the queue is self-funding
-rather than a cost. This is the manual path, and it is always available — the
-keeper reward exists to make it unnecessary, not to make it exclusive.
+No LP depends on a third party to get their request resolved. `executor` is
+any authenticated account, including the request's own owner. Because only the
+FIFO head is resolvable, an owner queued behind others clears the queue by
+calling the operation once per request ahead of theirs, collecting each
+reward on the way, so the manual path funds itself. The keeper reward exists
+to make that path unnecessary, not to make it exclusive.
 
-An earlier draft of this operation assigned each request a unique price round
-by requiring `round.previous_timestamp < request.execute_after`, and marked the
-request `Expired` when that did not hold. That rule was unsound. `round` is
-always the *latest* round, so any executor who simply waited two rounds made
-the condition impossible to satisfy and killed the request; because only the
-FIFO head can resolve, a single passive or hostile executor could stall the
-entire queue. It also gave a request exactly one chance at one round, which is
-a liveness cliff for an operation that must eventually complete.
+No round-assignment rule pins a request to one specific price round. The
+property such a rule would protect is real — whoever picks the settlement
+moment picks the NAV, and a withdrawing LP who can choose the moment exits at
+an inflated share price and leaves the mark-to-market loss with the LPs who
+stay — but it is the same problem as a trader choosing the observation that
+fills a market order, and it has the same answer everywhere in this
+specification: a mandatory delay fixes the earliest possible moment, and a
+fixed reward makes a competing party settle at the first opportunity, so the
+party with an interest in waiting does not control the timing.
 
-The property that rule was protecting is real: whoever picks the settlement
-moment picks the NAV, and a withdrawing LP who can choose the moment can exit
-at an inflated share price and leave the mark-to-market loss with the LPs who
-stay. It is not, however, a property that needs its own mechanism. It is the
-same problem as a trader choosing the observation that fills a market order,
-and this specification already answers that question the same way everywhere
-else: a mandatory delay fixes the earliest possible moment, and a fixed keeper
-reward makes a competing party settle at the first opportunity, so the party
-with an interest in waiting does not control the timing.
-
-Applying that answer here deletes the round-assignment machinery, the
-reliance on a round's `previous_timestamp`, and the `Expired` outcome that
-arose only from it. The field itself stays on the round record, where it is
-useful for reconstructing the round sequence off chain. The residual exposure
-is the same one stated in §1.7: the guarantee rests on there being a competing
-executor, not on a
-protocol rule that names one round. The production delay of one day makes the
-window to compete a wide one, so this is a weaker assumption here than it is
-for a five-second trader action.
+The residual exposure is the one stated in §1.7 and §12.8.1: the guarantee
+rests on a competing executor existing, not on a rule naming one round. With a
+delay measured in hours or a day, the window in which to compete is wide.
 
 Successful deposit settlement uses the pre-deposit state:
 
@@ -5655,14 +5585,12 @@ capacity and health check has been satisfied on the full amount. A withdrawal
 worth less than the reward pays the executor everything it releases; it is
 never topped up from LP equity.
 
-The two gates above were previously stated as "no prohibited shortfall or
-restricted market state" without either term being defined. A withdrawal
-removes LP equity, and LP equity is the denominator of every side's PnL
-factor, so paying one out mechanically pushes every side closer to
-restriction. It is therefore refused while the vault is already short of its
-claims, and while any active side is in `ADL` or `HardCap`. `Warning` does not
-block it, for the same reason it does not block new exposure (§6.16.1): it is
-a latch that makes recovery sticky, not a stop.
+A withdrawal removes LP equity, and LP equity is the denominator of every
+side's PnL factor, so paying one out pushes every side closer to restriction.
+It is refused while the vault is short of its claims, and while any active side
+is in `ADL` or `HardCap`. `Warning` does not block it, for the same reason it
+does not block new exposure (§6.16.1): it is a latch that makes recovery
+sticky, not a stop.
 
 A deposit is not gated on side risk state at all. It adds LP equity and
 therefore lowers every side's factor, which is the direction the vault wants.
@@ -5918,20 +5846,17 @@ The delay is necessary but insufficient. A delayed action without a newer
 qualifying observation remains `NotReady` indefinitely, except that an entry
 can still reach expiry.
 
-The upper bound on `expires_at` is what keeps that expiry reachable, and it
-also bounds an option the trader would otherwise hold. Between `execute_after`
-and `expires_at` an entry order is a standing right to be filled at a price
-inside its bound, and nothing obliges anyone to settle it: the trader may act
-as their own keeper and simply wait. Keeper competition is what normally
-closes that window, since any keeper earns the same reward for settling
-immediately (§1.7), but competition is an assumption about the world rather
-than a rule of the protocol. `max_order_lifetime_seconds` is the rule — it
-caps how long the option can run even if no keeper ever appears.
+The upper bound on `expires_at` keeps expiry reachable and bounds an option
+the trader would otherwise hold. Between `execute_after` and `expires_at` an
+entry order is a standing right to be filled at a price inside its bound, and
+nothing obliges anyone to settle it — the trader may act as their own keeper
+and wait. Keeper competition normally closes that window (§1.7), but that is
+an assumption about the world rather than a rule;
+`max_order_lifetime_seconds` is the rule, capping how long the option runs if
+no keeper appears.
 
-The same reasoning does not apply to a position mutation, which has no
-`expires_at`. Its holder already owns the position, so waiting to close is not
-a right the commitment granted them; they could have waited without
-committing.
+A position mutation needs no equivalent. Its holder already owns the position,
+so waiting to close is not a right the commitment granted them.
 
 ### 8.6 Fresh-price requirement
 
@@ -6990,39 +6915,6 @@ position, the entry follows the normal terminal expected-failure path: pay the
 active action reward, refund the remainder, charge no opening fee, and create
 no position.
 
-#### 10.3.4 Resolved design questions
-
-Four policies were left open by earlier drafts of this specification. All four
-are now decided; each entry records the decision and why the alternatives were
-rejected, so a later reader does not reopen a settled question:
-
-1. **Marked-NAV loss recognition.** *Resolved.* Conservative NAV: only
-   positive side PnL is recognized, and unrealized trader loss is not
-   recognized at all until it is collected. Per-position collectible loss
-   cannot be maintained as a bounded aggregate because it moves with price.
-   See §2.3.
-2. **Hard-cap payout allocation.** *Resolved.* The side payout factor is
-   snapshotted once on the transition into `HardCap` and stored on the side,
-   so every position is scaled by the same number and the aggregate paid is
-   bounded by the cap measured when the side latched. The payment-time cash
-   limit moved out of payable PnL and out of every health check. See §6.5.
-3. **Liquidation-reward guarantee.** *Resolved.* Best-effort payment: the
-   reward is capped at position collateral plus available cash LP equity, and
-   the liquidation completes even when that sum is zero. No reserved reward
-   and no separately funded backstop. See §9.10.
-4. **Failed position-action rewards.** *Resolved.* Finality is unconditional
-   and only the reward amount is contingent: an eligible attempt on a
-   non-liquidatable position always terminates, paying the keeper whatever the
-   position can fund without breaching minimum collateral or its liquidation
-   threshold, possibly nothing. `RewardUnavailable` no longer exists.
-   Position-action creation does not escrow a keeper reward. See §7.0.
-
-No policy in this specification is undecided. Where a rule states a residual
-risk rather than eliminating it — keeper competition closing the settlement
-option (§1.7, §7.17), an oracle outage blocking forced actions (§12.7.4), a
-token issuer freezing an account (§12.1) — that is the decision, recorded
-deliberately, and not an omission awaiting resolution.
-
 ### 10.4 Deployment defaults
 
 The complete initial parameter set is:
@@ -7600,14 +7492,13 @@ Sections 2 through 11 define the economics. This section defines what the
 surrounding system must provide for those economics to hold: the token the
 vault holds, what pausing means, who may change what, how state survives an
 upgrade, how failures are reported, what the protocol emits, what it requires
-of the oracle, and finally what it assumes rather than guarantees.
+of the oracle, and what it assumes rather than guarantees.
 
-Reentrancy is deliberately absent from this section. The Soroban host rejects
-an attempt to re-enter a contract already on the call stack, so the ordering
-rules in §4.9 and §6.10 exist for accounting clarity — accrue before mutate,
-credit before collect — and not as a reentrancy defence. An implementation
-must not weaken those orderings on the grounds that reentrancy is impossible;
-they are load-bearing for correctness on their own.
+Reentrancy is not treated here. The host rejects an attempt to re-enter a
+contract already on the call stack, so the ordering rules in §4.9 and §6.10 —
+accrue before mutate, credit before collect — exist for accounting
+correctness, not as a reentrancy defence, and must not be weakened on the
+grounds that reentrancy is impossible.
 
 ### 12.1 Collateral and share token requirements
 
@@ -7644,11 +7535,10 @@ transfer reverts the whole operation (§8.9), which is correct for accounting
 and bad for liveness: a blacklisted trader's liquidation reverts, and the
 position keeps accruing borrow while nobody can remove it.
 
-An implementation that cannot accept that dependency should convert terminal
-payouts to a pull model — credit an owed balance and let the owner withdraw it
-separately — at the cost of a sixth entry in the claim equation of §2.5. This
-specification does not take that step; it records the exposure so the choice is
-explicit.
+An implementation that cannot accept that dependency converts terminal payouts
+to a pull model — credit an owed balance, let the owner withdraw it separately
+— at the cost of a sixth entry in the claim equation of §2.5. This
+specification pays directly and accepts the dependency.
 
 The LP share token is a separate token controlled by the vault:
 
@@ -7666,8 +7556,7 @@ information about the queue, not a claim against the vault.
 
 ### 12.2 Pause semantics
 
-`paused` was previously described only as blocking "the configured mutation
-paths", which named no paths. The rule is:
+The rule is:
 
 **A pause stops the vault taking on risk. It never stops anyone shedding it.**
 
@@ -7680,13 +7569,13 @@ function side_accepts_new_exposure(side):
        and side.risk_state in { Normal, Warning }
 ```
 
-Making a pause equivalent to a vault-wide restricted state means every path
-that adds exposure already knows what to do. A pending market open, limit
-open, or increase that becomes eligible during a pause takes the ordinary
+A pause is therefore a vault-wide restricted state, and every path that adds
+exposure already knows what to do. A pending market open, limit open, or
+increase that becomes eligible during a pause takes the ordinary
 expected-failure route of §8.9: it terminates, pays its action reward, refunds
-its escrow, charges no opening fee, and creates no position. A pause therefore
-*drains* the pending risk-adding queue instead of freezing it, and no order is
-left stranded waiting for an unpause that may never come.
+its escrow, charges no opening fee, and creates no position. A pause drains
+the pending risk-adding queue rather than freezing it, so no order waits for
+an unpause that may never come.
 
 | Operation | While paused |
 |---|---|
@@ -7821,10 +7710,7 @@ Errors are part of the interface. A caller that cannot distinguish "your price
 bound was missed" from "the oracle has too few sources" cannot report anything
 useful, and a front end that guesses will guess wrong.
 
-Every contract in this system currently numbers its errors from `1`, so the
-ranges overlap completely and a raw code is ambiguous without knowing which
-contract produced it. The required layout is a disjoint range per contract,
-assigned once and never reused:
+Each contract owns a disjoint numeric range, assigned once and never reused:
 
 | Range | Owner |
 |---|---|
@@ -7833,27 +7719,17 @@ assigned once and never reused:
 | `200–299` | Oracle router |
 | `300–399` | Configuration manager |
 
-Two rules follow, and both exist because of a failure this system has already
-had in production, where one numeric code meant `SlippageExceeded` in one
-contract and `InsufficientSources` in another, and the interface reported an
-oracle outage as a slippage rejection:
+Two rules follow:
 
 1. **A code is never reused across contracts.** Disjoint ranges make a raw
    code globally unambiguous without needing to know which contract produced
-   it.
+   it. Two contracts numbering from `1` would each own a code `9`, and a
+   caller receiving it could not tell a rejected price bound from a loss of
+   oracle quorum — two conditions with opposite remedies.
 2. **A cross-contract error is wrapped, never passed through.** When the
    position manager calls the oracle router and the call fails, it returns its
    own error carrying the underlying one. Propagating the inner code unchanged
    is what makes a foreign code look native.
-
-The concrete collision is code `9`: `SlippageExceeded` in the position manager
-and `InsufficientSources` in the oracle router. It is the reason an oracle
-losing quorum was reported to traders as a rejected price bound — a message
-that tells them to widen a tolerance that was never the problem.
-
-Renumbering is a breaking interface change. Bindings, the off-chain consumers,
-and any client that maps codes to messages must move in the same release, and
-the migration in §12.4 is the natural place to gate it.
 
 Codes are grouped by cause so a caller can react to a class without
 enumerating every member:
@@ -7935,12 +7811,11 @@ says when the data behind that price was produced. §8.6 defines the stamp as
 the oldest source timestamp contributing to the accepted aggregate, and the
 entire fresh-price guarantee of §1.13 is a comparison between two such stamps.
 
-The router this protocol calls aggregates a median across SEP-40 sources,
-rejecting any source that is stale beyond `staleness_threshold`, future-dated,
-non-positive, or scaled at other than seven decimals, then rejecting the whole
-aggregate if fewer than `min_required_sources` survived or if the spread
-exceeds `max_deviation_bps`. That is the right shape. What it does not do is
-return the stamp.
+The oracle aggregates a median across sources, rejecting any source that is
+stale beyond `staleness_threshold`, future-dated, non-positive, or scaled at
+other than seven decimals, then rejecting the whole aggregate if fewer than
+`min_required_sources` survived or if the spread exceeds `max_deviation_bps`.
+The stamp accompanies that median.
 
 #### 12.7.1 Required read interface
 
@@ -7967,14 +7842,10 @@ The three price primitives named throughout sections 7 and 8 map onto these:
 Only the last may use the cache, because liquidation and ADL compare a price
 against a threshold rather than against an earlier observation.
 
-The router already computes everything this needs. Its cached entry carries
-`oldest_source_update` alongside the median, which is exactly `observed_at`,
-and its uncached aggregation path exists and is already used to stamp rounds.
-Neither is reachable from outside: the public read returns a bare `i128`, and
-the uncached path is internal. Until both are exposed, `commit_observed_at`
-and `fill_observed_at` cannot be populated, and every rule that depends on
-them — the fresh-price requirement, the `NotReady` outcome, the terminal
-first-attempt semantics — has nothing to compare.
+Both stamped reads are required. Without them `commit_observed_at` and
+`fill_observed_at` cannot be populated, and every rule built on them — the
+fresh-price requirement, the `NotReady` outcome, the terminal first-attempt
+semantics — has nothing to compare.
 
 #### 12.7.2 Why the commitment cursor may not come from the cache
 
@@ -7989,12 +7860,12 @@ observation that may itself predate the commitment — the test passes without
 any new information having arrived, which is the exact thing §1.13 exists to
 prevent.
 
-The cache is also permissionless to fill. Anyone may call the cached read and
-write the entry, so an actor who can choose when that write happens can choose
-which observation later commitments are measured against.
+The cache is also permissionless to fill: anyone may call the cached read and
+write the entry, so whoever chooses when that write happens chooses which
+observation later commitments are measured against.
 
-Both reads therefore use the uncached path. Creation is already a state-
-changing transaction, so paying for a fresh aggregation there costs nothing
+Both reads therefore use the uncached path. Creation is already a
+state-changing transaction, so a fresh aggregation there costs nothing
 structurally.
 
 #### 12.7.3 Rounds
@@ -8005,15 +7876,14 @@ vault consistently (§4.9). A round is built from uncached aggregation for each
 active market and records `id`, `timestamp`, `previous_id`,
 `previous_timestamp`, and one price per symbol.
 
-Round publication is permissioned — it requires the keeper role — while
-everything else in this protocol is permissionless. That is a real liveness
-dependency and belongs in the operational picture: if rounds stop, LP deposits
-and withdrawals stop with them, though positions continue to trade and
+Round publication is permissioned where everything else in this protocol is
+permissionless, which makes it a liveness dependency: if rounds stop, LP
+deposits and withdrawals stop with them, while positions continue to trade and
 liquidate normally on per-symbol prices.
 
-Rounds are also the reason `max_active_markets` is bounded. A round iterates
-every active market and aggregates each from scratch, so the registry bound of
-§5.1 is what keeps that operation inside a transaction budget.
+Rounds are also why `max_active_markets` is bounded. A round iterates every
+active market and aggregates each from scratch, so the registry bound of §5.1
+is what keeps that operation inside a transaction budget.
 
 #### 12.7.4 Failure behaviour, and what it costs
 
@@ -8040,21 +7910,20 @@ should have been liquidated are liquidated later, at whatever price returns,
 with the interim accrual still owed and LP equity absorbing whatever the
 collateral no longer covers.
 
-The deviation guard deserves specific attention, because it has already caused
-this in production: sources disagreeing past `max_deviation_bps` rejects the
-aggregate, and if the disagreement persists the state is absorbing — every
-open and every close reverts together, and the protocol cannot trade its way
-out. A guard that exists to stop the vault pricing *new* risk badly should not
-also block the operations that *remove* risk. This specification states the
-requirement and does not prescribe the mechanism:
+The deviation guard deserves specific attention. Sources disagreeing past
+`max_deviation_bps` rejects the aggregate, and while the disagreement persists
+the state is absorbing: every open and every close reverts together, and the
+protocol cannot trade its way out. A guard that exists to stop the vault
+pricing *new* risk badly must not also block the operations that *remove*
+risk. This specification states the requirement and does not prescribe the
+mechanism:
 
 > A risk-reducing operation must not be blocked by a guard whose purpose is to
 > protect risk-adding operations.
 
 Whether that is met by a wider bound for liquidation, a documented fallback
 aggregate, or an explicit degraded mode is an oracle-side decision. What is
-not acceptable is the current coupling, where one guard governs both
-directions.
+not acceptable is one guard governing both directions.
 
 #### 12.7.5 Configuration owned elsewhere
 
@@ -8079,11 +7948,8 @@ cadence widens that window silently, without any parameter in §10 changing.
 
 Some properties of this design are not guaranteed by any rule in it. They hold
 because of how the surrounding world behaves, or they do not hold at all and
-the exposure is accepted. Leaving them unwritten would make the rest of this
-document read as stronger than it is, so they are collected here.
-
-Each entry names what is assumed, what happens if the assumption fails, and
-what bounds the damage.
+the exposure is accepted. Each entry names what is assumed, what happens if
+the assumption fails, and what bounds the damage.
 
 #### 12.8.1 There is a competing keeper
 
@@ -8152,24 +8018,17 @@ actual directional exposure the market carries. Each quantity is used where it
 answers the right question, and the residual is a distribution effect between
 receivers rather than a leak.
 
-#### 12.8.4 An oracle outage suspends risk reduction
+#### 12.8.4 The oracle answers, and the token behaves
 
-Stated in full in §12.7.4 and repeated here because it is the largest
-operational exposure in the system: liquidation and ADL both require a price
-and both revert without one, while borrow and funding continue to accrue.
+Liquidation and ADL both require a price and both revert without one, while
+borrow and funding keep accruing (§12.7.4). Nothing here bounds the length of
+an outage or the loss it can produce; the mitigations are operational.
 
-Nothing in this specification bounds the length of an outage or the loss it
-can produce. The mitigations are operational — monitoring, source diversity,
-and the requirement in §12.7.4 that a guard protecting risk-adding operations
-must not block risk-reducing ones.
+The collateral token is trusted not to freeze a participant (§12.1). A frozen
+account cannot receive a payout, the transfer reverts, and the liquidation
+reverts with it.
 
-#### 12.8.5 The collateral token behaves
-
-§12.1 requires seven decimals, no transfer fee, and no rebasing, and trusts
-the issuer not to freeze a participant. A frozen account cannot receive a
-payout, the transfer reverts, and the liquidation reverts with it.
-
-#### 12.8.6 What is genuinely guaranteed
+#### 12.8.5 What is genuinely guaranteed
 
 For contrast, these hold regardless of keeper behaviour, oracle availability,
 or market conditions, because they are properties of the arithmetic:
