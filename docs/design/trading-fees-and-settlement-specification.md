@@ -95,7 +95,10 @@ the first settlement call that reaches a terminal outcome, subject to the
 trader's execution bounds. The price must come from an observation newer than
 the commitment. The protocol does not claim that this is the first oracle
 observation produced after the delay; enforcing a particular oracle round
-would require a separate round-assignment mechanism.
+would require a separate round-assignment mechanism. What makes the first
+eligible observation the one that settles in practice is keeper competition,
+which is an assumption about the world rather than a rule — §12.8.1 states it
+and what bounds it when it fails.
 
 A limit order waits for the market to reach a specified trigger. Reaching the
 trigger makes the order eligible for execution; it does not guarantee an exact
@@ -114,9 +117,13 @@ transaction.
 
 A keeper executes the instruction when its trigger and execution requirements
 are satisfied. The trigger is a condition for attempting the action, not a
-guarantee of settlement at the trigger price. Both actions settle the normal
-borrow and funding obligations, and either can pay a closing fee when the
-executed decrease or close realizes eligible profit.
+guarantee of settlement at the trigger price. Both instructions close the
+position in full; neither takes a size, and there is no partial take-profit.
+Both settle the normal borrow and funding obligations, and either can pay a
+closing fee when the close realizes eligible profit.
+
+A trader who wants a partial exit at a price uses a decrease, which is a
+committed action rather than a standing instruction.
 
 ### 1.9 Liquidation
 
@@ -132,10 +139,15 @@ shortfall if a violent price movement jumps past the liquidation buffer.
 
 ### 1.10 Automatic deleveraging
 
-Automatic deleveraging, or ADL, forcibly reduces or closes exposure when
-profitable positions on one side of a market create too much liability for the
-vault. It exists to restore solvency and reduce directional risk when ordinary
+Automatic deleveraging, or ADL, forcibly closes a profitable position when
+positions on one side of a market create too much liability for the vault. It
+exists to restore solvency and reduce directional risk when ordinary
 liquidation is not the relevant remedy.
+
+ADL closes the selected position in full. It does not reduce a position
+partially, so each execution removes one whole position's contribution to the
+side's liability, and the side's state is re-evaluated afterwards to decide
+whether another is permitted.
 
 ADL can affect a healthy trader who did nothing wrong. It therefore does not
 charge a closing fee. The action pays its configured fixed keeper reward from
@@ -2227,6 +2239,7 @@ Global configuration applies to the complete vault.
 |---|---:|---|
 | `min_collateral` | Cash | Minimum stored collateral for a surviving position; must exceed `keeper_liquidation_reward` |
 | `min_position_lifetime` | Seconds | Minimum time after an open or size increase before voluntary exposure removal |
+| `max_order_lifetime_seconds` | Seconds | Upper bound on an entry order's `expires_at`; initial value `604,800` |
 | `min_borrow_fee_seconds` | Seconds | Duration used to quote each monetary minimum-borrow obligation; initial value `900` |
 | `funding_half_life_seconds` | Seconds | Shared half-life of every market's funding EMA; initial value `43,200` and never zero |
 | `risk_capacity_limit_bps` | Bps | Maximum share of cash LP equity assignable to risk units; initial value `8,500` |
@@ -2639,6 +2652,16 @@ its escrow less the resolve reward.
 There is no persistent pending-withdrawal cash claim and no partial LP fill. A
 request settles fully or refunds fully, so LP request escrow is not included in
 the vault's non-LP cash claims.
+
+That exclusion is only correct because the escrow is held outside the vault's
+token balance. A deposit's collateral sits with the request contract until
+settlement transfers it in, so it never appears in `physical_cash` and never
+needs a claim label to offset it. Holding it inside the vault instead would
+make it indistinguishable from LP residual equity, and a pending deposit would
+silently raise cash LP equity, lower utilization, and enlarge risk capacity
+before its owner had bought a single share. Withdrawal escrow is the mirror
+case: shares, not cash, and they remain in total supply until they are burned
+on success.
 
 ### 5.10 Keeper reward configuration
 
@@ -4239,6 +4262,7 @@ function create_market_open_order(owner, request):
     execute_after =
         now + market.config.order_execution_delay_seconds
     require request.expires_at > execute_after
+    require request.expires_at <= now + max_order_lifetime_seconds
 
     opening_fee = calculate_opening_fee(request.size, market.config)
     keeper_reward = global_config.keeper_open_reward
@@ -5239,7 +5263,8 @@ function request_lp_deposit(owner, assets):
     require assets > keeper_lp_resolve_reward
     require LP requests are currently allowed
 
-    transfer collateral from owner into LP request escrow outside the vault
+    transfer collateral from owner into LP request escrow
+        (held by the request contract, not the vault)
 
     request_id = consume next LP request ID
     store pending Deposit request {
@@ -5335,7 +5360,7 @@ shares_to_mint = mul_div_floor(
     conversion_assets
 )
 
-require deposit eligibility and shares_to_mint > 0
+require deposit_eligible and shares_to_mint > 0
 transfer resolve_reward from escrow to the executor
 transfer remaining asset escrow into the vault
 mint shares_to_mint to owner
@@ -5346,6 +5371,34 @@ refresh global borrow rate
 The reward is deducted before conversion, so the depositor mints shares for
 the assets that actually reach the vault and no share is minted against value
 paid to the executor.
+
+`deposit_eligible` is the rule `min_deposit_nav_factor_bps` exists for, and it
+is a guard on the conversion arithmetic rather than a judgement about market
+conditions:
+
+```text
+if share_supply == 0:
+    deposit_eligible = true
+else if cash_lp_equity == 0:
+    deposit_eligible = false
+else:
+    deposit_eligible =
+        marked_vault_nav * BPS
+            >= cash_lp_equity * min_deposit_nav_factor_bps
+```
+
+Minting divides by `marked_vault_nav + 1`. As NAV falls toward zero with
+shares still outstanding, that denominator collapses and a deposit of any size
+mints an unbounded number of shares, diluting every existing holder to
+nothing. The virtual offsets `+1` and `+ SHARE_SCALE` keep the arithmetic
+defined, not fair. At the initial `8,000`, deposits stop once recognized
+trader profit reaches a fifth of cash LP equity — far from the regime where
+the conversion degenerates, which is the margin the gate is buying.
+
+The first deposit into an empty vault is exempt because there are no holders
+to dilute. A vault with shares outstanding and no cash equity accepts no
+deposit at all; it is recapitalized by governance or not at all, and this
+operation is not the path for it.
 
 Successful withdrawal settlement uses the pre-withdrawal state:
 
@@ -5623,7 +5676,8 @@ take-profit, or stop-loss that is submitted before either boundary returns
 reward.
 
 Market and limit entries additionally freeze `expires_at`, which must be
-strictly later than `execute_after`. Expiry uses:
+strictly later than `execute_after` and no later than
+`now + max_order_lifetime_seconds`. Expiry uses:
 
 ```text
 executable = now < expires_at
@@ -5636,6 +5690,21 @@ There is no timestamp at which both can succeed.
 The delay is necessary but insufficient. A delayed action without a newer
 qualifying observation remains `NotReady` indefinitely, except that an entry
 can still reach expiry.
+
+The upper bound on `expires_at` is what keeps that expiry reachable, and it
+also bounds an option the trader would otherwise hold. Between `execute_after`
+and `expires_at` an entry order is a standing right to be filled at a price
+inside its bound, and nothing obliges anyone to settle it: the trader may act
+as their own keeper and simply wait. Keeper competition is what normally
+closes that window, since any keeper earns the same reward for settling
+immediately (§1.7), but competition is an assumption about the world rather
+than a rule of the protocol. `max_order_lifetime_seconds` is the rule — it
+caps how long the option can run even if no keeper ever appears.
+
+The same reasoning does not apply to a position mutation, which has no
+`expires_at`. Its holder already owns the position, so waiting to close is not
+a right the commitment granted them; they could have waited without
+committing.
 
 ### 8.6 Fresh-price requirement
 
@@ -6128,9 +6197,9 @@ market.short_base = sum(base_exposure of live short positions)
 Opening and increasing add exactly the exposure derived for the added size.
 Partial decrease removes proportional base exposure using the specified
 rounding rule and re-derives risk units from resulting size. Full close,
-liquidation, and ADL remove every
-remaining size, base-exposure, and risk-unit unit assigned to the position so
-no terminal dust remains in market aggregates.
+liquidation, and ADL remove every remaining unit of size, base exposure, and
+risk assigned to the position, so no terminal dust remains in market
+aggregates.
 
 Pending actions and escrow are not exposure. They affect no open-interest,
 base, risk-unit, funding-skew, or capacity aggregate before successful
@@ -6449,6 +6518,7 @@ Global parameters affect the complete vault.
 |---|---:|---:|---|
 | `min_collateral` | Cash | `10,000,000` (`$1.00`) | Minimum stored collateral for every surviving position |
 | `min_position_lifetime` | Seconds | `60` | Time after open or the latest size increase before voluntary exposure removal |
+| `max_order_lifetime_seconds` | Seconds | `604,800` | Longest permitted entry-order lifetime, one week (§8.5) |
 | `min_borrow_fee_seconds` | Seconds | `900` | Duration used to quote the monetary minimum for each borrow window |
 | `funding_half_life_seconds` | Seconds | `43,200` | Shared EMA half-life used by all funding markets |
 | `risk_capacity_limit_bps` | Bps | `8,500` | Maximum admitted risk units relative to cash LP equity |
@@ -6599,6 +6669,7 @@ keeper_expiry_reward <= min_collateral
 
 0 <= min_position_lifetime  <= 86,400
 0 <  min_borrow_fee_seconds <= 86,400
+0 <  max_order_lifetime_seconds <= 2,592,000
 
 60 <= funding_half_life_seconds <= 31,536,000
 
@@ -6704,7 +6775,7 @@ The following values are frozen when an action or borrow window is created:
 |---|---|
 | `execute_after` derived from `order_execution_delay_seconds` | Each pending trader action and attached TP/SL instruction |
 | `commit_observed_at` | Each pending trader action and attached TP/SL instruction |
-| `expires_at` | Each expiring entry order |
+| `expires_at`, bounded by `max_order_lifetime_seconds` at creation | Each expiring entry order |
 | `stored_minimum_borrow_fee` | Each active borrow window |
 
 A later configuration update does not rewrite these stored values. Other fee,
@@ -6763,6 +6834,7 @@ The complete initial parameter set is:
 GLOBAL
 min_collateral                       = 10,000,000       # $1.00
 min_position_lifetime                = 60              # 1 minute
+max_order_lifetime_seconds           = 604,800         # 7 days
 min_borrow_fee_seconds               = 900             # 15 minutes
 funding_half_life_seconds            = 43,200          # 12 hours
 risk_capacity_limit_bps              = 8,500           # 85%
@@ -7330,8 +7402,8 @@ same way.
 Sections 2 through 11 define the economics. This section defines what the
 surrounding system must provide for those economics to hold: the token the
 vault holds, what pausing means, who may change what, how state survives an
-upgrade, how failures are reported, what the protocol emits, and what it
-requires of the oracle.
+upgrade, how failures are reported, what the protocol emits, what it requires
+of the oracle, and finally what it assumes rather than guarantees.
 
 Reentrancy is deliberately absent from this section. The Soroban host rejects
 an attempt to re-enter a contract already on the call stack, so the ordering
@@ -7805,3 +7877,119 @@ data behind an accepted fill can be, so it is the real width of the window a
 trader is committing against — the execution delay of §8.5 measures the wait,
 and this measures the freshness. Setting it far above the oracle's publication
 cadence widens that window silently, without any parameter in §10 changing.
+
+### 12.8 Stated assumptions and residual risks
+
+Some properties of this design are not guaranteed by any rule in it. They hold
+because of how the surrounding world behaves, or they do not hold at all and
+the exposure is accepted. Leaving them unwritten would make the rest of this
+document read as stronger than it is, so they are collected here.
+
+Each entry names what is assumed, what happens if the assumption fails, and
+what bounds the damage.
+
+#### 12.8.1 There is a competing keeper
+
+Almost every settlement in this protocol is performed by whoever cares to
+perform it, paid a fixed reward. The design leans on that in one place where a
+rule would otherwise be needed: whoever chooses *when* to settle also chooses
+*which price* settles, and the protocol never names a mandatory observation.
+
+The answer everywhere is the same. A keeper earns the same reward for
+settling immediately and for settling late, and any keeper can take the
+reward, so the first observation after `execute_after` is the one that pays.
+The party with an interest in waiting does not control the timing, because
+waiting hands the reward to someone else.
+
+If no competing keeper exists, that reasoning fails and every trader-committed
+action becomes a free option running until its deadline. What bounds it:
+`max_order_lifetime_seconds` for entries, and for position mutations the fact
+that the holder already owns the position and gains no right by committing
+(§8.5). What does not bound it is anything else, and a deployment with a
+single keeper — or one operated only by the protocol itself — should treat
+this as the assumption most worth monitoring.
+
+The fixed `$0.25` reward is the whole incentive. It is not indexed to position
+size, gas price, or urgency, so it is a bet that settling remains profitable
+at the smallest position the vault admits. Liquidating a maximum-leverage
+position near its threshold pays the same as settling a resting limit order.
+If that stops being true, the failure is silent: keepers simply stop, and the
+first visible symptom is unliquidated positions rather than an error.
+
+#### 12.8.2 Fills happen at the oracle price, with no spread
+
+A trader opens and closes at the aggregated oracle mid. There is no spread, no
+price impact, and no size-dependent execution penalty, so a large position
+costs the same per unit as a small one.
+
+This is a deliberate simplification and it has a cost: the vault is the
+counterparty to every trade at a price it did not quote. Adverse selection —
+traders systematically taking the side that is about to be right — is not
+priced at execution at all. It is priced afterwards, and only in aggregate, by
+funding on directional imbalance (§3.4) and borrow on consumed capacity
+(§3.3).
+
+The execution delay and fresh-observation rule (§1.13) are what keep this from
+being exploitable at the tick level, by ensuring a trader cannot commit after
+seeing a move and settle against the price they already saw. They do not
+address a trader who is simply better informed over minutes or hours. That
+exposure sits with LPs and is compensated by fee and borrow revenue, not
+eliminated.
+
+#### 12.8.3 Funding is measured on base and charged on size
+
+Skew, and therefore who pays, is derived from base exposure (§3.4.1). The
+payer's obligation and the receiver's credit are both per unit of position
+size (§3.4.4). The two bases differ whenever the sides entered at different
+average prices.
+
+The aggregate is unaffected: the receiver-backed portion can never exceed the
+payer flow, and the split between receiver-backed and LP-backed is exact. What
+shifts is distribution — the credit per unit of receiver size does not exactly
+track the offsetting exposure that unit provides.
+
+Using base for both would make the fee base move with entry price, so a
+position's funding obligation would depend on where it opened rather than on
+what it is worth. Using size for both would make skew insensitive to the
+actual directional exposure the market carries. Each quantity is used where it
+answers the right question, and the residual is a distribution effect between
+receivers rather than a leak.
+
+#### 12.8.4 An oracle outage suspends risk reduction
+
+Stated in full in §12.7.4 and repeated here because it is the largest
+operational exposure in the system: liquidation and ADL both require a price
+and both revert without one, while borrow and funding continue to accrue.
+
+Nothing in this specification bounds the length of an outage or the loss it
+can produce. The mitigations are operational — monitoring, source diversity,
+and the requirement in §12.7.4 that a guard protecting risk-adding operations
+must not block risk-reducing ones.
+
+#### 12.8.5 The collateral token behaves
+
+§12.1 requires seven decimals, no transfer fee, and no rebasing, and trusts
+the issuer not to freeze a participant. A frozen account cannot receive a
+payout, the transfer reverts, and the liquidation reverts with it.
+
+#### 12.8.6 What is genuinely guaranteed
+
+For contrast, these hold regardless of keeper behaviour, oracle availability,
+or market conditions, because they are properties of the arithmetic:
+
+- cash ownership conservation (§9.1) — labels divide physical cash, never
+  create it;
+- fee distribution conservation (§9.2) — only collected amounts are
+  distributed, and the split sums exactly;
+- index monotonicity (§9.5) — no cumulative index decreases, and a negative
+  pending amount reverts rather than being clamped;
+- no retroactive repricing (§9.6) — elapsed time is always charged at the rate
+  that was in force;
+- exposure aggregate correctness (§9.7) — every aggregate equals the sum of
+  its records after each transition;
+- single settlement (§9.14) — one action reaches a terminal state once and
+  pays one reward; and
+- atomic reversion (§9.16) — an unexpected failure changes nothing.
+
+A reader deciding how much to rely on a given behaviour should check which of
+these two lists it belongs to.
