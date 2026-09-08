@@ -1,5 +1,172 @@
 # WinTrader Trading, Fees, and Settlement Specification
 
+## Contents
+
+- [1. The system in plain language](#1-the-system-in-plain-language)
+  - [1.1 The vault and liquidity providers](#11-the-vault-and-liquidity-providers)
+  - [1.2 Positions, collateral, size, leverage, and PnL](#12-positions-collateral-size-leverage-and-pnl)
+  - [1.3 Opening a position](#13-opening-a-position)
+  - [1.4 Increasing a position](#14-increasing-a-position)
+  - [1.5 Decreasing a position](#15-decreasing-a-position)
+  - [1.6 Closing a position](#16-closing-a-position)
+  - [1.7 Market and limit orders](#17-market-and-limit-orders)
+  - [1.8 Take-profit and stop-loss](#18-take-profit-and-stop-loss)
+  - [1.9 Liquidation](#19-liquidation)
+  - [1.10 Automatic deleveraging](#110-automatic-deleveraging)
+  - [1.11 Keepers](#111-keepers)
+  - [1.12 Order creation and settlement](#112-order-creation-and-settlement)
+  - [1.13 Fresh-price execution](#113-fresh-price-execution)
+  - [1.14 Failed and expired orders](#114-failed-and-expired-orders)
+- [2. Accounting model and numerical conventions](#2-accounting-model-and-numerical-conventions)
+  - [2.1 Numerical precision and units](#21-numerical-precision-and-units)
+  - [2.2 Physical vault cash](#22-physical-vault-cash)
+  - [2.3 LP equity](#23-lp-equity)
+  - [2.4 Position collateral](#24-position-collateral)
+  - [2.5 Explicit claims and liabilities](#25-explicit-claims-and-liabilities)
+  - [2.6 Position size and base exposure](#26-position-size-and-base-exposure)
+  - [2.7 Risk units](#27-risk-units)
+  - [2.8 Raw and payable PnL](#28-raw-and-payable-pnl)
+  - [2.9 Effective collateral](#29-effective-collateral)
+  - [2.10 Utilization](#210-utilization)
+  - [2.11 Rounding rules](#211-rounding-rules)
+  - [2.12 Stored and derived values](#212-stored-and-derived-values)
+- [3. Fees and rewards](#3-fees-and-rewards)
+  - [3.1 Opening fee](#31-opening-fee)
+  - [3.2 Closing fee](#32-closing-fee)
+  - [3.3 Borrow fee](#33-borrow-fee)
+  - [3.4 Funding](#34-funding)
+  - [3.5 Fixed keeper rewards](#35-fixed-keeper-rewards)
+  - [3.6 Referral rewards](#36-referral-rewards)
+  - [3.7 Fee revenue distribution](#37-fee-revenue-distribution)
+  - [3.8 Settlement waterfall](#38-settlement-waterfall)
+  - [3.9 Bad debt and the LP backstop](#39-bad-debt-and-the-lp-backstop)
+  - [3.10 Fee examples](#310-fee-examples)
+- [4. Index and checkpoint system](#4-index-and-checkpoint-system)
+  - [4.1 Why indices are necessary](#41-why-indices-are-necessary)
+  - [4.2 Global borrow index](#42-global-borrow-index)
+  - [4.3 Per-market funding indices](#43-per-market-funding-indices)
+  - [4.4 Position debt baselines](#44-position-debt-baselines)
+  - [4.5 Accrual remainders](#45-accrual-remainders)
+  - [4.6 Funding EMA and exact window integration](#46-funding-ema-and-exact-window-integration)
+  - [4.7 Global checkpoint](#47-global-checkpoint)
+  - [4.8 Market checkpoint](#48-market-checkpoint)
+  - [4.9 Checkpoint and mutation order](#49-checkpoint-and-mutation-order)
+  - [4.10 Opening a borrow window](#410-opening-a-borrow-window)
+  - [4.11 Settling and resetting a borrow window](#411-settling-and-resetting-a-borrow-window)
+  - [4.12 Reading pending fees without mutation](#412-reading-pending-fees-without-mutation)
+  - [4.13 Empty-book initialization and reset](#413-empty-book-initialization-and-reset)
+  - [4.14 Time and rounding invariants](#414-time-and-rounding-invariants)
+- [5. Storage model](#5-storage-model)
+  - [5.1 Global configuration](#51-global-configuration)
+  - [5.2 Global accounting state](#52-global-accounting-state)
+  - [5.3 Market configuration](#53-market-configuration)
+  - [5.4 Market accounting state](#54-market-accounting-state)
+  - [5.5 Position state](#55-position-state)
+  - [5.6 Pending-action state](#56-pending-action-state)
+  - [5.7 Entry escrow](#57-entry-escrow)
+  - [5.8 Referral state](#58-referral-state)
+  - [5.9 LP claim state](#59-lp-claim-state)
+  - [5.10 Keeper reward configuration](#510-keeper-reward-configuration)
+  - [5.11 Aggregate exposure and risk state](#511-aggregate-exposure-and-risk-state)
+  - [5.12 Liability totals](#512-liability-totals)
+  - [5.13 Derived values that are not stored](#513-derived-values-that-are-not-stored)
+  - [5.14 State cleanup](#514-state-cleanup)
+- [6. Core accounting algorithms](#6-core-accounting-algorithms)
+  - [6.1 Accrue global borrow](#61-accrue-global-borrow)
+  - [6.2 Accrue market funding](#62-accrue-market-funding)
+  - [6.3 Calculate pending borrow](#63-calculate-pending-borrow)
+  - [6.4 Calculate pending funding](#64-calculate-pending-funding)
+  - [6.5 Calculate raw and payable PnL](#65-calculate-raw-and-payable-pnl)
+  - [6.6 Calculate effective collateral](#66-calculate-effective-collateral)
+  - [6.7 Settle a borrow window](#67-settle-a-borrow-window)
+  - [6.8 Calculate the opening fee](#68-calculate-the-opening-fee)
+  - [6.9 Calculate the closing fee](#69-calculate-the-closing-fee)
+  - [6.10 Apply the settlement waterfall](#610-apply-the-settlement-waterfall)
+  - [6.11 Distribute collected revenue](#611-distribute-collected-revenue)
+  - [6.12 Pay a keeper reward](#612-pay-a-keeper-reward)
+  - [6.13 Update exposure aggregates](#613-update-exposure-aggregates)
+  - [6.14 Refresh utilization and the borrow rate](#614-refresh-utilization-and-the-borrow-rate)
+  - [6.15 Evaluate liquidation eligibility](#615-evaluate-liquidation-eligibility)
+  - [6.16 Evaluate ADL state](#616-evaluate-adl-state)
+  - [6.17 Release residual accounting dust](#617-release-residual-accounting-dust)
+- [7. User-facing operations](#7-user-facing-operations)
+  - [7.0 Common predicates and terminal helpers](#70-common-predicates-and-terminal-helpers)
+  - [7.1 Create a market-open order](#71-create-a-market-open-order)
+  - [7.2 Settle a market-open order](#72-settle-a-market-open-order)
+  - [7.3 Create a limit-open order](#73-create-a-limit-open-order)
+  - [7.4 Settle a limit-open order](#74-settle-a-limit-open-order)
+  - [7.5 Cancel a limit order](#75-cancel-a-limit-order)
+  - [7.6 Clean up an expired order](#76-clean-up-an-expired-order)
+  - [7.7 Add collateral](#77-add-collateral)
+  - [7.8 Create and settle an increase](#78-create-and-settle-an-increase)
+  - [7.9 Create and settle a decrease](#79-create-and-settle-a-decrease)
+  - [7.10 Create and settle a voluntary close](#710-create-and-settle-a-voluntary-close)
+  - [7.11 Execute take-profit](#711-execute-take-profit)
+  - [7.12 Execute stop-loss](#712-execute-stop-loss)
+  - [7.13 Liquidate a position](#713-liquidate-a-position)
+  - [7.14 Execute automatic deleveraging](#714-execute-automatic-deleveraging)
+  - [7.15 Register or change a referrer](#715-register-or-change-a-referrer)
+  - [7.16 Claim referral revenue](#716-claim-referral-revenue)
+  - [7.17 Deposit and withdraw LP liquidity](#717-deposit-and-withdraw-lp-liquidity)
+- [8. Order lifecycle and failure behavior](#8-order-lifecycle-and-failure-behavior)
+  - [8.1 Order states](#81-order-states)
+  - [8.2 Market-order lifecycle](#82-market-order-lifecycle)
+  - [8.3 Limit-order lifecycle](#83-limit-order-lifecycle)
+  - [8.4 Voluntary position-action lifecycle](#84-voluntary-position-action-lifecycle)
+  - [8.5 Delay and expiry boundaries](#85-delay-and-expiry-boundaries)
+  - [8.6 Fresh-price requirement](#86-fresh-price-requirement)
+  - [8.7 Slippage failure](#87-slippage-failure)
+  - [8.8 Capacity failure](#88-capacity-failure)
+  - [8.9 Expected terminal failure and transaction reversion](#89-expected-terminal-failure-and-transaction-reversion)
+  - [8.10 Refund behavior](#810-refund-behavior)
+  - [8.11 Keeper payment on terminal attempts](#811-keeper-payment-on-terminal-attempts)
+  - [8.12 Liquidation and ADL precedence](#812-liquidation-and-adl-precedence)
+  - [8.13 Duplicate and replay prevention](#813-duplicate-and-replay-prevention)
+  - [8.14 One action per settlement call](#814-one-action-per-settlement-call)
+- [9. Safety and accounting invariants](#9-safety-and-accounting-invariants)
+  - [9.1 Cash ownership conservation](#91-cash-ownership-conservation)
+  - [9.2 Fee distribution conservation](#92-fee-distribution-conservation)
+  - [9.3 Funding conservation](#93-funding-conservation)
+  - [9.4 Receiver-funding guarantees](#94-receiver-funding-guarantees)
+  - [9.5 Index monotonicity](#95-index-monotonicity)
+  - [9.6 No retroactive rate changes](#96-no-retroactive-rate-changes)
+  - [9.7 Exposure aggregate correctness](#97-exposure-aggregate-correctness)
+  - [9.8 Risk-capacity enforcement](#98-risk-capacity-enforcement)
+  - [9.9 Position-health consistency](#99-position-health-consistency)
+  - [9.10 Liquidation-reward safety](#910-liquidation-reward-safety)
+  - [9.11 Escrow isolation](#911-escrow-isolation)
+  - [9.12 No opening fee on failed entry](#912-no-opening-fee-on-failed-entry)
+  - [9.13 Closing-fee boundaries](#913-closing-fee-boundaries)
+  - [9.14 Single settlement and keeper payment](#914-single-settlement-and-keeper-payment)
+  - [9.15 Rounding direction](#915-rounding-direction)
+  - [9.16 Atomic reversion](#916-atomic-reversion)
+- [10. Configuration reference](#10-configuration-reference)
+  - [10.1 Global parameters](#101-global-parameters)
+  - [10.2 Per-market parameters](#102-per-market-parameters)
+  - [10.3 Parameter validation](#103-parameter-validation)
+  - [10.4 Deployment defaults](#104-deployment-defaults)
+- [11. End-to-end examples](#11-end-to-end-examples)
+  - [11.1 Successful leveraged market open](#111-successful-leveraged-market-open)
+  - [11.2 Market open rejected by slippage](#112-market-open-rejected-by-slippage)
+  - [11.3 Profitable close below the size-fee threshold](#113-profitable-close-below-the-size-fee-threshold)
+  - [11.4 Profitable close where the PnL fee dominates](#114-profitable-close-where-the-pnl-fee-dominates)
+  - [11.5 Losing close](#115-losing-close)
+  - [11.6 Increase and borrow-window reset](#116-increase-and-borrow-window-reset)
+  - [11.7 Partial decrease](#117-partial-decrease)
+  - [11.8 Funding payer and receiver](#118-funding-payer-and-receiver)
+  - [11.9 Liquidation after a violent price movement](#119-liquidation-after-a-violent-price-movement)
+  - [11.10 Automatic deleveraging](#1110-automatic-deleveraging)
+  - [11.11 Expired-order cleanup](#1111-expired-order-cleanup)
+- [12. Operational contract](#12-operational-contract)
+  - [12.1 Collateral and share token requirements](#121-collateral-and-share-token-requirements)
+  - [12.2 Pause semantics](#122-pause-semantics)
+  - [12.3 Authorization and governance](#123-authorization-and-governance)
+  - [12.4 Storage lifetime, upgrade, and migration](#124-storage-lifetime-upgrade-and-migration)
+  - [12.5 Error taxonomy](#125-error-taxonomy)
+  - [12.6 Emitted results](#126-emitted-results)
+  - [12.7 Oracle interface](#127-oracle-interface)
+  - [12.8 Stated assumptions and residual risks](#128-stated-assumptions-and-residual-risks)
+
 ## 1. The system in plain language
 
 WinTrader is a perpetual trading vault. Traders use collateral to take long or
@@ -215,6 +382,26 @@ state and pays no reward.
 
 This section defines the quantities used throughout the specification. A name
 has one meaning and one unit everywhere it appears.
+
+Where a rule appears in more than one place, exactly one statement of it is
+normative and the others describe or constrain it. The normative homes are:
+
+| Rule | Normative in |
+|---|---|
+| Rounding direction per quantity | §2.11 |
+| Opening fee | §6.8 |
+| Closing fee | §6.9 |
+| Borrow accrual and the minimum-borrow floor | §3.3, §6.3 |
+| Funding integration and its split | §4.6, §6.2 |
+| Settlement order | §3.8 |
+| Effective collateral | §2.9 |
+| Payable PnL and the payout factor | §6.5 |
+| Risk-state meaning and admission | §6.16, §6.16.1 |
+| Parameter values and validation | §10 |
+
+Section 9 states invariants over these rules rather than restating them, and
+section 11 illustrates them. If a worked example and a normative section
+disagree, the normative section governs and the example is a defect.
 
 ### 2.1 Numerical precision and units
 
@@ -4136,6 +4323,8 @@ quantities cannot strand ownerless cash.
 
 ## 7. User-facing operations
 
+### 7.0 Common predicates and terminal helpers
+
 Every operation executes atomically and processes one action. A settlement
 caller cannot submit an array or combine unrelated opens, closes,
 liquidations, or ADL actions in one call.
@@ -6388,33 +6577,11 @@ existing position only when doing so leaves that position safe.
 Closing fees apply only to voluntary decreases, voluntary closes, TP, and SL.
 Liquidation and ADL never charge them.
 
-For each fee-bearing settlement:
 
-```text
-if payable_price_pnl <= 0:
-    collected_closing_fee = 0
-else:
-    size_component = ceil(closed_size * close_size_fee_bps / BPS)
-    pnl_component  = ceil(payable_price_pnl * close_pnl_fee_bps / BPS)
-    nominal_fee    = min(
-        max(size_component, pnl_component),
-        payable_price_pnl
-    )
-
-    profit_after_senior_items = max(
-        0,
-          payable_price_pnl
-        + funding_received
-        - receiver_backed_funding_owed
-        - lp_backed_funding_owed
-        - borrow_fee
-        - keeper_reward
-    )
-
-    collected_closing_fee = min(nominal_fee, profit_after_senior_items)
-```
-
-Consequently:
+The fee is calculated by `calculate_closing_fee` in §6.9, which is the single
+normative statement of the formula; §3.2 explains the two components and their
+caps. This section states only what must be true of the result, whatever
+arithmetic produced it:
 
 ```text
 0 <= collected_closing_fee <= payable_price_pnl
@@ -6447,24 +6614,14 @@ for the same action cannot both succeed or both be paid.
 
 ### 9.15 Rounding direction
 
-Rounding follows ownership and risk direction consistently:
+The per-quantity rounding directions are tabulated once, in §2.11. That table
+is normative; this section states the properties the table exists to produce,
+so a change to one direction can be checked against them.
 
-- trader and funding-payer obligations round up;
-- trader and funding-receiver credits round down;
-- opening and closing fees round up before their explicit caps;
-- long base exposure rounds down;
-- short base exposure rounds up;
-- long value used for PnL rounds down;
-- short buyback value used for PnL rounds up;
-- remaining base exposure after a partial reduction rounds down, with the
-  removed portion receiving the difference — a conservation rule, not a
-  direction rule, because the two portions always sum to the pre-reduction
-  base (§2.11);
-- remaining risk units are re-derived from resulting size;
-- LP and referral percentage shares round down; and
-- the protocol receives fee-split remainder;
-- LP shares minted for a deposit round down; and
-- assets paid for an LP withdrawal round down.
+Rounding never favours the trader over the vault, with the single documented
+exception of a partial reduction's base split, which is a conservation rule
+rather than a direction rule because the two portions always sum to the
+pre-reduction base (§2.11).
 
 Each repeated time or distribution division carries its own remainder until
 its defined reset. A remainder belonging to one index, ownership stream, or
