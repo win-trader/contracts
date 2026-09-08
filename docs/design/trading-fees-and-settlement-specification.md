@@ -3287,8 +3287,9 @@ function calculate_raw_pnl(direction, size, base_exposure, price):
     return size - buyback_value
 ```
 
-Payable PnL applies the side-wide hard cap only to positive raw PnL, then
-applies the independent LP-equity clamp:
+Payable PnL applies the side's stored payout factor to positive raw PnL, and
+nothing else. The payment-time cash limit is applied later, by the code that
+moves the money:
 
 ```text
 function calculate_payable_pnl(position_raw_pnl, market_side):
@@ -7109,9 +7110,9 @@ initial margin       = ceil($100,000 * 5%)
 
 projected minimum borrow at 25 bps/day on $10,000 risk units
                      = ceil($10,000 * 25 / 10,000 * 900 / 86,400)
-                     = $0.0260417
+                     = $0.2604167
 
-$5,099.75 >= $5,000.0260417                 => margin passes
+$5,099.75 >= $5,000.2604167                 => margin passes
 post-settlement risk units pass capacity    => capacity passes
 ```
 
