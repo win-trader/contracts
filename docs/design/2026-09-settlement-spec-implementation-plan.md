@@ -399,26 +399,26 @@ against the final layout.
 
 ### 4a. Borrow (§4.2, §4.10, §4.11, §6.1, §6.14)
 
-- [ ] **P4-01** `borrow::accrue` — already §6.1-correct. Re-verify against the
+- [x] **P4-01** `borrow::accrue` — already §6.1-correct. Re-verify against the
       spec text after the 256-bit helper swap and leave it alone otherwise.
-- [ ] **P4-02** `refresh_borrow_rate` (§6.14): fixed square, no exponent.
+- [x] **P4-02** `refresh_borrow_rate` (§6.14): fixed square, no exponent.
       `u = mul_div_floor(utilization, INDEX_PRECISION, BPS)` — converted to
       `INDEX_PRECISION` **before** squaring, because `utilization / BPS` as an
       integer division collapses to `0` or `1`. Both addends are formed at
       `INDEX_PRECISION` before they are summed.
-- [ ] **P4-03** `initialize_borrow_window` (§4.10, §6.7): set `borrow_debt =
+- [x] **P4-03** `initialize_borrow_window` (§4.10, §6.7): set `borrow_debt =
       ceil(risk_units * borrow_index / INDEX_PRECISION)` and
       `stored_minimum_borrow_fee = ceil(risk_units * current_borrow_rate *
       min_borrow_fee_seconds / (INDEX_PRECISION * BPS * SECONDS_PER_DAY))`,
       **after** the exposure mutation and **after** the rate refresh.
-- [ ] **P4-04** `settle_borrow_window_for_survivor` (§6.7): the surviving path
+- [x] **P4-04** `settle_borrow_window_for_survivor` (§6.7): the surviving path
       requires full payment from stored collateral and reverts otherwise. The
       terminal path computes the same `pending.due` but may collect less; only
       the collected amount becomes revenue, and no replacement window opens.
-- [ ] **P4-05** `calculate_pending_borrow` (§6.3): check `raw_actual >= 0`
+- [x] **P4-05** `calculate_pending_borrow` (§6.3): check `raw_actual >= 0`
       **before** applying the minimum. A minimum may raise a valid obligation;
       it may never conceal a broken baseline.
-- [ ] **P4-06** Wire the §3.3.3 reset sequence into every size mutation:
+- [x] **P4-06** Wire the §3.3.3 reset sequence into every size mutation:
       accrue → compute `max(actual, stored minimum)` → deduct from *existing*
       collateral → mutate size → refresh rate → reset baseline → quote a new
       minimum. No tranche, proportional remainder, or old minimum carries
@@ -428,38 +428,44 @@ against the final layout.
 
 This is the single largest correctness delta in the plan.
 
-- [ ] **P4-07** New pure `integrate_funding_window_by_sign(...) ->
+- [x] **P4-07** New pure `integrate_funding_window_by_sign(...) ->
       FundingWindow { segments, ema_after, payer_side_at_window_end,
       displayed_rate_at_window_end }` (§6.2.1). Reads no storage, writes none.
-- [ ] **P4-08** **Split the window at a sign change.** The current
+- [x] **P4-08** **Split the window at a sign change.** The current
       `funding_window` returns one weight and picks the payer from
       `sign(∫ I dt)` — the exact thing §3.4.3 forbids, because it assigns
       funding generated on one side of the crossing to the other. Implement the
       §2.1.2 endpoint test: a crossing exists iff `sign(A + B) != sign(A + B*d_end)`.
       Comparing `A + B` against `A` alone tests for a crossing on `[0, ∞)` and
       will split windows at a point outside themselves.
-- [ ] **P4-09** `d_star = -A/B`, `t_star = H * log2(IP²/d_star) / IP`, used at
+- [x] **P4-09** `d_star = -A/B`, `t_star = H * log2(IP²/d_star) / IP`, used at
       full precision and **not** rounded to a whole second before integration.
       Keep both guards — `require d_end < d_star < INDEX_PRECISION` and
       `require 0 < t_star < elapsed` — even though the endpoint test should
       make them unreachable. They are cheap, and a wrong sign test otherwise
       integrates a window at ~150× its true length, silently.
-- [ ] **P4-10** Per-segment `d1`/`d2` are measured **from the window origin**,
+- [x] **P4-10** Per-segment `d1`/`d2` are measured **from the window origin**,
       not from the segment's own start. The second segment starts at `d_star`,
       not at `INDEX_PRECISION`. Restarting the decay per segment roughly
       doubles the funding attributed to the second one.
-- [ ] **P4-11** `J1`/`J2` carried at `INDEX_PRECISION`, with the single
+      *Measured.* In the worked case `A = -P`, `B = +2P`, `w = 0` over four
+      half-lives, the correct span weights are `0.2786·P²H` and `1.1852·P²H`
+      (ratio `4.254`); a restarted decay reads `0.4636·P²H` (ratio `1.66`).
+      In that configuration the restart *under*-counts rather than doubling,
+      so the regression test pins the analytic ratio rather than asserting an
+      inequality that happens to hold.
+- [x] **P4-11** `J1`/`J2` carried at `INDEX_PRECISION`, with the single
       compensating division at the end (§6.2.1). Flooring them to whole seconds
       is a `1e-5` relative error — seven orders of magnitude outside
       `DECAY_TOLERANCE` and the dominant error in the whole calculation.
-- [ ] **P4-12** Return segments in **chronological order**. Order does not
+- [x] **P4-12** Return segments in **chronological order**. Order does not
       change the arithmetic but does change which carried remainder each
       division sees.
-- [ ] **P4-13** Clamp `quadratic_integral` at zero (truncation residue on a
+- [x] **P4-13** Clamp `quadratic_integral` at zero (truncation residue on a
       mathematically non-negative quantity). Document why this is *not* the
       forbidden clamp of §2.11 — nothing here subtracts a stored baseline from
       a monotonic index.
-- [ ] **P4-14** Rewrite `funding::accrue` (§6.2) to process each segment:
+- [x] **P4-14** Rewrite `funding::accrue` (§6.2) to process each segment:
       select payer/receiver aggregates and the remainder group **keyed by that
       segment's payer direction**; derive `receiver_weight` /`lp_weight` from
       opposing base exposure; advance both payer indices through `carried_div`;
@@ -467,41 +473,41 @@ This is the single largest correctness delta in the plan.
       same `receiver_backing_scaled` value so neither can exceed the other's
       justification. Advance the EMA, display fields, and timestamp in **every**
       branch, including when no payer side has exposure.
-- [ ] **P4-15** `market.pending_receiver_funding` per market, kept equal to its
+- [x] **P4-15** `market.pending_receiver_funding` per market, kept equal to its
       share of `ledger.pending_receiver_funding_total` (§5.12). Today only the
       global total exists.
-- [ ] **P4-16** **`reset_receiver_distribution_remainder`** (§4.5.1, §6.13) —
+- [x] **P4-16** **`reset_receiver_distribution_remainder`** (§4.5.1, §6.13) —
       missing entirely today. When a side's `size_open_interest` changes, zero
       the **opposite** payer stream's `receiver_distribution_remainder`. The
       long-payer stream distributes to short receivers, so a change on the
       short side clears the long-payer carry. Without this, §9.4's sufficiency
       check in `credit_received_funding` becomes reachable and a receiver
       position cannot be settled. It must not be replaced by a clamp.
-- [ ] **P4-17** Empty-book cold start (§4.13): seed `skew_ema` from the first
+- [x] **P4-17** Empty-book cold start (§4.13): seed `skew_ema` from the first
       position's **live skew**, not zero. Already present as
       `funding::cold_start` — keep, and re-verify it runs after the exposure is
       added.
-- [ ] **P4-18** Empty-**market** reset (§4.13, §6.17): when one market's book
+- [x] **P4-18** Empty-**market** reset (§4.13, §6.17): when one market's book
       empties, zero its EMA, display fields, and both remainder groups, and
       release *that market's* `pending_receiver_funding` to LP equity. Today
       `funding::release_residue` fires only when `open_position_count == 0`
       vault-wide — per §4.13 a market does not wait for every other market to
       empty. Keep a `verify_no_final_receiver_residue` assertion for the
       vault-empty case.
-- [ ] **P4-19** Cumulative indices and checkpoint timestamps are **never** reset,
+- [x] **P4-19** Cumulative indices and checkpoint timestamps are **never** reset,
       including across an empty period and across market deregistration.
 
 ### 4c. Ordering and previews
 
-- [ ] **P4-20** Enforce the §4.9 ten-step mutation order at every state-changing
+- [x] **P4-20** Enforce the §4.9 ten-step mutation order at every state-changing
       entry point, with step 7 (receiver-distribution remainder reset) and step
       9 (borrow-rate refresh) in the right places. Refreshing a rate before
       accruing elapsed time reprices history and is forbidden (§9.6).
-- [ ] **P4-21** Read-only preview path (§4.12): virtually advance the global
+- [x] **P4-21** Read-only preview path (§4.12): virtually advance the global
       index and the market's funding indices on an in-memory copy, derive the
       pending amounts, return them **without saving any state or remainder**.
       The preview and the mutating checkpoint must use identical arithmetic.
-- [ ] **P4-22** An action touching one market checkpoints only that market; an
+- [x] **P4-22** An action touching one market checkpoints only that market; an
       LP action that marks NAV checkpoints the global index and **every** active
       market from one synchronized snapshot. `max_active_markets` is what keeps
       that bounded.

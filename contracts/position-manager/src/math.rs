@@ -12,7 +12,6 @@
 use soroban_sdk::{panic_with_error, Env, U256};
 
 use shared::constants::{BPS, INDEX_PRECISION, PRICE_PRECISION};
-use shared::fixed::{self, LN2};
 
 use crate::errors::PositionManagerError;
 
@@ -56,6 +55,21 @@ pub fn carried_div(env: &Env, numerator: &U256, divisor: i128, remainder: i128) 
 /// Widen a non-negative `i128` for a `carried_div` numerator.
 pub fn widen(env: &Env, value: i128) -> U256 {
     shared::math::widen(env, value).unwrap_or_else(|| fail(env))
+}
+
+/// §2.1.1 — `floor(n × b / d)` for a numerator that is already 256-bit and
+/// a result that is still one. §6.2 splits a funding weight in proportion to
+/// base exposure before dividing it into an index; narrowing it at that
+/// point would overflow.
+pub fn wide_mul_div_floor(env: &Env, n: &U256, b: i128, d: i128) -> U256 {
+    shared::math::wide_mul_div_floor(env, n, b, d).unwrap_or_else(|| fail(env))
+}
+
+/// §2.1.1 — `ceil(a × b × c / d)` with the triple product formed at 256
+/// bits. §6.7's minimum borrow fee is the one formula with three
+/// multiplicands on the way to a division.
+pub fn mul_mul_div_ceil(env: &Env, a: i128, b: i128, c: i128, d: i128) -> i128 {
+    shared::math::mul_mul_div_ceil(env, a, b, c, d).unwrap_or_else(|| fail(env))
 }
 
 /// The 256-bit product `a × b`, for a `carried_div` numerator. §2.1.1
@@ -107,69 +121,6 @@ pub fn skew_frac(env: &Env, long_base: i128, short_base: i128) -> i128 {
     }
 }
 
-/// Everything one §8.1 funding window resolves to.
-pub struct FundingWindow {
-    /// `∫ rate dt` over the window — `INDEX_PRECISION`-scaled bps·seconds;
-    /// divide by `BPS × SECONDS_PER_DAY` for the per-unit-size index delta.
-    pub weight: i128,
-    /// Sign of `∫ I dt`: +1 longs pay, −1 shorts pay, 0 nobody.
-    pub payer_sign: i128,
-    /// The skew EMA at the window's end.
-    pub ema_after: i128,
-    /// The blended integral skew at the window's end (signed).
-    pub integral_now: i128,
-}
-
-/// §8.1 — resolve one funding window over a constant book, in closed form:
-/// `E(t) = S + (E₀−S)·d`, `I(t) = A + B·d` with `A = S`,
-/// `B = (BPS−w)(E₀−S)/BPS`, and
-/// `∫ rate dt = max_rate × (A²Δt + 2AB·J₁ + B²·J₂)` where
-/// `J₁ = H/ln2·(1−d)` and `J₂ = H/(2ln2)·(1−d²)`. Exact integration means
-/// checkpoint frequency cannot change accrued value beyond `d`'s
-/// quantization (§3, tolerance-bounded).
-#[allow(clippy::too_many_arguments)]
-pub fn funding_window(
-    env: &Env,
-    long_base: i128,
-    short_base: i128,
-    ema: i128,
-    instant_weight_bps: u32,
-    half_life: u64,
-    max_rate_bps_day: i128,
-    elapsed: u64,
-) -> FundingWindow {
-    let p = INDEX_PRECISION;
-    let s = skew_frac(env, long_base, short_base);
-    let a = s;
-    let b = mul_div_trunc(
-        env,
-        sub(env, BPS, instant_weight_bps as i128),
-        sub(env, ema, s),
-        BPS,
-    );
-    let dt = elapsed as i128;
-    let h = half_life as i128;
-    let d = decay(env, elapsed, half_life);
-    // `H / ln 2` at INDEX_PRECISION, from the §2.1.2 constant: dividing by
-    // `LN2` (which carries the IP factor) expresses the same quantity the
-    // deleted `INV_LN2_NUM / INV_LN2_DEN` ratio did.
-    let h_scaled = mul(env, h, p);
-    let j1 = mul_div_floor(env, sub(env, p, d), h_scaled, LN2);
-    let d2 = mul_div_floor(env, d, d, p);
-    let j2 = mul_div_floor(env, sub(env, p, d2), h_scaled, mul(env, 2, LN2));
-    let term1 = mul(env, mul_div_trunc(env, a, a, p), dt);
-    let term2 = mul(env, 2, mul_div_trunc(env, b, mul_div_trunc(env, a, j1, p), p));
-    let term3 = mul_div_trunc(env, b, mul_div_trunc(env, b, j2, p), p);
-    let sum = core::cmp::max(add(env, add(env, term1, term2), term3), 0);
-    let linear = add(env, mul(env, a, dt), mul_div_trunc(env, b, j1, p));
-    FundingWindow {
-        weight: mul(env, max_rate_bps_day, sum),
-        payer_sign: linear.signum(),
-        ema_after: add(env, s, mul_div_trunc(env, sub(env, ema, s), d, p)),
-        integral_now: add(env, a, mul_div_trunc(env, b, d, p)),
-    }
-}
-
 /// §8.1 — the blended integral skew right now: `(w·S + (BPS−w)·E) / BPS`.
 pub fn integral_skew(env: &Env, skew: i128, ema: i128, instant_weight_bps: u32) -> i128 {
     let w = instant_weight_bps as i128;
@@ -178,15 +129,6 @@ pub fn integral_skew(env: &Env, skew: i128, ema: i128, instant_weight_bps: u32) 
         mul_div_trunc(env, skew, w, BPS),
         mul_div_trunc(env, ema, sub(env, BPS, w), BPS),
     )
-}
-
-/// §2.1.2 — the window decay factor `d = 2^(−elapsed/H)`, formed the way the
-/// specification forms `d_end`: scale the elapsed fraction of a half-life to
-/// `INDEX_PRECISION` first, then take `exp2_neg` of it. The primitive itself
-/// no longer takes an `(elapsed, half_life)` pair.
-pub fn decay(env: &Env, elapsed: u64, half_life: u64) -> i128 {
-    let x = mul_div_floor(env, elapsed as i128, INDEX_PRECISION, half_life as i128);
-    fixed::exp2_neg(env, x).unwrap_or_else(|| fail(env))
 }
 
 /// §8.1 — instantaneous payer rate from a signed integral skew:
@@ -295,39 +237,7 @@ mod tests {
 
 
 
-    #[test]
-    fn funding_window_degenerates_to_constant_rate_at_full_instant_weight() {
-        let e = env();
-        // w = BPS → I == S: the weight is exactly max_rate × S² × Δt / P,
-        // linear in Δt, so splitting an interval is exact.
-        let (long, short) = (75, 25); // S = P/2
-        let day = 86_400u64;
-        let w = funding_window(&e, long, short, 0, BPS as u32, 43_200, 100, day);
-        assert_eq!(w.payer_sign, 1);
-        assert_eq!(w.weight, 100 * (INDEX_PRECISION / 4) * day as i128);
-        assert_eq!(w.integral_now, INDEX_PRECISION / 2);
-    }
 
-    #[test]
-    fn funding_window_ema_decays_toward_the_instant_skew() {
-        let e = env();
-        let h = 43_200u64;
-        // Book flipped hard short (S = −P) with a fully-long memory (E = +P):
-        // after one half-life the EMA sits at the midpoint, zero.
-        let w = funding_window(&e, 0, 1_000, INDEX_PRECISION, 3_000, h, 100, h);
-        assert_eq!(w.ema_after, 0);
-        // Blend at the window end: (0.3×(−P) + 0.7×0) = −0.3P.
-        assert_eq!(w.integral_now, -(INDEX_PRECISION * 3 / 10));
-        // Early in the flip the longs (per the memory) still pay: the whole
-        // first half-life's integral must stay long-pays only if the linear
-        // part is positive — here w=0.3 pulls it short quickly, so the sign
-        // follows ∫I dt, not the old book.
-        let early = funding_window(&e, 0, 1_000, INDEX_PRECISION, 0, h, 100, 60);
-        assert_eq!(
-            early.payer_sign, 1,
-            "with w=0 the memory alone decides the early payer"
-        );
-    }
 
 
     #[test]

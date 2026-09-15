@@ -106,6 +106,38 @@ pub fn mul_div_trunc(env: &Env, a: i128, b: i128, denominator: i128) -> Option<i
     product.div(&I256::from_i128(env, denominator)).to_i128()
 }
 
+/// §2.1.1 — `floor(n * b / d)` where the numerator is **already** a 256-bit
+/// value and the result is still one.
+///
+/// §6.2 splits a funding weight — a quantity the specification puts near
+/// `1e40` — in proportion to base exposure before dividing it into an index.
+/// Narrowing it to `i128` at that point would overflow; the split has to
+/// happen at full width and stay there until `carried_div` takes the
+/// quotient.
+pub fn wide_mul_div_floor(env: &Env, n: &U256, b: i128, d: i128) -> Option<U256> {
+    if d <= 0 {
+        return None;
+    }
+    Some(n.mul(&widen(env, b)?).div(&widen(env, d)?))
+}
+
+/// §2.1.1 — `ceil(a * b * c / d)` with the **triple** product formed in
+/// 256-bit.
+///
+/// §6.7's minimum borrow fee is the one formula with three multiplicands on
+/// the way to a division. Its note — "the grouped expression does not
+/// authorize an overflowing intermediate" — is exactly this: writing it as
+/// `mul_div_ceil(a * b, c, d)` forms `a * b` at 128 bits first.
+pub fn mul_mul_div_ceil(env: &Env, a: i128, b: i128, c: i128, d: i128) -> Option<i128> {
+    if d <= 0 {
+        return None;
+    }
+    let divisor = widen(env, d)?;
+    let product = widen(env, a)?.mul(&widen(env, b)?).mul(&widen(env, c)?);
+    let rounded = product.add(&divisor).sub(&U256::from_u32(env, 1));
+    narrow(&rounded.div(&divisor))
+}
+
 /// §2.1.1 — one accumulator advance: `(n + r) / d` with the remainder
 /// carried, returning `(quotient, remainder)`.
 ///

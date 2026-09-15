@@ -240,8 +240,13 @@ pub fn get_ledger(env: &Env) -> Ledger {
     ledger
 }
 
+/// Every mutating path ends here, and the instance entry is being written
+/// anyway, so this is where its TTL is extended (§12.4). Keeping the bump
+/// out of `borrow::accrue` is what lets §4.12's quote run the real accrual
+/// code without writing anything.
 pub fn save_ledger(env: &Env, ledger: &Ledger) {
     env.storage().instance().set(&StorageKey::Ledger, ledger);
+    shared::bump_instance_ttl(env);
 }
 
 pub fn get_config_manager(env: &Env) -> Address {

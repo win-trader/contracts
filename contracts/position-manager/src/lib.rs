@@ -17,5 +17,6 @@ mod settle;
 mod snapshot;
 mod storage;
 mod validation;
+mod window;
 
 pub use contract::PositionManagerContract;

@@ -784,6 +784,21 @@ pub struct SettlementResult {
     pub amount: i128,
 }
 
+/// §4.12 — a read-only quote of everything a position has accrued as of a
+/// requested timestamp. Derived, never stored (§5.13).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingFeesView {
+    /// Receiver-backed payer funding owed (rounds up).
+    pub funding_paid_to_receivers: i128,
+    /// LP-backed payer funding owed (rounds up).
+    pub funding_paid_to_lps: i128,
+    /// Funding credit receivable (rounds down).
+    pub funding_received: i128,
+    /// Borrow owed for the active window, after its monetary minimum.
+    pub borrow: i128,
+}
+
 /// §12.3 — a validated configuration change waiting out its timelock.
 ///
 /// Storing the whole proposed record rather than a field delta is what makes

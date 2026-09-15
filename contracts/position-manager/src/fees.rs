@@ -119,7 +119,7 @@ pub fn capitalize(
         FeeSource::Borrow,
         position.id,
     );
-    funding::reset_debts(env, ledger, position, market);
+    funding::reset_debts(env, position, market);
 
     let guaranteed_and_loss = math::add(
         env,

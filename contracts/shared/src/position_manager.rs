@@ -18,7 +18,7 @@ use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
 use crate::types::{
     AccountingSnapshot, EntryOrder, EntryOrderParams, GlobalConfig, Market, MarketConfig,
-    OracleRound, Position,
+    OracleRound, PendingFeesView, Position,
 };
 
 #[contractclient(name = "PositionManagerClient")]
@@ -189,6 +189,15 @@ pub trait PositionManager {
         -> AccountingSnapshot;
 
     fn get_position(env: Env, position_id: u64) -> Position;
+
+    /// §4.12 — quote a position's accrued fees as of `now` without a
+    /// state-changing checkpoint. The global index and the market's funding
+    /// indices are advanced on in-memory copies; nothing is written.
+    ///
+    /// Reading the last stored indices instead would understate fees after
+    /// time has elapsed. A quote immediately followed by settlement reports
+    /// the same amounts unless another transaction changes state first.
+    fn pending_fees(env: Env, position_id: u64, now: u64) -> PendingFeesView;
     fn get_market(env: Env, market: Symbol) -> Market;
     fn active_markets(env: Env) -> Vec<Symbol>;
     fn global_config(env: Env) -> GlobalConfig;

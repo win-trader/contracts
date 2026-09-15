@@ -98,7 +98,7 @@ fn apply_market(env: &Env, symbol: &Symbol, config: &MarketConfig) {
             // maximum rate, and instant weight before they are replaced.
             funding::accrue(env, &mut ledger, &mut market, now);
             market.config = config.clone();
-            funding::refresh_display(env, &mut market);
+            funding::refresh_display(env, &mut ledger, &mut market);
             storage::save_market(env, symbol, &market);
         }
         None => {
@@ -408,6 +408,19 @@ impl PositionManager for PositionManagerContract {
 
     fn get_position(env: Env, position_id: u64) -> Position {
         storage::get_position(&env, position_id)
+    }
+
+    fn pending_fees(env: Env, position_id: u64, now: u64) -> shared::PendingFeesView {
+        let position = storage::get_position(&env, position_id);
+        let market = storage::get_market(&env, &position.market);
+        let ledger = storage::get_ledger(&env);
+        let pending = funding::preview_pending_fees(&env, &ledger, &position, &market, now);
+        shared::PendingFeesView {
+            funding_paid_to_receivers: pending.funding_paid_to_receivers,
+            funding_paid_to_lps: pending.funding_paid_to_lps,
+            funding_received: pending.funding_received,
+            borrow: pending.borrow,
+        }
     }
 
     fn get_market(env: Env, market: Symbol) -> Market {

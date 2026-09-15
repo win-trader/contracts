@@ -73,6 +73,9 @@ pub fn increase_position(
     if size_added > 0 && market.side(position.is_long).risk_state != RiskState::Normal {
         panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
     }
+    // §4.9 step 7 — reset the opposite stream's distribution carry before
+    // this side's size changes.
+    funding::reset_receiver_distribution_remainder(&mut market, position.is_long);
     position.size = math::add(&env, position.size, size_added);
     position.base_exposure = math::add(&env, position.base_exposure, base);
     position.risk_units = math::add(&env, position.risk_units, risk_units);
@@ -105,11 +108,14 @@ pub fn increase_position(
     if health < required {
         panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
     }
-    funding::reset_debts(&env, &ledger, &mut position, &market);
-    storage::save_position(&env, &position);
-    funding::refresh_display(&env, &mut market);
+    funding::reset_debts(&env, &mut position, &market);
+    funding::refresh_display(&env, &mut ledger, &mut market);
     storage::save_market(&env, &position.market, &market);
     borrow::refresh_rate(&env, &mut ledger, physical);
+    // §3.3.3 — a fresh window for the resulting risk units. No tranche,
+    // proportional remainder, or old minimum carries forward.
+    borrow::initialize_window(&env, &ledger, &mut position);
+    storage::save_position(&env, &position);
     storage::save_ledger(&env, &ledger);
     events::emit_increased(
         &env,

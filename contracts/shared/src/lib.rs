@@ -27,7 +27,8 @@ pub use types::{
     EntryOrder, EntryOrderParams, FailureReason, FundingIndices, GlobalConfig, IncreasePayload,
     KeeperRewards, LpConfig, LpRequest, LpRequestKind, LpRequestStatus, Market, MarketConfig,
     MarketSide, MigrationData, OpenPayload, OracleConfig, OracleRound, PayerSide, PendingAction,
-    PendingGlobalConfig, PendingMarketConfig, PendingUpgrade, Position, RemainderGroup, RiskState,
+    PendingFeesView, PendingGlobalConfig, PendingMarketConfig, PendingUpgrade, Position,
+    RemainderGroup, RiskState,
     RoundPrice, SettlementResult, SettlementStatus, Trigger, TriggerCondition,
     TriggerInstruction,
 };

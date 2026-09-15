@@ -141,6 +141,9 @@ struct Settlement<'a> {
     collected: CollectedFees,
     closing_fee: i128,
     realized_payout: i128,
+    /// Set by `finalize_partial`: the position lives on and needs a
+    /// replacement borrow window opened in `finish`.
+    survives: bool,
 }
 
 impl<'a> Settlement<'a> {
@@ -208,6 +211,7 @@ impl<'a> Settlement<'a> {
             collected: CollectedFees::default(),
             closing_fee: 0,
             realized_payout: 0,
+            survives: false,
         }
     }
 
@@ -275,6 +279,9 @@ impl<'a> Settlement<'a> {
     /// point above).
     fn reduce_exposure(&mut self) {
         let is_long = self.position.is_long;
+        // §4.9 step 7 — reset the opposite payer stream's distribution
+        // carry before this side's size changes.
+        funding::reset_receiver_distribution_remainder(&mut self.market, is_long);
         let side = self.market.side_mut(is_long);
         side.size_open_interest = math::sub(self.env, side.size_open_interest, self.size_removed);
         side.base_exposure = math::sub(self.env, side.base_exposure, self.removed.base_removed);
@@ -362,20 +369,24 @@ impl<'a> Settlement<'a> {
         if health < required {
             panic_with_error!(self.env, PositionManagerError::InsufficientCollateral);
         }
-        funding::reset_debts(self.env, self.ledger, &mut self.position, &self.market);
-        storage::save_position(self.env, &self.position);
+        funding::reset_debts(self.env, &mut self.position, &self.market);
+        // The position is *not* saved here. §4.10 opens its replacement
+        // borrow window after the global rate refresh, and that refresh
+        // happens in `finish`; saving now would store a position whose
+        // window minimum was quoted at the pre-mutation utilization.
+        self.survives = true;
         PartialTail {
             realized_payout: self.realized_payout,
             collateral_withdrawn,
         }
     }
 
-    /// §10.3 steps 5-7 — refresh the funding display, re-evaluate risk
-    /// against the post-transfer balance, release the empty-book residue,
-    /// store the market, refresh the borrow rate, and assemble the
-    /// header.
+    /// §4.9 steps 8-10 — refresh the market display and risk state from the
+    /// resulting book, refresh the global borrow rate from the resulting
+    /// risk units, open the survivor's replacement borrow window, and store
+    /// everything atomically.
     fn finish(mut self) -> SettleHeader {
-        funding::refresh_display(self.env, &mut self.market);
+        funding::refresh_display(self.env, self.ledger, &mut self.market);
         let physical_after = ledger::physical_cash(self.env);
         let equity_after = self.ledger.cash_lp_equity(self.env, physical_after);
         risk::evaluate_market_risk(
@@ -387,9 +398,17 @@ impl<'a> Settlement<'a> {
             equity_after,
         );
 
-        funding::release_residue(self.env, self.ledger);
+        funding::verify_no_final_receiver_residue(self.env, self.ledger);
         storage::save_market(self.env, &self.position.market, &self.market);
+        // §4.9 step 9 — the rate is refreshed from the resulting risk units
+        // and cash LP equity, never before the mutation that changed them.
         borrow::refresh_rate(self.env, self.ledger, physical_after);
+        if self.survives {
+            // §3.3.3 / §4.10 — the replacement window, quoted from the
+            // refreshed rate.
+            borrow::initialize_window(self.env, self.ledger, &mut self.position);
+            storage::save_position(self.env, &self.position);
+        }
 
         SettleHeader {
             position_id: self.position.id,

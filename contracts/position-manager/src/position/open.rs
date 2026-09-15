@@ -167,6 +167,12 @@ pub(crate) fn open_from_collateral(
 
     let was_empty = market.long.size_open_interest == 0 && market.short.size_open_interest == 0;
 
+    // §4.9 step 7 — this side's size is about to change, so the opposite
+    // payer stream's receiver-distribution carry is no longer valid under
+    // the new divisor. Reset before the mutation, so every carry lives
+    // inside a window of constant receiver size.
+    funding::reset_receiver_distribution_remainder(&mut market, is_long);
+
     {
         let side = market.side_mut(is_long);
         side.size_open_interest = math::add(&env, side.size_open_interest, size);
@@ -181,12 +187,16 @@ pub(crate) fn open_from_collateral(
     risk::register_exposure(&env, &mut ledger, risk_units);
     risk::enforce_capacity(&env, &ledger, physical, ledger.total_risk_units);
     risk::enforce_market_limits(&env, &market, is_long);
-    funding::reset_debts(&env, &ledger, &mut position, &market);
-    storage::save_position(&env, &position);
+    funding::reset_debts(&env, &mut position, &market);
     risk::register_position(&mut ledger);
-    funding::refresh_display(&env, &mut market);
+    funding::refresh_display(&env, &mut ledger, &mut market);
     storage::save_market(&env, &market_symbol, &market);
+    // §4.9 step 9, then §4.10: the rate is refreshed from the resulting
+    // risk units, and only then does the borrow window open — its monetary
+    // minimum is quoted from the rate that applies going forward.
     borrow::refresh_rate(&env, &mut ledger, physical);
+    borrow::initialize_window(&env, &ledger, &mut position);
+    storage::save_position(&env, &position);
     storage::save_ledger(&env, &ledger);
 
     events::emit_opened(&env, &position, price);

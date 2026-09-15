@@ -12,13 +12,16 @@ use soroban_sdk::Env;
 
 use shared::constants::{BPS, INDEX_PRECISION, SECONDS_PER_DAY};
 
+use shared::Position;
+use soroban_sdk::panic_with_error;
+
+use crate::errors::PositionManagerError;
 use crate::ledger::Ledger;
 use crate::{math, storage};
 
 /// §10.1 — advance the global borrow index with the stored rate. A second
 /// call at the same timestamp has no effect.
 pub fn accrue(env: &Env, ledger: &mut Ledger, now: u64) {
-    shared::bump_instance_ttl(env);
     if now <= ledger.last_global_checkpoint {
         return;
     }
@@ -36,11 +39,122 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, now: u64) {
     ledger.last_global_checkpoint = now;
 }
 
-/// Placeholder while the borrow curve is rebuilt (P1-07). The configurable
-/// power curve is deleted and §6.14's fixed square lands in P4-02; until
-/// then every window prices at the base rate, so no stale curve survives
-/// the deletion and the variable term contributes nothing.
-pub fn refresh_rate(env: &Env, ledger: &mut Ledger, _physical_cash: i128) {
+/// §6.14 — recompute the stored borrow rate from current utilization along
+/// the fixed quadratic curve. Call after any mutation that changes risk
+/// units, physical cash, or any non-LP claim affecting cash LP equity
+/// (§4.9 step 9).
+///
+/// `u` is converted to `INDEX_PRECISION` **before** squaring. Written as
+/// `utilization / BPS` the integer division would collapse to `0` or `1`,
+/// and the curve would be a step function. Both addends are formed at
+/// `INDEX_PRECISION` before they are summed: the base rate is a plain bps
+/// number scaled explicitly, and the variable term is a bps number
+/// multiplied by an already-scaled factor.
+///
+/// The square is exact at every utilization the curve can reach — `u` is a
+/// multiple of `1e10` and its square a multiple of `1e6` — so this function
+/// introduces no approximation at all.
+pub fn refresh_rate(env: &Env, ledger: &mut Ledger, physical_cash: i128) {
     let config = storage::get_global_config(env);
-    ledger.current_borrow_rate = math::mul(env, config.base_borrow_rate_bps_day, INDEX_PRECISION);
+    let equity = ledger.cash_lp_equity(env, physical_cash);
+    let utilization = math::utilization_bps(env, ledger.total_risk_units, equity);
+    let u = math::mul_div_floor(env, utilization, INDEX_PRECISION, BPS);
+    let variable_factor = math::mul_div_floor(env, u, u, INDEX_PRECISION);
+    ledger.current_borrow_rate = math::add(
+        env,
+        math::mul(env, config.base_borrow_rate_bps_day, INDEX_PRECISION),
+        math::mul(env, config.max_variable_borrow_bps_day, variable_factor),
+    );
+}
+
+/// §6.3 — what a position owes for its active borrow window.
+///
+/// `actual` and `minimum` are carried alongside `due` because §6.7's two
+/// paths differ in what they may collect: the surviving path requires
+/// `due` in full, while terminal settlement may collect less and reports
+/// the shortfall.
+#[derive(Clone, Copy, Debug)]
+pub struct PendingBorrow {
+    /// Index growth since the window's baseline.
+    #[allow(dead_code)]
+    pub actual: i128,
+    /// The window's stored monetary minimum.
+    #[allow(dead_code)]
+    pub minimum: i128,
+    /// What is actually owed: the greater of the two.
+    pub due: i128,
+}
+
+/// §6.3 — the pending borrow obligation.
+///
+/// The non-negativity check runs **before** the minimum is applied. A
+/// minimum may raise a valid obligation; it may never conceal a broken
+/// baseline, which is what a decreasing index or a corrupted
+/// `borrow_debt` would look like.
+pub fn calculate_pending(env: &Env, ledger: &Ledger, position: &Position) -> PendingBorrow {
+    let cumulative_value = math::mul_div_ceil(
+        env,
+        position.risk_units,
+        ledger.borrow_index,
+        INDEX_PRECISION,
+    );
+    let raw_actual = math::sub(env, cumulative_value, position.borrow_debt);
+    if raw_actual < 0 {
+        panic_with_error!(env, PositionManagerError::InvariantViolation);
+    }
+    PendingBorrow {
+        actual: raw_actual,
+        minimum: position.stored_minimum_borrow_fee,
+        due: core::cmp::max(raw_actual, position.stored_minimum_borrow_fee),
+    }
+}
+
+/// §4.10 / §6.7 — open a borrow window for the position's **resulting**
+/// risk units.
+///
+/// Runs after the exposure mutation and after the global rate refresh, in
+/// that order: the baseline stops the new exposure from paying historical
+/// index growth, and the monetary minimum is quoted from the rate that
+/// applies going forward. Quoting it before the refresh would price the
+/// window at the pre-mutation utilization.
+///
+/// Nothing carries forward from the previous window — no tranche, no
+/// proportional remainder, no old minimum (§3.3.3).
+pub fn initialize_window(env: &Env, ledger: &Ledger, position: &mut Position) {
+    let config = storage::get_global_config(env);
+    position.borrow_debt = math::mul_div_ceil(
+        env,
+        position.risk_units,
+        ledger.borrow_index,
+        INDEX_PRECISION,
+    );
+    // §6.7 — a full-precision checked operation; the grouped expression
+    // does not authorize an overflowing intermediate.
+    position.stored_minimum_borrow_fee = math::mul_mul_div_ceil(
+        env,
+        position.risk_units,
+        ledger.current_borrow_rate,
+        config.min_borrow_fee_seconds as i128,
+        math::mul(env, INDEX_PRECISION, BPS * SECONDS_PER_DAY as i128),
+    );
+}
+
+/// §7.2 / §7.8 — the minimum a position of `risk_units` would be quoted if
+/// its window opened at the current rate. Its caller is P6-10's admission
+/// preflight; nothing calls it until the two-phase lifecycle lands.
+#[allow(dead_code)]
+///
+/// Admission needs this before the window exists: the floor is part of
+/// pending borrow from the window's first second, so a position admitted
+/// exactly at initial margin would be below it the moment its window is
+/// quoted. Every input is known at preflight.
+pub fn projected_minimum(env: &Env, ledger: &Ledger, risk_units: i128) -> i128 {
+    let config = storage::get_global_config(env);
+    math::mul_mul_div_ceil(
+        env,
+        risk_units,
+        ledger.current_borrow_rate,
+        config.min_borrow_fee_seconds as i128,
+        math::mul(env, INDEX_PRECISION, BPS * SECONDS_PER_DAY as i128),
+    )
 }
