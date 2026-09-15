@@ -2557,7 +2557,8 @@ Global configuration applies to the complete vault.
 |---|---:|---|
 | `min_collateral` | Cash | Minimum stored collateral for a surviving position; must exceed `keeper_liquidation_reward` |
 | `min_position_lifetime` | Seconds | Minimum time after an open or size increase before voluntary exposure removal |
-| `max_order_lifetime_seconds` | Seconds | Upper bound on an entry order's `expires_at`; initial value `604,800` |
+| `max_order_lifetime_seconds` | Seconds | Upper bound on a limit entry's `expires_at`; initial value `604,800` |
+| `max_market_order_lifetime_seconds` | Seconds | Upper bound on a market entry's `expires_at`; initial value `300` |
 | `min_borrow_fee_seconds` | Seconds | Duration used to quote each monetary minimum-borrow obligation; initial value `900` |
 | `funding_half_life_seconds` | Seconds | Shared half-life of every market's funding EMA; initial value `43,200` and never zero |
 | `risk_capacity_limit_bps` | Bps | Maximum share of cash LP equity assignable to risk units; initial value `8,500` |
@@ -2569,6 +2570,7 @@ Global configuration applies to the complete vault.
 | `config_timelock_seconds` | Seconds | Delay between proposing and applying a parameter change; initial value `172,800` |
 | `max_active_markets` | Count | Hard bound on the active-market registry and any synchronized LP-accounting loop |
 | `global_hard_cap_factor_limit_bps` | Bps | Bound on aggregate configured hard-cap exposure across market sides |
+| `hard_cap_relatch_band_bps` | Bps | Growth in a latched side's positive PnL that triggers a fresh hard-cap snapshot; initial value `2,500` |
 
 The protocol share is not stored as a separate percentage. It is the exact
 remainder after the configured LP and applicable referral shares. Configuration
@@ -2704,7 +2706,8 @@ Each market has a long side and a short side. Each side stores:
 | `stored_collateral_total` | Cash | Sum of stored collateral owned by positions on the side |
 | `risk_units` | Risk units | Sum of position risk units on the side |
 | `risk_state` | Enum | One of `Normal`, `Warning`, `ADL`, or `HardCap` |
-| `hard_cap_payout_factor` | Index | `INDEX_PRECISION` unless the side is latched in `HardCap`; snapshotted on entry (§6.5) and never revised while latched |
+| `hard_cap_payout_factor` | Index | `INDEX_PRECISION` unless the side is latched in `HardCap`; snapshotted on entry and on each band re-latch (§6.5, §6.16) |
+| `hard_cap_reference_pnl` | Cash | Side positive PnL the current payout factor was measured against; `0` unless latched in `HardCap` |
 
 The market-level funding record stores:
 
@@ -3615,6 +3618,8 @@ function snapshot_hard_cap_factor(side, market_config, price, cash_lp_equity):
         BPS
     )
 
+    side.hard_cap_reference_pnl = side_positive_pnl
+
     if side_positive_pnl <= hard_cap_value:
         side.hard_cap_payout_factor = INDEX_PRECISION
     else:
@@ -3624,6 +3629,10 @@ function snapshot_hard_cap_factor(side, market_config, price, cash_lp_equity):
             side_positive_pnl
         )
 ```
+
+The same function serves both the initial latch and every later re-latch. It
+reads the book and LP equity as they are at the moment it runs and records the
+denominator it used, which is what the band in §6.16 is measured against.
 
 `snapshot_hard_cap_factor` runs exactly on the transition into `HardCap`, as
 part of applying the risk-state change in §6.16. Leaving `HardCap` clears the
@@ -3652,19 +3661,36 @@ would bear no relation to `hard_cap_value`. With one snapshot, every position
 on the side is scaled by the same number and settlement order cannot change any
 individual outcome.
 
-What the snapshot does not do is bound the total paid. It bounds it at the
-moment of latching, and no further: while the side stays latched its raw
-aggregate PnL can keep growing, and payable PnL grows with it at the frozen
-ratio. A side that latches at `$80,000` of profit against a `$60,000` cap
-carries a factor of `0.75`; if its raw profit then runs to `$200,000` the side
-pays `$150,000`, and it never re-snapshots because its PnL factor never falls
-back below the threshold. What actually bounds the loss beyond the latch is the
-payment-time clamp below — which bounds it at LP equity, meaning LPs can be
-taken to zero — together with ADL removing profitable exposure from the
-restricted side. Restoring a real bound means re-latching on a band, for
-example a fresh snapshot once current side PnL exceeds the latched denominator
-by a configured margin, which keeps order-independence inside each band. That
-is a mechanism change and is not specified here.
+A snapshot held forever would not bound the total paid. It bounds it at the
+moment of latching, and if the side stays latched while its raw aggregate PnL
+keeps growing, payable PnL grows with it at the frozen ratio — a side latching
+at `$80,000` of profit against a `$60,000` cap carries `0.75`, and pays
+`$150,000` if its profit runs to `$200,000`, never re-snapshotting because its
+PnL factor never falls back below the threshold.
+
+The band in §6.16 is what closes that. The side records the denominator it was
+last measured against, and once current positive PnL exceeds it by
+`hard_cap_relatch_band_bps` the side takes a fresh snapshot from the book and
+LP equity as they then stand. Between re-latches nothing changes: every
+position on the side is scaled by one number and settlement order cannot affect
+any individual outcome. The running exposure becomes bounded at
+`(BPS + hard_cap_relatch_band_bps) / BPS` of the cap value measured at the most
+recent latch, which at the initial `2,500` is `1.25x`.
+
+The band is self-correcting in the direction that matters. Each re-latch reads
+the current `cash_lp_equity`, which by then is lower for every payout already
+made, so the new cap value is smaller and the new factor is lower than the one
+it replaces. A side whose profit keeps running is scaled harder each time it
+crosses a band boundary, rather than being scaled once and then paying an
+ever-larger multiple of a cap nobody re-measured.
+
+`2,500` is chosen so the band does not churn. A 25% move in a side's aggregate
+profit while it is already in `HardCap` is a substantial event, not tick noise,
+so ordinary price movement does not re-latch and the order-independence
+property holds across the settlements that actually occur. Narrowing the band
+tightens the bound and costs fairness between traders separated by a re-latch;
+widening it does the reverse. The payment-time clamp below remains the final
+backstop underneath either.
 
 Two properties of the snapshot are deliberate. It cannot exceed
 `INDEX_PRECISION`, so a side entering `HardCap` while its aggregate profit is
@@ -4536,9 +4562,25 @@ restricted state. Two transitions additionally move the payout factor:
 entering HardCap from any other state:
     snapshot_hard_cap_factor(side, market_config, price, cash_lp_equity)
 
+remaining in HardCap, when the side has grown past its band:
+    if side_positive_pnl >= mul_div_floor(
+           side.hard_cap_reference_pnl,
+           BPS + global_config.hard_cap_relatch_band_bps,
+           BPS
+       ):
+        snapshot_hard_cap_factor(side, market_config, price, cash_lp_equity)
+
 leaving HardCap for any other state:
     side.hard_cap_payout_factor = INDEX_PRECISION
+    side.hard_cap_reference_pnl = 0
 ```
+
+The re-latch condition is one-directional: it fires only when the side's
+positive PnL has *grown* past the band. A side whose profit falls while it
+stays latched keeps its factor, because lowering the denominator would raise
+the factor and pay later exits more than earlier ones for no reason the vault
+benefits from. Recovery is what the state machine already handles, through
+`recovery_pnl_factor_bps` and the transition out of `HardCap`.
 
 No other transition touches it, and no settlement recomputes it. A side that
 stays latched in `HardCap` across many settlements keeps the factor it was
@@ -4761,7 +4803,7 @@ function create_market_open_order(owner, request):
     execute_after =
         now + market.config.order_execution_delay_seconds
     require request.expires_at > execute_after
-    require request.expires_at <= now + max_order_lifetime_seconds
+    require request.expires_at <= now + max_market_order_lifetime_seconds
 
     opening_fee = calculate_opening_fee(request.size, market.config)
     keeper_reward = global_config.keeper_open_reward
@@ -4960,13 +5002,16 @@ exit triggers. They cannot use the same observation that opened the position.
 Limit creation performs the same authorization, collateral transfer, static
 margin checks, and escrow accounting as market-open creation, substituting
 `keeper_limit_order_reward` for `keeper_open_reward` and requiring escrow to
-cover `keeper_expiry_reward` as well. It additionally requires a positive
+cover `keeper_expiry_reward` as well. It bounds `expires_at` by
+`max_order_lifetime_seconds` rather than by the market-entry cap, because a
+resting order is meant to rest (§8.5). It additionally requires a positive
 trigger price and freezes the trigger direction relative to the authenticated
 commit price:
 
 ```text
 function create_limit_open_order(owner, request):
-    validate and escrow exactly as market-open creation
+    validate and escrow exactly as market-open creation, except
+    require request.expires_at <= now + max_order_lifetime_seconds
     require request.trigger_price > 0
 
     commit_price = read_stamped_price(request.market_id)
@@ -6094,6 +6139,7 @@ function register_market(authority, market_id, market_config):
         risk_units              = 0
         risk_state              = Normal
         hard_cap_payout_factor  = INDEX_PRECISION
+        hard_cap_reference_pnl  = 0
 
     all six funding indices  = 0
     skew_ema                 = 0
@@ -6363,8 +6409,24 @@ take-profit, or stop-loss that is submitted before either boundary returns
 reward.
 
 Market and limit entries additionally freeze `expires_at`, which must be
-strictly later than `execute_after` and no later than
-`now + max_order_lifetime_seconds`. Expiry uses:
+strictly later than `execute_after`. Its upper bound differs by kind:
+
+```text
+market entry: expires_at <= now + max_market_order_lifetime_seconds
+limit entry:  expires_at <= now + max_order_lifetime_seconds
+```
+
+A resting limit order is supposed to wait, so a week is the point of it. A
+market order is not: its purpose is to execute at the next qualifying
+observation, and an entry that is still live hours later is a limit order
+without a trigger — which this protocol already offers, with a trigger. Sharing
+one bound let a trader take the limit order's lifetime for a commitment that
+was never meant to rest, and §12.8.1's keeper assumption was carrying the
+difference. `300` seconds is sixty times the default execution delay, wide
+enough for keeper latency and for a slow source to publish (§12.7.4), and short
+enough that the option §8.5 describes below has no material value.
+
+Expiry uses:
 
 ```text
 executable = now < expires_at
@@ -6384,8 +6446,9 @@ entry order is a standing right to be filled at a price inside its bound, and
 nothing obliges anyone to settle it — the trader may act as their own keeper
 and wait. Keeper competition normally closes that window (§1.7), but that is
 an assumption about the world rather than a rule;
-`max_order_lifetime_seconds` is the rule, capping how long the option runs if
-no keeper appears.
+`max_market_order_lifetime_seconds` is the rule for a market entry, and
+`max_order_lifetime_seconds` for a limit entry, capping how long the option
+runs if no keeper appears.
 
 A position mutation needs no equivalent. Its holder already owns the position,
 so waiting to close is not a right the commitment granted them.
@@ -7170,7 +7233,8 @@ Global parameters affect the complete vault.
 |---|---:|---:|---|
 | `min_collateral` | Cash | `10,000,000` (`$1.00`) | Minimum stored collateral for every surviving position |
 | `min_position_lifetime` | Seconds | `60` | Time after open or the latest size increase before voluntary exposure removal |
-| `max_order_lifetime_seconds` | Seconds | `604,800` | Longest permitted entry-order lifetime, one week (§8.5) |
+| `max_order_lifetime_seconds` | Seconds | `604,800` | Longest permitted limit-entry lifetime, one week (§8.5) |
+| `max_market_order_lifetime_seconds` | Seconds | `300` | Longest permitted market-entry lifetime, five minutes (§8.5) |
 | `min_borrow_fee_seconds` | Seconds | `900` | Duration used to quote the monetary minimum for each borrow window |
 | `funding_half_life_seconds` | Seconds | `43,200` | Shared EMA half-life used by all funding markets |
 | `risk_capacity_limit_bps` | Bps | `8,500` | Maximum admitted risk units relative to cash LP equity |
@@ -7233,6 +7297,7 @@ user-selected execution budget exists.
 | `config_timelock_seconds` | Seconds | `172,800` | Delay between proposing and applying a parameter change (§12.3) |
 | `max_active_markets` | Count | `8` | Maximum active markets included in synchronized vault operations |
 | `global_hard_cap_factor_limit_bps` | Bps | `10,000` | Maximum sum of configured side hard-cap factors across active markets |
+| `hard_cap_relatch_band_bps` | Bps | `2,500` | Growth in a latched side's positive PnL that triggers a fresh hard-cap snapshot (§6.5) |
 | `max_withdraw_utilization_bps` | Bps | `8,000` | Maximum post-withdrawal utilization |
 | `min_deposit_nav_factor_bps` | Bps | `1,000` | Minimum marked-NAV-to-cash-equity factor for an ordinary LP deposit |
 | `lp_request_delay_seconds` | Seconds | Profile-specific | Delay assigning an LP request to a synchronized price round |
@@ -7319,6 +7384,7 @@ every keeper reward <= min_collateral
 0 <= min_position_lifetime  <= 86,400
 0 <  min_borrow_fee_seconds <= 86,400
 0 <  max_order_lifetime_seconds <= 2,592,000
+60 <= max_market_order_lifetime_seconds <= max_order_lifetime_seconds
 
 60 <= funding_half_life_seconds <= 31,536,000
 
@@ -7334,6 +7400,7 @@ borrow_lp_revenue_share_bps <= BPS
 
 max_active_markets > 0
 0 < global_hard_cap_factor_limit_bps <= BPS
+0 < hard_cap_relatch_band_bps <= BPS
 lp_request_delay_seconds > 0
 config_timelock_seconds > 0
 ```
@@ -7423,7 +7490,7 @@ The following values are frozen when an action or borrow window is created:
 |---|---|
 | `execute_after` derived from `order_execution_delay_seconds` | Each pending trader action and attached TP/SL instruction |
 | `commit_observed_at` | Each pending trader action and attached TP/SL instruction |
-| `expires_at`, bounded by `max_order_lifetime_seconds` at creation | Each expiring entry order |
+| `expires_at`, bounded at creation by the lifetime cap for its kind | Each expiring entry order |
 | `stored_minimum_borrow_fee` | Each active borrow window |
 
 A later configuration update does not rewrite these stored values. Other fee,
@@ -7449,7 +7516,8 @@ The complete initial parameter set is:
 GLOBAL
 min_collateral                       = 10,000,000       # $1.00
 min_position_lifetime                = 60              # 1 minute
-max_order_lifetime_seconds           = 604,800         # 7 days
+max_order_lifetime_seconds           = 604,800         # 7 days, limit entries
+max_market_order_lifetime_seconds    = 300             # 5 minutes, market entries
 min_borrow_fee_seconds               = 900             # 15 minutes
 funding_half_life_seconds            = 43,200          # 12 hours
 risk_capacity_limit_bps              = 8,500           # 85%
@@ -7461,6 +7529,7 @@ referral_fee_share_bps               = 250             # 2.5%
 config_timelock_seconds              = 172,800         # 48 hours
 max_active_markets                   = 8
 global_hard_cap_factor_limit_bps     = 10,000
+hard_cap_relatch_band_bps            = 2,500           # 25%
 max_withdraw_utilization_bps         = 8,000           # 80%
 min_deposit_nav_factor_bps           = 1,000           # 10%
 
@@ -7946,8 +8015,10 @@ hard-cap value     = $1,000,000 * 6%      = $60,000
 side payout factor = $60,000 / $80,000    = 0.75
 ```
 
-That factor is stored on the side at the moment it latches into `HardCap` and
-does not move again while it stays there.
+That factor is stored on the side at the moment it latches into `HardCap`,
+along with the `$80,000` denominator it was measured against. Neither moves
+again until the side's positive PnL grows past `$100,000` — the `2,500` bps
+band of §6.5 — or the side leaves `HardCap`.
 
 A position selected for ADL has `$5,000` stored collateral and `$10,000` raw
 positive PnL. It owes `$25` of borrow and no funding:
@@ -7981,12 +8052,26 @@ A factor recomputed at this point would pay the second trader
 position — a difference of over `$1,000` decided by nothing but which one a
 keeper reached first. The stored snapshot is what makes both receive `$7,500`.
 
-It does not keep the side's total payout at the `$60,000` measured when it
-latched. That figure bounds the side only at the instant of latching. If the
-price keeps running while the side stays in `HardCap`, its raw aggregate profit
-grows and every position still pays `0.75` of a larger number; at `$200,000` of
-raw side profit the side pays `$150,000`. Beyond the latch the binding limits
-are the payment-time cash clamp and ADL, not this factor (§6.5).
+It is the band, not the snapshot, that keeps the side's total payout near the
+`$60,000` measured when it latched. A frozen factor bounds the side only at the
+instant of latching: if the price keeps running, raw aggregate profit grows and
+every position still pays `0.75` of a larger number, so `$200,000` of side
+profit would pay out `$150,000` against a `$60,000` cap.
+
+With the band, the side re-latches the moment its positive PnL reaches
+`$100,000`. Suppose it does so with cash LP equity down to `$950,000` after the
+payouts already made:
+
+```text
+hard-cap value     = $950,000 * 6%        = $57,000
+side payout factor = $57,000 / $100,000   = 0.57
+reference PnL      = $100,000
+```
+
+Every position on the side now scales at `0.57` instead of `0.75`, and the next
+re-latch waits for `$125,000`. The running exposure is held to `1.25x` the cap
+value measured at the most recent latch, and each crossing measures against an
+LP equity that the previous band's payouts have already reduced.
 
 ADL removes the complete position, pays only the fixed ADL reward from its
 value, charges no closing fee, and clears its pending mutation and triggers.
@@ -8590,7 +8675,8 @@ waiting hands the reward to someone else.
 
 If no competing keeper exists, that reasoning fails and every trader-committed
 action becomes a free option running until its deadline. What bounds it:
-`max_order_lifetime_seconds` for entries, and for position mutations the fact
+the entry lifetime caps of §8.5 — five minutes for a market entry, a week for
+a limit one — and for position mutations the fact
 that the holder already owns the position and gains no right by committing
 (§8.5). What does not bound it is anything else, and a deployment with a
 single keeper — or one operated only by the protocol itself — should treat
