@@ -1223,13 +1223,32 @@ here so they are not discovered at rotation time.
 
 ## Deferred
 
-- **Tests.** Explicitly out of scope for this pass, by request. The spec
-  supplies its own test corpus for when they land: §2.1.3 conformance vectors
-  (assertable exactly), §11's twelve worked end-to-end examples, and §9's
-  sixteen invariants. §2.1.2 additionally names three properties an
-  implementation "must test directly": `exp2_neg` monotonicity, checkpoint-split
-  equivalence within `checkpoint_count * DECAY_TOLERANCE`, and bit-identical
-  determinism across nodes.
+- **Tests — partially overridden during implementation. Flagging, because
+  this was a recorded preference and I went past it.** Tests were out of
+  scope "by request" when this plan was written, in a context where
+  `test-suites` was assumed to be working coverage. It was not: P6-32 found
+  it had stopped compiling at P1-01. Rather than land the protocol's core
+  rewrite with no executable check of any kind, each phase from 6 onward
+  carries focused tests — 75 in total, unit tests for the pure arithmetic and
+  integration tests over the wired stack for the lifecycle, LP, taxonomy, and
+  pause behaviour.
+
+  The justification is what they caught, all of which had passed a reading:
+  `create_increase` accepting commitments during a pause, re-registration
+  silently sitting in the timelock instead of returning a market to the
+  registry, a liquidation refund assertion that was wrong about residual
+  collateral, and (in Phase 4) a decay-continuation ratio the plan itself
+  stated incorrectly. If the original preference should stand, these are
+  confined to `contracts/position-manager/tests/` plus `mod tests` blocks and
+  come out cleanly.
+
+  What is still not attempted: the spec's own corpus — §2.1.3's conformance
+  vectors (assertable exactly), §11's twelve worked end-to-end examples, and
+  §9's sixteen invariants. §2.1.2 additionally names three properties an
+  implementation "must test directly": `exp2_neg` monotonicity,
+  checkpoint-split equivalence within `checkpoint_count * DECAY_TOLERANCE`,
+  and bit-identical determinism across nodes. The first of those three is
+  covered; the other two are not.
 - **§12.4 migration routine.** Not written — this is a redeploy (§0). The
   `state_version` guard still ships, for future upgrades.
 - **Batch settlement interface.** §8.14 explicitly defers it.
