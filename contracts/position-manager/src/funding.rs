@@ -207,13 +207,13 @@ pub fn cold_start(env: &Env, market: &mut Market) {
 /// the global receiver liability must already be zero, because each market
 /// released its own share as it emptied. This is the assertion that says so.
 ///
-/// It is a release rather than a bare check only because a rounding residue
-/// attributable to no market at all would otherwise strand cash no one can
-/// claim; in a correct run it releases nothing.
-pub fn verify_no_final_receiver_residue(env: &Env, ledger: &mut Ledger) {
-    if ledger.open_position_count == 0 {
-        let residue = ledger.pending_receiver_funding_total;
-        ledger.release(env, Bucket::ReceiverFunding, residue);
+/// §6.17 states it as an assertion, and an assertion is what it is: a
+/// nonzero total here means some market's empty-book release did not run,
+/// and releasing the residue at this point would paper over that rather
+/// than surface it.
+pub fn verify_no_final_receiver_residue(env: &Env, ledger: &Ledger) {
+    if ledger.open_position_count == 0 && ledger.pending_receiver_funding_total != 0 {
+        panic_with_error!(env, PositionManagerError::InvariantViolation);
     }
 }
 

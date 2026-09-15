@@ -516,32 +516,32 @@ This is the single largest correctness delta in the plan.
 
 ## Phase 5 — Core accounting algorithms (§6)
 
-- [ ] **P5-01** `calculate_pending_funding` (§6.4) — the three-way index read
+- [x] **P5-01** `calculate_pending_funding` (§6.4) — the three-way index read
       with the non-negativity checks. Close to today's `funding::pending_fees`;
       drop the borrow floor (now per-window) and keep the rounding directions
       (payer obligations ceil, receiver credits floor).
-- [ ] **P5-02** `credit_received_funding` (§6.4) — an ownership relabel that
+- [x] **P5-02** `credit_received_funding` (§6.4) — an ownership relabel that
       decrements **both** `market.pending_receiver_funding` and the global
       total before adding to position collateral, with sufficiency required on
       both. Today only the global total moves.
-- [ ] **P5-03** `calculate_raw_pnl` (§6.5) — unchanged from `math::pnl`.
-- [ ] **P5-04** `calculate_payable_pnl` (§6.5): **read** the side's stored
+- [x] **P5-03** `calculate_raw_pnl` (§6.5) — unchanged from `math::pnl`.
+- [x] **P5-04** `calculate_payable_pnl` (§6.5): **read** the side's stored
       `hard_cap_payout_factor`; never recompute it. The current
       `risk::payable_pnl` derives the factor live from equity on every
       settlement, which makes payouts order-dependent — each settlement moves
       both `cash_lp_equity` and the side's aggregate PnL, so the next position
       is measured against a shrunken denominator.
-- [ ] **P5-05** `snapshot_hard_cap_factor` (§6.5): runs on the transition
+- [x] **P5-05** `snapshot_hard_cap_factor` (§6.5): runs on the transition
       **into** `HardCap`, records `hard_cap_reference_pnl` as the denominator
       it used, and caps the factor at `INDEX_PRECISION`.
-- [ ] **P5-06** Re-latch band (§6.16): while a side remains in `HardCap`, take
+- [x] **P5-06** Re-latch band (§6.16): while a side remains in `HardCap`, take
       a fresh snapshot once `side_positive_pnl >= reference * (BPS +
       hard_cap_relatch_band_bps) / BPS`. **One-directional** — it fires only on
       growth. A side whose profit falls keeps its factor; lowering the
       denominator would raise the factor and pay later exits more than earlier
       ones. Leaving `HardCap` clears the factor to `INDEX_PRECISION` and the
       reference to zero.
-- [ ] **P5-07** **Refresh the side risk state from the action's own price
+- [x] **P5-07** **Refresh the side risk state from the action's own price
       snapshot *before* calculating payable PnL, never after** (§6.5). This is
       a rule, not a property of any one operation: §7.2 and §7.9–§7.12 refresh
       immediately after their checkpoints, §7.13 from its liquidation snapshot,
@@ -549,84 +549,90 @@ This is the single largest correctness delta in the plan.
       afterwards lets the first position out of a newly-crossed side settle
       unscaled and latch the side on its way out — a first-mover advantage on
       exactly the run the state exists to stop.
-- [ ] **P5-08** `apply_payable_pnl` (§6.5): the payment-time cash clamp
+- [x] **P5-08** `apply_payable_pnl` (§6.5): the payment-time cash clamp
       (`min(payable_pnl, cash_lp_equity)`) lives **here and only here**, and
       returns `unpaid_profit` so the caller can report it. Move it out of
       `Settlement::begin`, where it currently contaminates the closing-fee base
       and the reported payable figure. It must not reach effective collateral
       or any health check — a position's health is a property of the position,
       not of the vault's cash balance at that instant.
-- [ ] **P5-09** A surviving path must assert `uncollectible_loss == 0` and
+- [x] **P5-09** A surviving path must assert `uncollectible_loss == 0` and
       revert otherwise; only terminal settlement may consume a nonzero
       remainder and report it as bad debt.
-- [ ] **P5-10** `calculate_effective_collateral` (§6.6, §9.9) — one formula,
+- [x] **P5-10** `calculate_effective_collateral` (§6.6, §9.9) — one formula,
       used identically by previews, admission checks, liquidation eligibility,
       and final settlement. Pending borrow includes the active minimum-borrow
       floor.
-- [ ] **P5-11** `calculate_opening_fee` (§6.8) — new. `ceil(added_size *
+- [x] **P5-11** `calculate_opening_fee` (§6.8) — new. `ceil(added_size *
       open_fee_bps / BPS)`, applied to an initial open's full size and to an
       increase's added size only. A collateral-only addition never calls it.
-- [ ] **P5-12** `calculate_closing_fee` (§6.9) — new shape.
+- [x] **P5-12** `calculate_closing_fee` (§6.9) — new shape.
       `max(size_component, pnl_component)`, then `nominal = min(payable_pnl,
       target)`, then `collectible = min(nominal, profit_after_senior_items)`.
       The senior items are funding received (as a credit), receiver-backed and
       LP-backed funding owed, borrow due, and the keeper reward. Only
       `collectible` is debited; `nominal - collectible` is waived immediately,
       is never stored, and is not bad debt.
-- [ ] **P5-13** `distribute_open_close_revenue` (§6.11): LP floor, referral
+- [x] **P5-13** `distribute_open_close_revenue` (§6.11): LP floor, referral
       floor, protocol takes the **exact remainder**. LP revenue gets no stored
       credit — leaving it in the residual is what credits LPs.
-- [ ] **P5-14** `distribute_borrow_revenue` (§6.11): separate split using
+- [x] **P5-14** `distribute_borrow_revenue` (§6.11): separate split using
       `borrow_lp_revenue_share_bps`, no referral share. Funding never calls
       either function.
-- [ ] **P5-15** Referral on **opening** fees as well as closing (§3.6). Today
+- [x] **P5-15** Referral on **opening** fees as well as closing (§3.6). Today
       `referral::accrue_from_close` is the only path.
-- [ ] **P5-16** `pay_keeper_from_escrow`, `pay_keeper_from_position`,
+- [x] **P5-16** `pay_keeper_from_escrow`, `pay_keeper_from_position`,
       `pay_liquidation_keeper` (§6.12). Only three payments are capped at what
       their source holds: the failure reward on a position action (§7.0),
       `keeper_lp_resolve_reward`, and `keeper_liquidation_reward`. Every other
       payment requires its full amount and reverts — a voluntary settlement
       that cannot pay for itself should not complete.
-- [ ] **P5-17** `keeper_reward_for(action_kind)` — the one-to-one map of §6.12.
+- [x] **P5-17** `keeper_reward_for(action_kind)` — the one-to-one map of §6.12.
       Exactly one reward per settlement call; internal cleanup adds none.
-- [ ] **P5-18** `derive_added_exposure` (§6.13): re-derive `risk_after` from the
+- [x] **P5-18** `derive_added_exposure` (§6.13): re-derive `risk_after` from the
       **complete resulting size**, not by accumulating independently rounded
       tranches. Require positive added base and positive added risk.
-- [ ] **P5-19** `derive_partial_removal` (§6.13): remaining base floors and the
+- [x] **P5-19** `derive_partial_removal` (§6.13): remaining base floors and the
       removed portion takes the difference, so the two always sum to the
       pre-reduction base. Remaining risk units are re-derived from resulting
       size; removed risk is the difference. A full close removes the exact
       remainder with no proportional rounding.
-- [ ] **P5-20** `capitalize_for_surviving_mutation` (§6.10): credit received
+- [x] **P5-20** `capitalize_for_surviving_mutation` (§6.10): credit received
       funding, then require collateral covers receiver funding + LP funding +
       borrow **in full**, then collect each. The capped
       `collect_up_to_position_value` helper is for terminal settlement only.
-- [ ] **P5-21** `settle_terminal_position` (§6.10): the full §3.8 waterfall —
+- [x] **P5-21** `settle_terminal_position` (§6.10): the full §3.8 waterfall —
       credit funding received, credit positive payable PnL, collect
       receiver-backed funding, apply negative PnL, collect LP-backed funding,
       collect borrow, pay the keeper reward, collect the closing fee from
       remaining current-settlement profit only, pay out the residual.
-- [ ] **P5-22** `evaluate_liquidation` (§6.15): `threshold = max(maintenance,
+- [x] **P5-22** `evaluate_liquidation` (§6.15): `threshold = max(maintenance,
       keeper_liquidation_reward)` and `liquidatable = effective <= threshold`.
       Today the check is `effective >= maintenance → healthy` — a strict
       inequality with no reward floor, so a position sitting exactly at
       maintenance is not liquidatable and the reward is not reserved at all.
       Return one assessment object reused by settlement so eligibility and
       payment cannot use different prices or fee snapshots.
-- [ ] **P5-23** `evaluate_side_risk_state` (§6.16) — close to today's
+- [x] **P5-23** `evaluate_side_risk_state` (§6.16) — close to today's
       `risk::risk_state_for`; keep. Add the `restricted_market_side_count`
       maintenance and the two payout-factor transitions.
-- [ ] **P5-24** `side_accepts_new_exposure(side)` (§6.16.1) = `not paused and
+- [x] **P5-24** `side_accepts_new_exposure(side)` (§6.16.1) = `not paused and
       risk_state in {Normal, Warning}`. Two behaviour changes: **`Warning` no
       longer blocks** (it is a latch that makes recovery sticky, not a stop),
       and **pause folds into this one predicate** rather than being checked at
       each call site. Today `open.rs` and `increase.rs` block on
       `!= RiskState::Normal` and call `require_not_paused` separately.
-- [ ] **P5-25** The opposite side is never restricted by this side's state —
+- [x] **P5-25** The opposite side is never restricted by this side's state —
       opening against a restricted side reduces its net aggregate PnL, which is
       the trade that resolves the condition.
-- [ ] **P5-26** `release_residual_accounting_dust` (§6.17) and the fee-split
+- [x] **P5-26** `release_residual_accounting_dust` (§6.17) and the fee-split
       residue rule (protocol takes the remainder, by construction of §6.11).
+      *Correction.* `verify_no_final_receiver_residue` was written in Phase 4
+      as a release. §6.17 states it as `require total == 0`, and an assertion
+      is what it must be: each market releases its own share as it empties
+      (§4.13), so a nonzero total here means a per-market release did not run.
+      Releasing at that point would paper over the defect instead of
+      surfacing it. Now reverts.
 
 ---
 

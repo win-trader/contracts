@@ -93,9 +93,56 @@ pub fn base_added(env: &Env, size: i128, price: i128, is_long: bool) -> i128 {
     }
 }
 
-/// §9.1 — risk units opened by `size` USD notional.
-pub fn risk_added(env: &Env, size: i128, factor_bps: u32) -> i128 {
+/// §2.7 — risk units for `size` USD notional.
+pub fn risk_units_for(env: &Env, size: i128, factor_bps: u32) -> i128 {
     mul_div_floor(env, size, factor_bps as i128, BPS)
+}
+
+/// §6.13 — what adding `size_added` at `price` contributes.
+#[derive(Clone, Copy, Debug)]
+pub struct AddedExposure {
+    pub base_added: i128,
+    pub risk_added: i128,
+}
+
+/// §6.13 `derive_added_exposure` — re-derive risk from the **complete
+/// resulting size**, not by accumulating independently rounded tranches.
+///
+/// `risk_units` is a function of size; deriving each increase's contribution
+/// separately and summing lets the stored value drift from the value the
+/// resulting size implies, and §5.11's aggregate equality is what that
+/// drift breaks.
+///
+/// The two positivity requirements are what make a dust increase impossible
+/// rather than merely unprofitable: a size add too small to move either
+/// quantity would otherwise consume the position's one pending-mutation slot
+/// for nothing.
+pub fn derive_added_exposure(
+    env: &Env,
+    is_long: bool,
+    current_size: i128,
+    current_risk_units: i128,
+    size_added: i128,
+    price: i128,
+    factor_bps: u32,
+) -> AddedExposure {
+    if size_added <= 0 || price <= 0 {
+        fail(env);
+    }
+    let base_added = base_added(env, size_added, price, is_long);
+    let resulting_size = add(env, current_size, size_added);
+    let risk_after = risk_units_for(env, resulting_size, factor_bps);
+    if risk_after < current_risk_units {
+        fail(env);
+    }
+    let risk_added = sub(env, risk_after, current_risk_units);
+    if base_added <= 0 || risk_added <= 0 {
+        fail(env);
+    }
+    AddedExposure {
+        base_added,
+        risk_added,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,16 +229,6 @@ pub fn closing_fee(env: &Env, payable_profit: i128, bps: u32) -> i128 {
     mul_div_ceil(env, payable_profit, bps as i128, BPS)
 }
 
-/// §11.5 — pro-rata remaining value after a partial close; the final close
-/// removes the complete remainder so nothing strands (§7.1).
-pub fn remaining(env: &Env, value: i128, old_size: i128, new_size: i128) -> i128 {
-    if new_size == 0 {
-        0
-    } else {
-        mul_div_floor(env, value, new_size, old_size)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,17 +311,6 @@ mod tests {
         assert_eq!(closing_fee(&e, 1, 10), 1);
     }
 
-    #[test]
-    fn remaining_is_pro_rata_and_final_close_removes_all() {
-        let e = env();
-        assert_eq!(remaining(&e, 100, 30, 10), 33);
-        assert_eq!(remaining(&e, 100, 30, 0), 0);
-        // base/risk conservation: removed = old - remaining, so a 1/3 close
-        // of an odd value strands nothing at the end.
-        let after = remaining(&e, 101, 3, 2);
-        assert_eq!(after, 67);
-        assert_eq!(remaining(&e, after, 2, 0), 0);
-    }
 
     #[test]
     fn index_value_rounding_directions() {

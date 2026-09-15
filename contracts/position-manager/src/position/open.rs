@@ -2,12 +2,12 @@ use crate::{
     auth::{require_auth, require_initialized, require_market_active, require_not_paused},
     borrow,
     errors::PositionManagerError,
-    events, funding, ledger, math,
+    events, fees, funding, ledger, math,
     position::set_tp_sl,
     risk, snapshot, storage,
     validation::{check_slippage, validate_orders},
 };
-use shared::{MarketConfig, Position, RiskState};
+use shared::{MarketConfig, Position};
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 fn require_valid_input(env: &Env, size: i128, collateral: i128) {
@@ -114,7 +114,7 @@ pub(crate) fn open_from_collateral(
     storage::update_position_id(&env);
 
     let base = math::base_added(&env, size, price, is_long);
-    let risk_units = math::risk_added(&env, size, market.config.market_risk_factor_bps);
+    let risk_units = math::risk_units_for(&env, size, market.config.market_risk_factor_bps);
     let execution_delay = market.config.order_execution_delay_seconds;
     let mut position = Position {
         id: position_id,
@@ -161,8 +161,37 @@ pub(crate) fn open_from_collateral(
         equity,
     );
 
-    if market.side(is_long).risk_state != RiskState::Normal {
+    // §6.16.1 — one predicate for "may this side take on more exposure",
+    // with the pause folded in. `Warning` no longer blocks: it is a latch
+    // that makes recovery sticky, not a stop.
+    if !risk::side_accepts_new_exposure(&env, market.side(is_long)) {
         panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
+    }
+
+    // §6.8 — the opening fee, charged on the full size of an initial open
+    // and collected only after every successful-entry check has passed.
+    let opening_fee = fees::calculate_opening_fee(&env, size, &market.config);
+    if opening_fee > 0 {
+        let charged = ledger::collect_stored_collateral(
+            &env,
+            &mut ledger,
+            &mut position,
+            market.side_mut(is_long),
+            opening_fee,
+        );
+        if charged < opening_fee {
+            panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
+        }
+        fees::distribute_open_close_revenue(
+            &env,
+            &mut ledger,
+            charged,
+            &owner,
+            events::FeeSource::Opening,
+            position_id,
+        );
+        // The margin floor applies to what is left after the fee.
+        require_sufficient_collateral(&env, position.stored_collateral, &market.config, size);
     }
 
     let was_empty = market.long.size_open_interest == 0 && market.short.size_open_interest == 0;

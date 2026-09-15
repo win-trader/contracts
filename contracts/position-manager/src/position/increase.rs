@@ -4,7 +4,6 @@ use crate::{
     errors::PositionManagerError,
     events, fees, funding, ledger, math, risk, snapshot, storage, validation,
 };
-use shared::RiskState;
 use soroban_sdk::{panic_with_error, Env};
 
 fn require_valid_input(env: &Env, size_added: i128, collateral_added: i128) {
@@ -38,11 +37,17 @@ pub fn increase_position(
 
     validation::check_slippage(&env, position.is_long, true, price, acceptable_price);
 
-    // can we increase positons without adding colleteral?
+    // §7.8 — the completed old window is settled **first**, from
+    // pre-existing collateral, before any added collateral joins it. An
+    // increase must not be able to use new money to cover an obligation the
+    // position could not already meet: that would let a position that
+    // should have been liquidated buy its way past the check.
+    let collected =
+        fees::capitalize_for_surviving_mutation(&env, &mut ledger, &mut position, &mut market);
+
     if collateral_added > 0 {
         ledger::receive(&env, &position.owner, collateral_added);
         let is_long = position.is_long;
-
         ledger::add_stored_collateral(
             &env,
             &mut ledger,
@@ -52,14 +57,23 @@ pub fn increase_position(
         );
     }
 
-    let collected = fees::capitalize(&env, &mut ledger, &mut position, &mut market, 0);
-
-    if collected.unpaid > 0 {
-        panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
-    }
-
-    let base = math::base_added(&env, size_added, price, position.is_long);
-    let risk_units = math::risk_added(&env, size_added, market.config.market_risk_factor_bps);
+    let added = if size_added > 0 {
+        math::derive_added_exposure(
+            &env,
+            position.is_long,
+            position.size,
+            position.risk_units,
+            size_added,
+            price,
+            market.config.market_risk_factor_bps,
+        )
+    } else {
+        math::AddedExposure {
+            base_added: 0,
+            risk_added: 0,
+        }
+    };
+    let (base, risk_units) = (added.base_added, added.risk_added);
     let physical = ledger::physical_cash(&env);
     let equity = ledger.cash_lp_equity(&env, physical);
     risk::evaluate_market_risk(
@@ -70,8 +84,35 @@ pub fn increase_position(
         price,
         equity,
     );
-    if size_added > 0 && market.side(position.is_long).risk_state != RiskState::Normal {
+    if size_added > 0 && !risk::side_accepts_new_exposure(&env, market.side(position.is_long)) {
         panic_with_error!(&env, PositionManagerError::RiskStateBlocked);
+    }
+    // §6.8 — an increase pays the opening fee on the **added size only**. A
+    // collateral-only addition never calls it.
+    if size_added > 0 {
+        let opening_fee = fees::calculate_opening_fee(&env, size_added, &market.config);
+        if opening_fee > 0 {
+            let is_long = position.is_long;
+            let charged = ledger::collect_stored_collateral(
+                &env,
+                &mut ledger,
+                &mut position,
+                market.side_mut(is_long),
+                opening_fee,
+            );
+            if charged < opening_fee {
+                panic_with_error!(&env, PositionManagerError::InsufficientCollateral);
+            }
+            let owner = position.owner.clone();
+            fees::distribute_open_close_revenue(
+                &env,
+                &mut ledger,
+                charged,
+                &owner,
+                events::FeeSource::Opening,
+                position.id,
+            );
+        }
     }
     // §4.9 step 7 — reset the opposite stream's distribution carry before
     // this side's size changes.

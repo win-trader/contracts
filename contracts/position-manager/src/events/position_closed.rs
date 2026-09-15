@@ -19,6 +19,11 @@ pub struct PositionClosed {
     /// Residual collateral paid to the owner after the waterfall.
     pub collateral_payout: i128,
     pub bad_debt: i128,
+    /// §6.5 — recognized profit the vault had no cash to pay. A trader
+    /// receiving less than their recognized profit is the single outcome
+    /// most likely to be mistaken for an accounting error, and this event is
+    /// the only durable record of it.
+    pub unpaid_profit: i128,
     /// Closing fee collected out of the realized winnings.
     pub closing_fee: i128,
     pub receiver_funding_paid: i128,
@@ -42,6 +47,7 @@ pub fn emit_closed(env: &Env, s: &SettleHeader, tail: &ClosedTail, reason: Close
         payable_pnl: s.payable_pnl,
         collateral_payout: tail.collateral_payout,
         bad_debt: tail.bad_debt,
+        unpaid_profit: s.unpaid_profit,
         closing_fee: s.closing_fee,
         receiver_funding_paid: s.fees.receiver_funding_paid,
         lp_funding_paid: s.fees.lp_funding_paid,

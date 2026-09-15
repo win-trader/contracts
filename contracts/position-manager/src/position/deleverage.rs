@@ -2,7 +2,7 @@ use crate::{
     auth::{require_initialized, require_role},
     borrow,
     errors::PositionManagerError,
-    events, funding, ledger, math, risk, settle, snapshot, storage,
+    events, funding, keeper, ledger, math, risk, settle, snapshot, storage,
 };
 use shared::constants::ROLE_KEEPER;
 use shared::RiskState;
@@ -48,7 +48,24 @@ pub fn deleverage_position(env: Env, caller: Address, position_id: u64) {
     }
 
     let size = position.size;
-    let settled = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
+    let reward = keeper::reward_for(
+        &storage::get_global_config(&env),
+        keeper::RewardKind::Adl,
+    );
+    let settled = settle::settle_close(
+        &env,
+        &mut ledger,
+        position,
+        market,
+        size,
+        0,
+        price,
+        Some(settle::Keeper {
+            recipient: &caller,
+            reward,
+            liquidation: false,
+        }),
+    );
 
     storage::save_ledger(&env, &ledger);
     match &settled {

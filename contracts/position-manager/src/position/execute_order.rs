@@ -2,7 +2,7 @@ use crate::{
     auth::{require_auth, require_initialized},
     borrow,
     errors::PositionManagerError,
-    events, funding, settle, snapshot, storage,
+    events, funding, keeper, settle, snapshot, storage,
 };
 use soroban_sdk::{panic_with_error, Address, Env};
 
@@ -17,12 +17,12 @@ pub fn execute_order(env: Env, caller: Address, position_id: u64) {
     let stop_loss = position.stop_loss.instruction().map(|t| t.trigger_price);
     let crossed_above = |trigger: Option<i128>| matches!(trigger, Some(p) if price >= p);
     let crossed_below = |trigger: Option<i128>| matches!(trigger, Some(p) if price <= p);
-    let triggered = if position.is_long {
-        crossed_above(take_profit) || crossed_below(stop_loss)
+    let (take_profit_crossed, stop_loss_crossed) = if position.is_long {
+        (crossed_above(take_profit), crossed_below(stop_loss))
     } else {
-        crossed_below(take_profit) || crossed_above(stop_loss)
+        (crossed_below(take_profit), crossed_above(stop_loss))
     };
-    if !triggered {
+    if !(take_profit_crossed || stop_loss_crossed) {
         panic_with_error!(&env, PositionManagerError::InvalidOrder);
     }
     let mut ledger = storage::get_ledger(&env);
@@ -32,7 +32,28 @@ pub fn execute_order(env: Env, caller: Address, position_id: u64) {
     funding::accrue(&env, &mut ledger, &mut market, now);
 
     let size = position.size;
-    let settled = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
+    // §6.12 — a take-profit pays `keeper_tp_reward` and a stop-loss
+    // `keeper_sl_reward`; neither adds a close or decrease reward on top.
+    let kind = if take_profit_crossed {
+        keeper::RewardKind::TakeProfit
+    } else {
+        keeper::RewardKind::StopLoss
+    };
+    let reward = keeper::reward_for(&storage::get_global_config(&env), kind);
+    let settled = settle::settle_close(
+        &env,
+        &mut ledger,
+        position,
+        market,
+        size,
+        0,
+        price,
+        Some(settle::Keeper {
+            recipient: &caller,
+            reward,
+            liquidation: false,
+        }),
+    );
     storage::save_ledger(&env, &ledger);
 
     events::emit_order_executed(&env, position_id, &caller, 0);

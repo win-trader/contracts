@@ -24,7 +24,6 @@ use crate::{borrow, events, math, storage};
 
 /// Lockstep credit of a referral reward: the aggregate claim total and the
 /// per-referrer balance move by the same amount, in one place.
-#[allow(dead_code)]
 fn credit(env: &Env, ledger: &mut Ledger, referrer: &Address, amount: i128) {
     if amount <= 0 {
         return;
@@ -34,17 +33,19 @@ fn credit(env: &Env, ledger: &mut Ledger, referrer: &Address, amount: i128) {
     storage::save_referral_balance(env, referrer, math::add(env, balance, amount));
 }
 
-/// Carve the referral reward out of a position's collected closing fee and
-/// accrue it to the trader's referrer, if any. Returns the carve-out so the
-/// caller's `split_revenue` subtracts it from the protocol remainder — the
-/// keeper and LP shares are unaffected. Returns `0` when the trader has no
-/// referrer or the share is disabled.
-#[allow(dead_code)]
-pub fn accrue_from_close(
+/// §3.6 — carve the referral reward out of a collected **opening or
+/// closing** fee and accrue it to the trader's referrer, if any.
+///
+/// Returns the carve-out so the caller subtracts it from the protocol
+/// remainder; the LP share is computed off the full fee and is unaffected.
+/// Returns `0` when the trader has no referrer or the share is disabled.
+/// Changing the mapping affects only fees collected afterward — this reads
+/// the referrer at collection time and accrues nothing retroactively.
+pub fn accrue(
     env: &Env,
     ledger: &mut Ledger,
     owner: &Address,
-    closing_fee: i128,
+    collected_fee: i128,
     position_id: u64,
 ) -> i128 {
     let referrer = match storage::get_referrer(env, owner) {
@@ -52,7 +53,7 @@ pub fn accrue_from_close(
         None => return 0,
     };
     let bps = storage::get_global_config(env).referral_fee_share_bps;
-    let cut = math::mul_div_floor(env, closing_fee, bps as i128, BPS);
+    let cut = math::mul_div_floor(env, collected_fee, bps as i128, BPS);
     if cut <= 0 {
         return 0;
     }

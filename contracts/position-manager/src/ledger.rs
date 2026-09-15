@@ -265,6 +265,17 @@ pub fn payout_collateral_checked(
     collected
 }
 
+/// Boundary move out of LP residual equity, which carries no claim label:
+/// nothing is debited because nothing was labelled. Used only by §6.12's
+/// liquidation backstop, where the caller has already capped the amount at
+/// current cash LP equity.
+pub fn payout_lp_residual(env: &Env, recipient: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    vault(env).transfer_safety_claim(&env.current_contract_address(), recipient, &amount);
+}
+
 /// Boundary move in: pull `amount` from `from` into the vault. Labeling
 /// stays with the caller — open pulls the collateral, and recapitalize
 /// deliberately labels nothing (a pure LP-equity donation).

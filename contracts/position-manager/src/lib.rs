@@ -8,6 +8,7 @@ mod events;
 mod fees;
 mod funding;
 mod governance;
+mod keeper;
 mod ledger;
 mod math;
 mod position;
