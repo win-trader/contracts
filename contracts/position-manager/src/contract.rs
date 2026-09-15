@@ -13,12 +13,10 @@ use position::{
     deleverage::deleverage_position,
     entry_order::{cancel_entry_order, execute_entry_order, place_entry_order},
     execute_order::execute_order,
-    fund_execution_budget::fund_execution_budget,
     increase::increase_position,
     liquidate::liquidate_position,
     open::open_position,
     set_tp_sl::set_tp_sl,
-    withdraw_execution_budget::withdraw_execution_budget,
 };
 use shared::constants::{INDEX_PRECISION, ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER};
 use shared::{
@@ -71,7 +69,6 @@ impl PositionManager for PositionManagerContract {
         is_long: bool,
         size: i128,
         collateral: i128,
-        execution_budget: i128,
         take_profit: i128,
         stop_loss: i128,
         acceptable_price: i128,
@@ -83,7 +80,6 @@ impl PositionManager for PositionManagerContract {
             is_long,
             size,
             collateral,
-            execution_budget,
             take_profit,
             stop_loss,
             acceptable_price,
@@ -136,14 +132,6 @@ impl PositionManager for PositionManagerContract {
 
     fn set_tp_sl(env: Env, position_id: u64, take_profit: i128, stop_loss: i128) {
         set_tp_sl(env, position_id, take_profit, stop_loss)
-    }
-
-    fn fund_execution_budget(env: Env, position_id: u64, amount: i128) {
-        fund_execution_budget(env, position_id, amount)
-    }
-
-    fn withdraw_execution_budget(env: Env, position_id: u64, amount: i128) {
-        withdraw_execution_budget(env, position_id, amount)
     }
 
     fn place_entry_order(
@@ -350,10 +338,6 @@ impl PositionManager for PositionManagerContract {
 
     fn protocol_claimable_total(env: Env) -> i128 {
         storage::get_ledger(&env).protocol_claimable_total
-    }
-
-    fn risk_keeper_reserve_total(env: Env) -> i128 {
-        storage::get_ledger(&env).risk_keeper_reserve_total
     }
 
     fn non_lp_claims(env: Env) -> i128 {

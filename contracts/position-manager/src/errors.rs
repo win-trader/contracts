@@ -22,7 +22,9 @@ pub enum PositionManagerError {
     InvalidOracleRound = 16,
     TooEarly = 17,
     InvalidOrder = 18,
-    InsufficientExecutionBudget = 19,
+    /// Reserved. Its raiser was deleted with the execution budget (P1-01);
+    /// P9-01 renumbers the whole enum, so it is not reused before then.
+    Reserved19 = 19,
     InvalidCaller = 20,
     /// The contract is operationally paused (distinct from a risk state).
     Paused = 21,

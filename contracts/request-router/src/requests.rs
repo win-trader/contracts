@@ -158,25 +158,6 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
     if round.timestamp < request.execute_after {
         panic_with_error!(env, RequestRouterError::TooEarly);
     }
-    if round.previous_timestamp >= request.execute_after {
-        request.status = LpRequestStatus::Expired;
-        storage::save_request(env, &request);
-        storage::advance_next_to_resolve(env, id);
-        refund(env, &request);
-        events::LpRequestResolved {
-            request_id: id,
-            owner: request.owner,
-            kind: request.kind,
-            status: request.status,
-            settled_amount: 0,
-        }
-        .publish(env);
-        return SettlementResult {
-            status: SettlementStatus::Failed,
-            amount: 0,
-        };
-    }
-
     // Mark and advance before external effects. A panic rolls the complete
     // transaction back, while an expected business failure is refunded.
     request.status = LpRequestStatus::Settled;

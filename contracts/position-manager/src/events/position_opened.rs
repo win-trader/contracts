@@ -12,7 +12,6 @@ pub struct PositionOpened {
     pub size: i128,
     pub base_exposure: i128,
     pub stored_collateral: i128,
-    pub execution_budget: i128,
     pub price: i128,
     /// Zero means no trigger set.
     pub take_profit: i128,
@@ -28,7 +27,6 @@ pub fn emit_opened(env: &Env, position: &Position, price: i128) {
         size: position.size,
         base_exposure: position.base_exposure,
         stored_collateral: position.stored_collateral,
-        execution_budget: position.execution_budget,
         price,
         take_profit: position.take_profit,
         stop_loss: position.stop_loss,

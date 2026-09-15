@@ -250,21 +250,11 @@ pub fn pending_fees(
     {
         panic_with_error!(env, PositionManagerError::InvariantViolation);
     }
-    // §11.2 — minimum borrow charge: every settlement pays at least the
-    // configured index delta on its risk units (anti-churn floor; the
-    // invariant check above runs on the raw accrual, not the floored
-    // value). Baselines reset per touch, so the floor applies per
-    // capitalization.
-    let borrow_floor = math::index_value_ceil(
-        env,
-        position.risk_units,
-        storage::get_global_config(env).min_borrow_index_delta,
-    );
     PendingFees {
         funding_paid_to_receivers,
         funding_paid_to_lps,
         funding_received,
-        borrow: core::cmp::max(borrow, borrow_floor),
+        borrow,
     }
 }
 

@@ -4,7 +4,7 @@ use crate::{
     errors::PositionManagerError,
     events, funding, ledger, math, risk, settle, snapshot, storage,
 };
-use shared::constants::{BPS, ROLE_KEEPER};
+use shared::constants::ROLE_KEEPER;
 use shared::RiskState;
 use soroban_sdk::{panic_with_error, Address, Env};
 
@@ -48,27 +48,7 @@ pub fn deleverage_position(env: Env, caller: Address, position_id: u64) {
     }
 
     let size = position.size;
-    let reward_bps = market.config.adl_reward_bps;
     let settled = settle::settle_close(&env, &mut ledger, position, market, size, 0, price, None);
-
-    let configured_reward = math::mul_div_floor(&env, size, reward_bps as i128, BPS);
-    let reward = core::cmp::min(
-        core::cmp::min(
-            ledger.risk_keeper_reserve_total,
-            storage::get_global_config(&env).max_adl_reward,
-        ),
-        configured_reward,
-    );
-    if reward > 0 {
-        ledger::payout(
-            &env,
-            &mut ledger,
-            ledger::Bucket::KeeperReserve,
-            &caller,
-            reward,
-        );
-        events::emit_adl_reward(&env, position_id, &caller, reward);
-    }
 
     storage::save_ledger(&env, &ledger);
     match &settled {

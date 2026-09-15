@@ -1,9 +1,13 @@
 //! Accounting snapshot and marked NAV — doc §4 (sources of truth) and §7
 //! (price exposure and PnL).
 //!
-//! NAV recognition (§7.3): trader profit in full, trader loss only up to the
-//! side's stored collateral aggregate. The loop is over the bounded
-//! active-market registry — never over positions (§17).
+//! NAV recognition (§2.3): trader profit in full, trader loss not at all.
+//! Marked NAV is `max(cash_lp_equity - Σ max(raw_side_pnl, 0), 0)`, so LP
+//! share price understates while traders are collectively winning-on-paper
+//! and steps up only as losses are actually realized. That asymmetry is the
+//! point: an LP never buys in against a loss the vault has not collected.
+//! The loop is over the bounded active-market registry — never over
+//! positions (§17).
 
 use soroban_sdk::{panic_with_error, Env, Symbol};
 
@@ -69,7 +73,10 @@ pub fn build_snapshot(
         let mut market = storage::get_market(env, &symbol);
 
         // §7.2 raw side PnL numerators (one extra PRICE_PRECISION factor),
-        // §7.3 recognition: profit in full, loss capped at side collateral.
+        // §2.3 recognition: `max(raw_side_pnl, 0)` per side. Unrealized
+        // trader loss is not recognized at all — it is not cash the vault
+        // holds, and marking it would let an LP deposit buy into profit
+        // that has not been collected.
         let long_num = math::sub(
             env,
             math::mul(env, market.long.base_exposure, price),
@@ -80,26 +87,14 @@ pub fn build_snapshot(
             math::mul(env, market.short.size_open_interest, PRICE_PRECISION),
             math::mul(env, market.short.base_exposure, price),
         );
-        let long_recognized = if long_num >= 0 {
-            long_num
-        } else {
-            -core::cmp::min(
-                long_num.abs(),
-                math::mul(env, market.long.stored_collateral_total, PRICE_PRECISION),
-            )
-        };
-        let short_recognized = if short_num >= 0 {
-            short_num
-        } else {
-            -core::cmp::min(
-                short_num.abs(),
-                math::mul(env, market.short.stored_collateral_total, PRICE_PRECISION),
-            )
-        };
         aggregate_pnl_numerator = math::add(
             env,
             aggregate_pnl_numerator,
-            math::add(env, long_recognized, short_recognized),
+            math::add(
+                env,
+                core::cmp::max(long_num, 0),
+                core::cmp::max(short_num, 0),
+            ),
         );
 
         // One pure assessment serves both modes: the LP settlement path
@@ -113,7 +108,7 @@ pub fn build_snapshot(
         i += 1;
     }
 
-    // §18.6 marked NAV = max(cash LP equity − recognized trader PnL, 0),
+    // §2.3 marked NAV = max(cash LP equity − recognized trader profit, 0),
     // converted to cash exactly once.
     let nav_num = math::sub(
         env,

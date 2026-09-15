@@ -34,15 +34,15 @@ pub struct CollectedFees {
     pub unpaid: i128,
 }
 
-/// §11.4 — split a collected opening or borrow fee between the risk-keeper
-/// reserve, protocol claimable revenue, and (implicitly) residual LP cash.
+/// §11.4 — split a collected opening or borrow fee between protocol
+/// claimable revenue and (implicitly) residual LP cash.
 ///
 /// `referral` is a carve-out already credited to a referrer by the caller
 /// (only nonzero on a referred closing fee, §11.1); it comes purely out of
-/// the protocol slice, so the keeper and LP shares — computed off the full
-/// `collected` — are never diluted. `keeper + lp + protocol + referral ==
-/// collected`, and `protocol ≥ 0` because the validated share sum bounds
-/// `keeper + lp + referral ≤ collected`.
+/// the protocol slice, so the LP share — computed off the full `collected`
+/// — is never diluted. `lp + protocol + referral == collected`, and
+/// `protocol ≥ 0` because the validated share sum bounds
+/// `lp + referral ≤ collected`.
 pub fn split_revenue(
     env: &Env,
     ledger: &mut Ledger,
@@ -55,30 +55,10 @@ pub fn split_revenue(
         return;
     }
     let config = storage::get_global_config(env);
-    let keeper = math::mul_div_floor(
-        env,
-        collected,
-        config.risk_keeper_revenue_share_bps as i128,
-        BPS,
-    );
     let lp = math::mul_div_floor(env, collected, config.lp_revenue_share_bps as i128, BPS);
-    let protocol = math::sub(
-        env,
-        math::sub(env, math::sub(env, collected, keeper), lp),
-        referral,
-    );
-    ledger.credit(env, ledger::Bucket::KeeperReserve, keeper);
+    let protocol = math::sub(env, math::sub(env, collected, lp), referral);
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
-    events::emit_revenue_split(
-        env,
-        position_id,
-        source,
-        collected,
-        keeper,
-        lp,
-        protocol,
-        referral,
-    );
+    events::emit_revenue_split(env, position_id, source, collected, lp, protocol, referral);
 }
 
 /// §11.4 — capitalize all accrued amounts plus `negative_pnl` against the
@@ -165,26 +145,3 @@ pub fn capitalize(
     }
 }
 
-/// §11.1 — the closing-fee tier for removing `base_removed` from the
-/// `is_long` side: low when the removal improves or preserves the book's
-/// base-exposure skew, high when it worsens it.
-pub fn tiered_close_fee_bps(env: &Env, market: &Market, is_long: bool, base_removed: i128) -> u32 {
-    let skew_before = math::skew_abs(env, market.long.base_exposure, market.short.base_exposure);
-    let (long_after, short_after) = if is_long {
-        (
-            math::sub(env, market.long.base_exposure, base_removed),
-            market.short.base_exposure,
-        )
-    } else {
-        (
-            market.long.base_exposure,
-            math::sub(env, market.short.base_exposure, base_removed),
-        )
-    };
-    let skew_after = math::skew_abs(env, long_after, short_after);
-    if skew_after <= skew_before {
-        market.config.close_fee_low_bps
-    } else {
-        market.config.close_fee_high_bps
-    }
-}

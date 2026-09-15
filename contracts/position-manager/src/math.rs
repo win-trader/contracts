@@ -57,17 +57,6 @@ pub fn risk_added(env: &Env, size: i128, factor_bps: u32) -> i128 {
     mul_div_floor(env, size, factor_bps as i128, BPS)
 }
 
-/// §11.1 — unsigned distance from balance in bps: 0 balanced, `BPS`
-/// one-sided. The fee tier wants magnitude only; funding uses the signed
-/// `skew_frac` below.
-pub fn skew_abs(env: &Env, long_base: i128, short_base: i128) -> i128 {
-    let total = add(env, long_base, short_base);
-    if total == 0 {
-        return 0;
-    }
-    mul_div_floor(env, (long_base - short_base).abs(), BPS, total)
-}
-
 // ---------------------------------------------------------------------------
 // §8.1 EMA funding: signed skew, half-life decay, and the exact closed-form
 // window integral of the quadratic rate. Between two checkpoints the book is
@@ -267,95 +256,10 @@ pub fn rate_from_integral(env: &Env, max_rate: i128, integral: i128) -> i128 {
     mul_div_floor(env, first, magnitude, INDEX_PRECISION)
 }
 
-/// §9.2 — fixed quadratic borrow rate: `base + variable * utilization² /
-/// BPS²`, scaled by `INDEX_PRECISION` (bps/day inputs). Kept as the exact
-/// reference the configurable-exponent path is regression-tested against;
-/// production uses `borrow_rate_exp`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn borrow_rate(env: &Env, base: i128, variable: i128, utilization: i128) -> i128 {
-    let base_scaled = mul(env, base, INDEX_PRECISION);
-    let variable_scaled = mul(env, variable, INDEX_PRECISION);
-    let first = mul_div_floor(env, variable_scaled, utilization, BPS);
-    add(
-        env,
-        base_scaled,
-        mul_div_floor(env, first, utilization, BPS),
-    )
-}
-
-/// §9.2 — `−log2(u_bps / BPS)` at `INDEX_PRECISION` scale for
-/// `u_bps ∈ [1, BPS]`; zero at and above `BPS`, domain panic at or below
-/// zero. Normalizes into `(P/2, P]` — the band that makes power-of-two
-/// ratios exact (u = 5000 → P, 2500 → 2P, …) — then extracts 47 fraction
-/// bits with the classic squaring algorithm, converting the whole bit
-/// block to `INDEX_PRECISION` scale in a single rounding.
-pub fn neg_log2(env: &Env, u_bps: i128) -> i128 {
-    if u_bps <= 0 {
-        fail(env);
-    }
-    if u_bps >= BPS {
-        return 0;
-    }
-    // Exact: INDEX_PRECISION / BPS = 1e10.
-    let mut m = mul_div_floor(env, u_bps, INDEX_PRECISION, BPS);
-    let mut k = 0i128;
-    while m <= INDEX_PRECISION / 2 {
-        m = mul(env, m, 2);
-        k += 1;
-    }
-    let mut bits = 0i128;
-    let mut i = 0u32;
-    while i < 47 {
-        m = mul_div_floor(env, m, m, INDEX_PRECISION);
-        bits <<= 1;
-        if m <= INDEX_PRECISION / 2 {
-            m = mul(env, m, 2);
-            bits |= 1;
-        }
-        i += 1;
-    }
-    let frac = mul_div_floor(env, bits, INDEX_PRECISION, 1i128 << 47);
-    add(env, mul(env, k, INDEX_PRECISION), frac)
-}
-
-/// §9.2 — power-curve borrow rate: `base + variable × (u/BPS)^(e/BPS)`,
-/// `INDEX_PRECISION`-scaled bps/day, `e = exponent_bps` (20_000 reproduces
-/// the legacy quadratic to ~1e-10 relative, 10_000 is linear). The factor
-/// is `2^(−e·L)` with `L = neg_log2(u)`, evaluated by the same `EXP2_FRAC`
-/// square-and-multiply as funding decay. The explicit `≥ 47·P` clamp
-/// guards the `u64` cast for extreme configured exponents and agrees with
-/// `exp2_neg`'s own underflow-to-zero.
-pub fn borrow_rate_exp(
-    env: &Env,
-    base: i128,
-    variable: i128,
-    utilization: i128,
-    exponent_bps: u32,
-) -> i128 {
-    let base_scaled = mul(env, base, INDEX_PRECISION);
-    if utilization < 0 {
-        fail(env);
-    }
-    if utilization == 0 {
-        return base_scaled;
-    }
-    let l = neg_log2(env, utilization);
-    let x = mul_div_floor(env, l, exponent_bps as i128, BPS);
-    let factor = if x >= 47 * INDEX_PRECISION {
-        0
-    } else {
-        exp2_neg(env, x as u64, INDEX_PRECISION as u64)
-    };
-    let variable_scaled = mul(env, variable, INDEX_PRECISION);
-    add(
-        env,
-        base_scaled,
-        mul_div_floor(env, variable_scaled, factor, INDEX_PRECISION),
-    )
-}
-
 /// §6.2 — vault-wide utilization in bps, capped at `BPS`. Zero risk is zero
 /// utilization even with zero equity; nonzero risk on zero equity is `BPS`.
+/// Callerless between P1-07 and P4-02, which feeds it the fixed square.
+#[allow(dead_code)]
 pub fn utilization_bps(env: &Env, risk: i128, equity: i128) -> i128 {
     if risk == 0 {
         0
@@ -387,7 +291,9 @@ pub fn pnl(env: &Env, is_long: bool, size: i128, base: i128, price: i128) -> i12
 }
 
 /// §11.1 — closing fee as a share of the payable price profit, rounded
-/// up (§16).
+/// up (§16). Callerless between P1-06 and P5-12, which replaces it with
+/// `max(size component, PnL component)`.
+#[allow(dead_code)]
 pub fn closing_fee(env: &Env, payable_profit: i128, bps: u32) -> i128 {
     mul_div_ceil(env, payable_profit, bps as i128, BPS)
 }
@@ -413,16 +319,6 @@ mod tests {
 
     const UNIT: i128 = PRICE_PRECISION;
 
-    #[test]
-    fn skew_is_zero_when_balanced_and_bps_when_one_sided() {
-        let e = env();
-        assert_eq!(skew_abs(&e, 0, 0), 0);
-        assert_eq!(skew_abs(&e, 500, 500), 0);
-        assert_eq!(skew_abs(&e, 1_000, 0), BPS);
-        assert_eq!(skew_abs(&e, 0, 1_000), BPS);
-        // 75/25 split → |50| * BPS / 100 = 5_000
-        assert_eq!(skew_abs(&e, 75, 25), 5_000);
-    }
 
     #[test]
     fn rate_from_integral_is_quadratic() {
@@ -528,19 +424,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn borrow_rate_is_base_plus_quadratic_variable() {
-        let e = env();
-        assert_eq!(borrow_rate(&e, 100, 900, 0), 100 * INDEX_PRECISION);
-        assert_eq!(
-            borrow_rate(&e, 100, 900, BPS),
-            (100 + 900) * INDEX_PRECISION
-        );
-        assert_eq!(
-            borrow_rate(&e, 100, 900, BPS / 2),
-            100 * INDEX_PRECISION + 900 * INDEX_PRECISION / 4
-        );
-    }
 
     #[test]
     fn utilization_edges() {
@@ -596,146 +479,15 @@ mod tests {
         assert_eq!(index_value_floor(&e, 1, index), 0);
     }
 
-    const P: i128 = INDEX_PRECISION;
 
-    #[test]
-    fn neg_log2_is_exact_at_power_of_two_ratios() {
-        let e = env();
-        assert_eq!(neg_log2(&e, BPS), 0);
-        assert_eq!(neg_log2(&e, 5_000), P);
-        assert_eq!(neg_log2(&e, 2_500), 2 * P);
-        assert_eq!(neg_log2(&e, 1_250), 3 * P);
-        assert_eq!(neg_log2(&e, 625), 4 * P);
-    }
 
-    #[test]
-    fn neg_log2_matches_log2_four_thirds() {
-        let e = env();
-        // −log2(0.75) = log2(4/3) = 0.4150374992788438; the 47-bit
-        // pipeline lands exactly on the floored reference value.
-        assert_eq!(neg_log2(&e, 7_500), 41_503_749_927_884);
-    }
 
-    #[test]
-    fn neg_log2_is_strictly_decreasing_in_utilization() {
-        let e = env();
-        let mut u = 100i128;
-        while u < BPS {
-            assert!(neg_log2(&e, u) > neg_log2(&e, u + 100));
-            u += 100;
-        }
-    }
 
-    #[test]
-    #[should_panic]
-    fn neg_log2_rejects_non_positive_utilization() {
-        let e = env();
-        neg_log2(&e, 0);
-    }
 
-    #[test]
-    fn power_factor_known_values_at_half_utilization() {
-        let e = env();
-        // base = 0, variable = 1 → the return value IS the factor.
-        assert_eq!(borrow_rate_exp(&e, 0, 1, 5_000, 10_000), P / 2);
-        assert_eq!(borrow_rate_exp(&e, 0, 1, 5_000, 20_000), P / 4);
-        assert_eq!(borrow_rate_exp(&e, 0, 1, 5_000, 30_000), P / 8);
-        // 2^−1.5 = 0.35355339059327376: one table entry, halved.
-        assert_eq!(borrow_rate_exp(&e, 0, 1, 5_000, 15_000), 35_355_339_059_327);
-    }
 
-    #[test]
-    fn power_factor_fractional_exponent_pins_reference() {
-        let e = env();
-        // 2^−1.7549 = 0.29629372953996: deterministic pipeline output is
-        // 4 ulp under the true value and sits inside the (e=2, e=1.5)
-        // bracket.
-        let f = borrow_rate_exp(&e, 0, 1, 5_000, 17_549);
-        assert_eq!(f, 29_629_372_953_992);
-        assert!(P / 4 < f && f < 35_355_339_059_327);
-    }
 
-    #[test]
-    fn borrow_rate_exp_returns_base_at_zero_and_clamped_utilization() {
-        let e = env();
-        assert_eq!(borrow_rate_exp(&e, 25, 250, 0, 20_000), 25 * P);
-        // u = 1 bp at e = 10: x ≈ 132.9·P ≥ 47·P → factor underflows to 0.
-        assert_eq!(borrow_rate_exp(&e, 25, 250, 1, 100_000), 25 * P);
-    }
 
-    #[test]
-    fn borrow_rate_exp_full_utilization_is_base_plus_variable_for_any_exponent() {
-        let e = env();
-        for exp in [10_000u32, 15_000, 17_549, 20_000, 30_000, 100_000] {
-            assert_eq!(borrow_rate_exp(&e, 25, 250, BPS, exp), (25 + 250) * P);
-        }
-    }
 
-    #[test]
-    fn borrow_rate_exp_linear_exponent_is_proportional() {
-        let e = env();
-        assert_eq!(
-            borrow_rate_exp(&e, 100, 900, 5_000, 10_000),
-            100 * P + 900 * P / 2
-        );
-        assert_eq!(
-            borrow_rate_exp(&e, 100, 900, 2_500, 10_000),
-            100 * P + 900 * P / 4
-        );
-    }
 
-    #[test]
-    fn borrow_rate_exp_square_matches_legacy_borrow_rate() {
-        let e = env();
-        // Reference sweep: worst deterministic divergence is 10_800 at
-        // INDEX_PRECISION scale (~1e-10 relative); tolerance leaves a wide
-        // margin while a single wrong fraction bit would blow through it.
-        for u in [
-            1i128, 2, 7, 10, 100, 137, 1_000, 2_500, 3_333, 5_000, 7_500, 9_000, 9_999, BPS,
-        ] {
-            let new = borrow_rate_exp(&e, 100, 900, u, 20_000);
-            let legacy = borrow_rate(&e, 100, 900, u);
-            assert!(
-                (new - legacy).abs() <= 900 * 500,
-                "u={u}: {new} vs {legacy}"
-            );
-        }
-        // Power-of-two ratios are exact in both paths.
-        for u in [0i128, 1_250, 2_500, 5_000, BPS] {
-            assert_eq!(
-                borrow_rate_exp(&e, 100, 900, u, 20_000),
-                borrow_rate(&e, 100, 900, u),
-            );
-        }
-    }
 
-    #[test]
-    fn borrow_rate_exp_is_strictly_monotone_in_utilization() {
-        let e = env();
-        let mut u = 500i128;
-        while u < BPS {
-            assert!(
-                borrow_rate_exp(&e, 0, 900, u, 17_549)
-                    < borrow_rate_exp(&e, 0, 900, u + 500, 17_549)
-            );
-            u += 500;
-        }
-    }
-
-    #[test]
-    fn borrow_rate_exp_is_strictly_monotone_in_exponent() {
-        let e = env();
-        let rates: [i128; 4] = [
-            borrow_rate_exp(&e, 0, 900, 5_000, 10_000),
-            borrow_rate_exp(&e, 0, 900, 5_000, 15_000),
-            borrow_rate_exp(&e, 0, 900, 5_000, 20_000),
-            borrow_rate_exp(&e, 0, 900, 5_000, 30_000),
-        ];
-        assert!(rates[0] > rates[1] && rates[1] > rates[2] && rates[2] > rates[3]);
-        // At full utilization the exponent is irrelevant.
-        assert_eq!(
-            borrow_rate_exp(&e, 0, 900, BPS, 10_000),
-            borrow_rate_exp(&e, 0, 900, BPS, 30_000),
-        );
-    }
 }

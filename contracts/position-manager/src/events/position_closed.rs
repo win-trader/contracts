@@ -19,9 +19,7 @@ pub struct PositionClosed {
     /// Residual collateral paid to the owner after the waterfall.
     pub collateral_payout: i128,
     pub bad_debt: i128,
-    pub liquidation_reward: i128,
-    pub execution_budget_refunded: i128,
-    /// §11.1 closing fee collected out of the realized winnings.
+    /// Closing fee collected out of the realized winnings.
     pub closing_fee: i128,
     pub receiver_funding_paid: i128,
     pub lp_funding_paid: i128,
@@ -44,8 +42,6 @@ pub fn emit_closed(env: &Env, s: &SettleHeader, tail: &ClosedTail, reason: Close
         payable_pnl: s.payable_pnl,
         collateral_payout: tail.collateral_payout,
         bad_debt: tail.bad_debt,
-        liquidation_reward: tail.liquidation_reward,
-        execution_budget_refunded: tail.execution_budget_refunded,
         closing_fee: s.closing_fee,
         receiver_funding_paid: s.fees.receiver_funding_paid,
         lp_funding_paid: s.fees.lp_funding_paid,

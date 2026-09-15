@@ -25,7 +25,6 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
     let position = storage::get_position(&env, position_id);
     let mut market = storage::get_market(&env, &position.market);
     let mut ledger = storage::get_ledger(&env);
-    let config = storage::get_global_config(&env);
 
     let now = env.ledger().timestamp();
 
@@ -77,7 +76,6 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
 
     require_unhealthy_position(&env, effective, position.size, &market.config);
 
-    let insolvent = effective < 0;
     let size = position.size;
     let settled = settle::settle_close(
         &env,
@@ -89,22 +87,6 @@ pub fn liquidate_position(env: Env, caller: Address, position_id: u64) {
         price,
         Some(&caller),
     );
-    if matches!(settled, settle::Settled::Closed(..)) && insolvent {
-        let reward = core::cmp::min(
-            ledger.risk_keeper_reserve_total,
-            config.max_insolvent_touch_reward,
-        );
-        if reward > 0 {
-            ledger::payout(
-                &env,
-                &mut ledger,
-                ledger::Bucket::KeeperReserve,
-                &caller,
-                reward,
-            );
-            events::emit_insolvency_reward(&env, position_id, &caller, reward);
-        }
-    }
 
     storage::save_ledger(&env, &ledger);
 

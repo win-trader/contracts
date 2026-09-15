@@ -24,6 +24,7 @@ use crate::{borrow, events, math, storage};
 
 /// Lockstep credit of a referral reward: the aggregate claim total and the
 /// per-referrer balance move by the same amount, in one place.
+#[allow(dead_code)]
 fn credit(env: &Env, ledger: &mut Ledger, referrer: &Address, amount: i128) {
     if amount <= 0 {
         return;
@@ -38,6 +39,7 @@ fn credit(env: &Env, ledger: &mut Ledger, referrer: &Address, amount: i128) {
 /// caller's `split_revenue` subtracts it from the protocol remainder — the
 /// keeper and LP shares are unaffected. Returns `0` when the trader has no
 /// referrer or the share is disabled.
+#[allow(dead_code)]
 pub fn accrue_from_close(
     env: &Env,
     ledger: &mut Ledger,

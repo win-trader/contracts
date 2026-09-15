@@ -18,7 +18,7 @@ pub struct LpRequestCreated {
 }
 
 /// Terminal outcome of the FIFO head: `Settled` with the minted shares /
-/// paid assets, or `Failed` / `Expired` with the escrow returned.
+/// paid assets, or `Failed` with the escrow returned.
 #[contractevent(topics = ["lpres"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LpRequestResolved {

@@ -44,8 +44,6 @@ pub struct Position {
     pub funding_paid_to_receivers_debt: i128,
     pub funding_paid_to_lps_debt: i128,
     pub funding_received_debt: i128,
-    /// Cash owned by an optional-order executor.
-    pub execution_budget: i128,
     pub last_increased_time: u64,
     /// Trigger price for the optional take-profit order; `0` = none.
     pub take_profit: i128,
@@ -63,7 +61,6 @@ pub struct EntryOrderParams {
     pub is_long: bool,
     pub size: i128,
     pub collateral: i128,
-    pub execution_budget: i128,
     pub take_profit: i128,
     pub stop_loss: i128,
     pub acceptable_price: i128,
@@ -86,7 +83,6 @@ pub struct EntryOrder {
     // --- frozen open_position arguments ---
     pub size: i128,
     pub collateral: i128,
-    pub execution_budget: i128,
     pub take_profit: i128,
     pub stop_loss: i128,
     pub acceptable_price: i128,
@@ -153,10 +149,6 @@ pub enum PayerSide {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketConfig {
-    /// §11.1 closing-fee tier when the close improves or preserves skew.
-    pub close_fee_low_bps: u32,
-    /// §11.1 closing-fee tier when the close worsens skew.
-    pub close_fee_high_bps: u32,
     pub max_funding_rate_bps_day: i128,
     /// §8.1 weight of the instantaneous skew in the funding blend, in bps;
     /// the rest is the half-life EMA. `BPS` reproduces pure instant skew.
@@ -176,8 +168,6 @@ pub struct MarketConfig {
     /// Margin below which the position is liquidatable (§12.3). Must not
     /// exceed `initial_margin_bps`; the gap is the entry buffer.
     pub maintenance_margin_bps: u32,
-    pub liquidation_reward_bps: u32,
-    pub adl_reward_bps: u32,
 }
 
 #[contracttype]
@@ -191,24 +181,13 @@ pub struct GlobalConfig {
     pub risk_capacity_limit_bps: u32,
     pub base_borrow_rate_bps_day: i128,
     pub max_variable_borrow_bps_day: i128,
-    /// §9.2 borrow-curve exponent, bps: 20_000 = u² (legacy quadratic),
-    /// 10_000 = linear. Bounded to ≤ 100_000 (e ≤ 10) by validation.
-    pub borrow_exponent_bps: u32,
-    /// §11.2 minimum borrow charge per capitalization: an index delta at
-    /// `INDEX_PRECISION` scale applied to the position's risk units
-    /// (2e11 = 2 bps of notional at a 10% market risk factor). Zero
-    /// disables the floor.
-    pub min_borrow_index_delta: i128,
     pub lp_revenue_share_bps: u32,
-    pub risk_keeper_revenue_share_bps: u32,
     /// §11.1 share of a closing fee routed to the trader's referrer, carved
     /// from the protocol slice (keeper and LP shares are untouched). `0`
     /// disables referral accrual globally — a kill switch. Validated so
-    /// `lp + keeper + referral ≤ BPS`, keeping the protocol remainder ≥ 0.
+    /// `lp + referral ≤ BPS`, keeping the protocol remainder ≥ 0.
     pub referral_fee_share_bps: u32,
     pub hard_cap_factor_limit_bps: u32,
-    pub max_adl_reward: i128,
-    pub max_insolvent_touch_reward: i128,
     pub max_active_markets: u32,
 }
 
@@ -371,7 +350,6 @@ pub enum LpRequestStatus {
     Pending,
     Settled,
     Failed,
-    Expired,
 }
 
 #[contracttype]

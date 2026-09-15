@@ -27,12 +27,11 @@ pub trait PositionManager {
     /// `AlreadyInitialized` on a second call.
     fn set_vault(env: Env, caller: Address, vault: Address);
 
-    /// Open a leveraged position (§12.1). Transfers
-    /// `collateral + execution_budget` from `owner` — nothing is charged at
-    /// open (§11.1) — and enforces the initial margin, capacity, and
-    /// market-side limits. `acceptable_price` bounds the execution price
-    /// (max for longs, min for shorts; `0` = no bound). Returns the new
-    /// position id.
+    /// Open a leveraged position (§12.1). Transfers `collateral` from
+    /// `owner` — nothing is charged at open (§11.1) — and enforces the
+    /// initial margin, capacity, and market-side limits.
+    /// `acceptable_price` bounds the execution price (max for longs, min
+    /// for shorts; `0` = no bound). Returns the new position id.
     #[allow(clippy::too_many_arguments)]
     fn open_position(
         env: Env,
@@ -41,7 +40,6 @@ pub trait PositionManager {
         is_long: bool,
         size: i128,
         collateral: i128,
-        execution_budget: i128,
         take_profit: i128,
         stop_loss: i128,
         acceptable_price: i128,
@@ -73,18 +71,18 @@ pub trait PositionManager {
 
     /// Close a position whose effective collateral (including pending fees
     /// and payable PnL) is below maintenance margin (§12.3). Open to any
-    /// authenticated caller; pays the liquidation reward from the position
-    /// and, for an insolvent position, a capped touch reward from the
-    /// risk-keeper reserve.
+    /// authenticated caller. Pays no keeper reward until the fixed
+    /// `keeper_liquidation_reward` lands.
     fn liquidate_position(env: Env, caller: Address, position_id: u64);
 
     /// Close a profitable position on a side in the ADL or hard-cap state
-    /// (KEEPER, §14). Pays a capped reward from the risk-keeper reserve.
+    /// (KEEPER, §14). Pays no keeper reward until the fixed
+    /// `keeper_adl_reward` lands.
     fn deleverage_position(env: Env, caller: Address, position_id: u64);
 
     /// Execute a triggered take-profit/stop-loss close (§12.4). Open to any
-    /// authenticated caller; pays the position's full execution budget to
-    /// the executor. Panics `InvalidOrder` if no trigger price is crossed.
+    /// authenticated caller. Panics `InvalidOrder` if no trigger price is
+    /// crossed.
     fn execute_order(env: Env, caller: Address, position_id: u64);
 
     /// Set the conditional-order trigger prices (owner). `0` clears a
@@ -92,17 +90,9 @@ pub trait PositionManager {
     /// current price.
     fn set_tp_sl(env: Env, position_id: u64, take_profit: i128, stop_loss: i128);
 
-    /// Add executor cash to a position's execution budget (owner, §12.4).
-    fn fund_execution_budget(env: Env, position_id: u64, amount: i128);
-
-    /// Withdraw unused execution budget (owner). Blocked during a cash
-    /// shortfall via the vault's conservation-checked transfer.
-    fn withdraw_execution_budget(env: Env, position_id: u64, amount: i128);
-
     /// Place a limit/stop entry order (owner, §12.4). Storage-only — no
     /// funds move; the owner must grant the vault a token allowance covering
-    /// `collateral + execution_budget` for the keeper to pull at fill.
-    /// Returns the order id.
+    /// `collateral` for the keeper to pull at fill. Returns the order id.
     fn place_entry_order(env: Env, owner: Address, market: Symbol, params: EntryOrderParams)
         -> u64;
 
@@ -193,7 +183,6 @@ pub trait PositionManager {
     /// The guaranteed receiver-funding liability (§8.3).
     fn pending_receiver_funding_total(env: Env) -> i128;
     fn protocol_claimable_total(env: Env) -> i128;
-    fn risk_keeper_reserve_total(env: Env) -> i128;
     /// Complete non-LP claims on the vault's physical cash (§4.2).
     fn non_lp_claims(env: Env) -> i128;
 

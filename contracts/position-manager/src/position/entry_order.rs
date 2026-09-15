@@ -1,9 +1,10 @@
 //! Limit / stop entry orders (doc §12.4).
 //!
 //! Placing an order is only a storage write — no funds move. The owner
-//! separately grants a token allowance to the vault. When the oracle price
-//! crosses the trigger, a keeper calls `execute_entry_order`, which pulls
-//! the collateral via that allowance and opens the position through the
+//! separately grants a token allowance to the vault covering the
+//! collateral. When the oracle price crosses the trigger, a keeper calls
+//! `execute_entry_order`, which pulls the collateral via that allowance
+//! and opens the position through the
 //! exact same core as a market `open_position` (`open::open_from_collateral`),
 //! so the filled position — including `last_increased_time = fill time` — is
 //! indistinguishable from one opened at market.
@@ -12,7 +13,7 @@ use crate::{
     auth::{require_auth, require_initialized, require_market_active, require_not_paused},
     errors::PositionManagerError,
     events::{self, CancelReason},
-    ledger, math,
+    ledger,
     position::open,
     snapshot, storage, validation,
 };
@@ -21,8 +22,8 @@ use shared::{EntryOrder, EntryOrderParams};
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 /// Record a limit/stop entry order. No funds move; the owner must grant the
-/// vault a token allowance covering `collateral + execution_budget` for the
-/// keeper to pull at fill.
+/// vault a token allowance covering `collateral` for the keeper to pull at
+/// fill.
 pub fn place_entry_order(
     env: Env,
     owner: Address,
@@ -32,12 +33,7 @@ pub fn place_entry_order(
     require_initialized(&env);
     require_auth(&owner);
     require_market_active(&env, &market_symbol);
-    open::require_valid_open_input(
-        &env,
-        params.size,
-        params.collateral,
-        params.execution_budget,
-    );
+    open::require_valid_open_input(&env, params.size, params.collateral);
 
     if params.trigger_price <= 0 || params.expires_at <= env.ledger().timestamp() {
         panic_with_error!(&env, PositionManagerError::InvalidOrder);
@@ -72,7 +68,6 @@ pub fn place_entry_order(
         is_long: params.is_long,
         size: params.size,
         collateral: params.collateral,
-        execution_budget: params.execution_budget,
         take_profit: params.take_profit,
         stop_loss: params.stop_loss,
         acceptable_price: params.acceptable_price,
@@ -128,12 +123,10 @@ pub fn execute_entry_order(env: Env, caller: Address, order_id: u64) {
     // Gap protection: revert if the fill would breach the trader's bound.
     validation::check_slippage(&env, order.is_long, true, price, order.acceptable_price);
 
-    // Pull collateral + budget via the allowance. A failure here is
-    // terminal — the order is unfundable, so drop it and commit (no funds
-    // moved, and the pull is only attempted once the trigger is genuinely
-    // crossed).
-    let total = math::add(&env, order.collateral, order.execution_budget);
-    if !ledger::receive_via_allowance(&env, &order.owner, total) {
+    // Pull the collateral via the allowance. A failure here is terminal —
+    // the order is unfundable, so drop it and commit (no funds moved, and
+    // the pull is only attempted once the trigger is genuinely crossed).
+    if !ledger::receive_via_allowance(&env, &order.owner, order.collateral) {
         storage::remove_entry_order(&env, order_id);
         events::emit_order_cancelled(&env, order_id, CancelReason::PullFailed);
         return;
@@ -151,7 +144,6 @@ pub fn execute_entry_order(env: Env, caller: Address, order_id: u64) {
         order.is_long,
         order.size,
         order.collateral,
-        order.execution_budget,
         order.take_profit,
         order.stop_loss,
         price,

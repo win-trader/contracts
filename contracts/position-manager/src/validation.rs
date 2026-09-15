@@ -3,15 +3,13 @@
 
 use soroban_sdk::{panic_with_error, Env};
 
-use shared::constants::{BPS, INDEX_PRECISION};
+use shared::constants::BPS;
 use shared::{GlobalConfig, MarketConfig};
 
 use crate::errors::PositionManagerError;
 
 pub fn validate_global(env: &Env, c: &GlobalConfig) {
-    let split = c.lp_revenue_share_bps as u64
-        + c.risk_keeper_revenue_share_bps as u64
-        + c.referral_fee_share_bps as u64;
+    let split = c.lp_revenue_share_bps as u64 + c.referral_fee_share_bps as u64;
     if c.min_collateral <= 0
         || c.funding_half_life_seconds < 60
         || c.funding_half_life_seconds > 31_536_000
@@ -21,19 +19,8 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
         || c.base_borrow_rate_bps_day > BPS
         || c.max_variable_borrow_bps_day < 0
         || c.max_variable_borrow_bps_day > BPS
-        // Exponent cap keeps `neg_log2 × e` inside u64 for exp2 (§9.2).
-        || c.borrow_exponent_bps == 0
-        || c.borrow_exponent_bps > 100_000
-        || c.min_borrow_index_delta < 0
-        // Upper-bound the floor: a 1.0-per-unit index delta is already an
-        // absurd per-touch charge, and it keeps `risk_units × delta`
-        // (≤ 1e16 × 1e14) inside i128 so `pending_fees` can never
-        // overflow-panic and brick settlement.
-        || c.min_borrow_index_delta > INDEX_PRECISION
         || split > BPS as u64
         || c.hard_cap_factor_limit_bps > BPS as u32
-        || c.max_adl_reward < 0
-        || c.max_insolvent_touch_reward < 0
         || c.max_active_markets == 0
     {
         panic_with_error!(env, PositionManagerError::InvalidConfig);
@@ -41,9 +28,7 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
 }
 
 pub fn validate_market(env: &Env, c: &MarketConfig) {
-    if c.close_fee_low_bps > c.close_fee_high_bps
-        || c.close_fee_high_bps > BPS as u32
-        || c.max_funding_rate_bps_day < 0
+    if c.max_funding_rate_bps_day < 0
         || c.max_funding_rate_bps_day > BPS
         || c.instant_weight_bps > BPS as u32
         || c.market_risk_factor_bps == 0
@@ -55,8 +40,6 @@ pub fn validate_market(env: &Env, c: &MarketConfig) {
         || c.maintenance_margin_bps == 0
         || c.maintenance_margin_bps > c.initial_margin_bps
         || c.initial_margin_bps > BPS as u32
-        || c.liquidation_reward_bps > BPS as u32
-        || c.adl_reward_bps > BPS as u32
         || c.max_long_size_open_interest <= 0
         || c.max_short_size_open_interest <= 0
         || c.max_long_base_exposure <= 0

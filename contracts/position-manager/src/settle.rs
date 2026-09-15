@@ -5,23 +5,21 @@
 //! one `Settlement` context — the function itself reads as the table of
 //! contents. Available value is distributed in the §12.2 waterfall order —
 //! receiver-backed funding, negative price PnL, LP-backed funding, borrow
-//! (all inside `fees::capitalize`), then the closing fee, then the
-//! liquidation reward, then residual trader equity. Every money move is a
+//! (all inside `fees::capitalize`), then residual trader equity. The
+//! closing fee and the keeper reward were deleted with their old schedules
+//! (P1-05, P1-06) and return in Phases 5 and 6. Every money move is a
 //! ledger verb, so the side aggregates and claim totals stay conserved
 //! (§18.2) without a reconciliation step.
 
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
-use shared::constants::BPS;
 use shared::{Market, Position};
 
 use crate::borrow;
 use crate::errors::PositionManagerError;
-use crate::events::FeeSource;
 use crate::fees::{self, CollectedFees};
 use crate::funding;
 use crate::ledger::{self, Ledger};
-use crate::referral;
 use crate::risk;
 use crate::{events, math, storage};
 
@@ -64,7 +62,8 @@ pub struct SettleHeader {
     /// Positive PnL actually credited after the §14 payout factor.
     pub payable_pnl: i128,
     pub fees: CollectedFees,
-    /// §11.1 closing fee collected out of the realized winnings.
+    /// Closing fee collected out of the realized winnings. Zero between
+    /// P1-06 and P5-12.
     pub closing_fee: i128,
 }
 
@@ -84,8 +83,6 @@ pub struct ClosedTail {
     pub collateral_payout: i128,
     /// Accrued obligations the position could not cover.
     pub bad_debt: i128,
-    pub liquidation_reward: i128,
-    pub execution_budget_refunded: i128,
 }
 
 /// One settlement's outcome. The two shapes carry only the fields their
@@ -247,47 +244,11 @@ impl<'a> Settlement<'a> {
         }
     }
 
-    /// §11.1 — the closing fee is a share of realized price winnings:
-    /// `ceil(payable × tier / BPS)`, ranked below every waterfall
-    /// obligation. Losers pay nothing, so there is no shortfall path; the
-    /// tier is validated ≤ BPS, so the fee never exceeds the payable
-    /// profit.
+    /// The closing fee is zero between P1-06 and P5-12. The skew-tiered
+    /// schedule is deleted; §6.9's `max(size component, PnL component)`
+    /// replaces it, and the referral carve-out rides along with it.
     fn charge_closing_fee(&mut self) {
-        if self.payable <= 0 {
-            return;
-        }
-        let bps = fees::tiered_close_fee_bps(
-            self.env,
-            &self.market,
-            self.position.is_long,
-            self.removed.base_removed,
-        );
-        let fee = math::closing_fee(self.env, self.payable, bps);
-        let is_long = self.position.is_long;
-        self.closing_fee = ledger::collect_stored_collateral(
-            self.env,
-            self.ledger,
-            &mut self.position,
-            self.market.side_mut(is_long),
-            fee,
-        );
-        // §11.1 — a referred trader diverts a share of the closing fee to
-        // their referrer, carved from the protocol slice only.
-        let referral = referral::accrue_from_close(
-            self.env,
-            self.ledger,
-            &self.position.owner,
-            self.closing_fee,
-            self.position.id,
-        );
-        fees::split_revenue(
-            self.env,
-            self.ledger,
-            self.closing_fee,
-            referral,
-            FeeSource::Closing,
-            self.position.id,
-        );
+        self.closing_fee = 0;
     }
 
     /// Partial close only: transfer the remaining realized profit to the
@@ -321,31 +282,15 @@ impl<'a> Settlement<'a> {
         risk::release_exposure(self.env, self.ledger, self.removed.risk_removed);
     }
 
-    /// §12.2 full-close waterfall tail: bad debt, then the liquidation
-    /// reward, then residual trader equity, then the execution-budget
-    /// refund; the position leaves storage.
-    fn finalize_close(&mut self, reward_recipient: Option<&Address>) -> ClosedTail {
+    /// §12.2 full-close waterfall tail: bad debt, then residual trader
+    /// equity; the position leaves storage. The keeper reward that used to
+    /// sit between them is deleted with the bps schedule (P1-05) and comes
+    /// back as a fixed cash amount in Phase 6.
+    fn finalize_close(&mut self, _reward_recipient: Option<&Address>) -> ClosedTail {
         let mut tail = ClosedTail::default();
         if self.collected.unpaid > 0 {
             tail.bad_debt = self.collected.unpaid;
             events::emit_bad_debt(self.env, self.position.id, tail.bad_debt);
-        }
-        if let Some(liquidator) = reward_recipient {
-            let is_long = self.position.is_long;
-            let reward = math::mul_div_floor(
-                self.env,
-                self.size_removed,
-                self.market.config.liquidation_reward_bps as i128,
-                BPS,
-            );
-            tail.liquidation_reward = ledger::payout_collateral(
-                self.env,
-                self.ledger,
-                &mut self.position,
-                self.market.side_mut(is_long),
-                liquidator,
-                reward,
-            );
         }
         {
             let is_long = self.position.is_long;
@@ -358,16 +303,6 @@ impl<'a> Settlement<'a> {
                 self.market.side_mut(is_long),
                 &owner,
                 residual,
-            );
-        }
-        if self.position.execution_budget > 0 {
-            tail.execution_budget_refunded = self.position.execution_budget;
-            ledger::payout(
-                self.env,
-                self.ledger,
-                ledger::Bucket::ExecutionBudget,
-                &self.position.owner,
-                tail.execution_budget_refunded,
             );
         }
         storage::remove_position(self.env, self.position.id);

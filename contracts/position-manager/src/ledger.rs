@@ -22,7 +22,7 @@ use shared::{MarketSide, Position, VaultClient};
 use crate::errors::PositionManagerError;
 use crate::{math, storage};
 
-/// §5.1 global state: the five non-LP claim totals, the risk counters, and
+/// §5.1 global state: the non-LP claim totals, the risk counters, and
 /// the global borrow accrual. The receiver-funding liability total is fed
 /// per-market by `funding::accrue` (§8.3).
 #[contracttype]
@@ -31,9 +31,7 @@ pub struct Ledger {
     // -- Non-LP claims (§4.2): each is a label on the one vault balance. --
     pub position_collateral_total: i128,
     pub pending_receiver_funding_total: i128,
-    pub execution_budget_total: i128,
     pub protocol_claimable_total: i128,
-    pub risk_keeper_reserve_total: i128,
     /// §11.1 referral rewards accrued but not yet claimed — the aggregate
     /// backing the per-referrer `ReferralBalance` map (their sum is this
     /// total). Like every claim here it is a label on cash already in the
@@ -56,9 +54,7 @@ impl Ledger {
         Ledger {
             position_collateral_total: 0,
             pending_receiver_funding_total: 0,
-            execution_budget_total: 0,
             protocol_claimable_total: 0,
-            risk_keeper_reserve_total: 0,
             referral_claimable_total: 0,
             total_risk_units: 0,
             open_position_count: 0,
@@ -74,9 +70,7 @@ impl Ledger {
     pub fn non_lp_claims(&self, env: &Env) -> i128 {
         let mut total = self.position_collateral_total;
         total = math::add(env, total, self.pending_receiver_funding_total);
-        total = math::add(env, total, self.execution_budget_total);
         total = math::add(env, total, self.protocol_claimable_total);
-        total = math::add(env, total, self.risk_keeper_reserve_total);
         math::add(env, total, self.referral_claimable_total)
     }
 
@@ -118,9 +112,7 @@ fn vault(env: &Env) -> VaultClient<'_> {
 #[derive(Clone, Copy, Debug)]
 pub enum Bucket {
     ReceiverFunding,
-    ExecutionBudget,
     ProtocolClaimable,
-    KeeperReserve,
     Referral,
 }
 
@@ -128,9 +120,7 @@ impl Ledger {
     fn bucket_mut(&mut self, bucket: Bucket) -> &mut i128 {
         match bucket {
             Bucket::ReceiverFunding => &mut self.pending_receiver_funding_total,
-            Bucket::ExecutionBudget => &mut self.execution_budget_total,
             Bucket::ProtocolClaimable => &mut self.protocol_claimable_total,
-            Bucket::KeeperReserve => &mut self.risk_keeper_reserve_total,
             Bucket::Referral => &mut self.referral_claimable_total,
         }
     }
@@ -174,6 +164,8 @@ impl Ledger {
 
 /// Boundary move out: debit `bucket` and transfer the same cash to
 /// `recipient`, one atomic call (the safety-claim path). No-op at zero.
+/// Callerless between P1-01/P1-05 and P5-16's keeper payment verbs.
+#[allow(dead_code)]
 pub fn payout(env: &Env, ledger: &mut Ledger, bucket: Bucket, recipient: &Address, amount: i128) {
     if amount <= 0 {
         return;
@@ -247,9 +239,8 @@ pub fn payout_collateral_checked(
 }
 
 /// Boundary move in: pull `amount` from `from` into the vault. Labeling
-/// stays with the caller — open pulls collateral and budget in one
-/// transfer, and recapitalize deliberately labels nothing (a pure LP-equity
-/// donation).
+/// stays with the caller — open pulls the collateral, and recapitalize
+/// deliberately labels nothing (a pure LP-equity donation).
 pub fn receive(env: &Env, from: &Address, amount: i128) {
     vault(env).receive_collateral(&env.current_contract_address(), from, &amount);
 }

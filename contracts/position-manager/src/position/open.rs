@@ -8,19 +8,14 @@ use crate::{
 use shared::{MarketConfig, Position, RiskState};
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
-fn require_valid_input(env: &Env, size: i128, collateral: i128, execution_budget: i128) {
-    if size <= 0 || collateral <= 0 || execution_budget < 0 {
+fn require_valid_input(env: &Env, size: i128, collateral: i128) {
+    if size <= 0 || collateral <= 0 {
         panic_with_error!(&env, PositionManagerError::InvalidAmount);
     }
 }
 
-pub(crate) fn require_valid_open_input(
-    env: &Env,
-    size: i128,
-    collateral: i128,
-    execution_budget: i128,
-) {
-    require_valid_input(env, size, collateral, execution_budget);
+pub(crate) fn require_valid_open_input(env: &Env, size: i128, collateral: i128) {
+    require_valid_input(env, size, collateral);
 }
 
 /// §12.3 — the collateral a position of `size` needs to open: at least the
@@ -47,7 +42,6 @@ pub fn open_position(
     is_long: bool,
     size: i128,
     collateral: i128,
-    execution_budget: i128,
     take_profit: i128,
     stop_loss: i128,
     acceptable_price: i128,
@@ -55,7 +49,7 @@ pub fn open_position(
     require_initialized(&env);
     require_auth(&owner);
     require_not_paused(&env);
-    require_valid_input(&env, size, collateral, execution_budget);
+    require_valid_input(&env, size, collateral);
     require_market_active(&env, &market_symbol);
 
     let mut market = storage::get_market(&env, &market_symbol);
@@ -71,11 +65,10 @@ pub fn open_position(
     check_slippage(&env, is_long, true, price, acceptable_price);
     validate_orders(&env, is_long, take_profit, stop_loss, price);
 
-    // Market open: the owner is present, so pull collateral + budget from
-    // them directly. The fill path pulls via allowance instead, then joins
-    // the shared core below.
-    let total_transfer = math::add(&env, collateral, execution_budget);
-    ledger::receive(&env, &owner, total_transfer);
+    // Market open: the owner is present, so pull the collateral from them
+    // directly. The fill path pulls via allowance instead, then joins the
+    // shared core below.
+    ledger::receive(&env, &owner, collateral);
 
     open_from_collateral(
         env,
@@ -86,7 +79,6 @@ pub fn open_position(
         is_long,
         size,
         collateral,
-        execution_budget,
         take_profit,
         stop_loss,
         price,
@@ -111,14 +103,11 @@ pub(crate) fn open_from_collateral(
     is_long: bool,
     size: i128,
     collateral: i128,
-    execution_budget: i128,
     take_profit: i128,
     stop_loss: i128,
     price: i128,
     now: u64,
 ) -> u64 {
-    ledger.credit(&env, ledger::Bucket::ExecutionBudget, execution_budget);
-
     let position_id = storage::get_next_position_id(&env);
     storage::update_position_id(&env);
 
@@ -137,7 +126,6 @@ pub(crate) fn open_from_collateral(
         funding_paid_to_receivers_debt: 0,
         funding_paid_to_lps_debt: 0,
         funding_received_debt: 0,
-        execution_budget,
         last_increased_time: now,
         take_profit,
         stop_loss,
