@@ -7,7 +7,10 @@
 //! position via `bump_position`.
 
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
-use shared::{EntryOrder, GlobalConfig, Market, Position};
+use shared::{
+    EntryOrder, GlobalConfig, Market, PendingAction, PendingGlobalConfig, PendingMarketConfig,
+    Position,
+};
 use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol, Vec};
 
 use crate::errors::PositionManagerError;
@@ -31,6 +34,12 @@ pub enum StorageKey {
     MarketDisabled(Symbol),
     EntryOrder(u64),
     NextEntryOrderId,
+    /// §5.6 pending trader action. Persistent: it owns escrowed cash.
+    PendingAction(u64),
+    NextActionId,
+    /// §12.3 configuration proposals waiting out the timelock.
+    PendingGlobalConfig,
+    PendingMarketConfig(Symbol),
     /// Referral code → owning referrer address (owner immutable once set).
     ReferralCode(Symbol),
     /// Trader → their referrer address (freely re-set by the trader).
@@ -214,11 +223,21 @@ pub fn save_active_markets(env: &Env, markets: &Vec<Symbol>) {
 
 // LEDGER
 
+/// §12.4 — every operation loads the ledger, so the migration guard lives
+/// here rather than repeated at every entry point. Until a migration has
+/// advanced `state_version`, every path rejects: a half-migrated vault whose
+/// aggregates no longer equal the sum of their records violates §5.11, and
+/// there is no safe way to keep trading through that.
 pub fn get_ledger(env: &Env) -> Ledger {
-    env.storage()
+    let ledger: Ledger = env
+        .storage()
         .instance()
         .get(&StorageKey::Ledger)
-        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized));
+    if ledger.state_version != crate::ledger::STATE_VERSION {
+        panic_with_error!(env, PositionManagerError::StateVersionMismatch);
+    }
+    ledger
 }
 
 pub fn save_ledger(env: &Env, ledger: &Ledger) {
@@ -310,4 +329,137 @@ pub fn save_next_position_id(env: &Env, id: u64) {
 
 pub fn update_position_id(env: &Env) {
     save_next_position_id(env, get_next_position_id(env) + 1);
+}
+
+// PENDING ACTION (§5.6)
+//
+// The record and its verbs land here with the type; Phase 6 moves the
+// lifecycle onto them. Until then nothing calls these.
+
+#[allow(dead_code)]
+pub fn try_get_pending_action(env: &Env, id: u64) -> Option<PendingAction> {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::PendingAction(id))
+}
+
+#[allow(dead_code)]
+pub fn get_pending_action(env: &Env, id: u64) -> PendingAction {
+    try_get_pending_action(env, id)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::ActionNotFound))
+}
+
+#[allow(dead_code)]
+pub fn save_pending_action(env: &Env, action: &PendingAction) {
+    let key = StorageKey::PendingAction(action.action_id);
+    env.storage().persistent().set(&key, action);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+}
+
+/// §8.13 — removal consumes the ID permanently. A later call with it fails
+/// as nonexistent and cannot replay the transfer or the keeper payment.
+#[allow(dead_code)]
+pub fn remove_pending_action(env: &Env, id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&StorageKey::PendingAction(id));
+}
+
+#[allow(dead_code)]
+pub fn get_next_action_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::NextActionId)
+        .unwrap_or(1)
+}
+
+/// Reserve the next action ID. Monotonic and never reused (§5.6).
+#[allow(dead_code)]
+pub fn take_next_action_id(env: &Env) -> u64 {
+    let id = get_next_action_id(env);
+    env.storage()
+        .instance()
+        .set(&StorageKey::NextActionId, &(id + 1));
+    id
+}
+
+// CONFIGURATION PROPOSALS (§12.3)
+
+pub fn try_get_pending_global_config(env: &Env) -> Option<PendingGlobalConfig> {
+    env.storage()
+        .instance()
+        .get(&StorageKey::PendingGlobalConfig)
+}
+
+pub fn save_pending_global_config(env: &Env, pending: &PendingGlobalConfig) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::PendingGlobalConfig, pending);
+}
+
+pub fn clear_pending_global_config(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&StorageKey::PendingGlobalConfig);
+}
+
+#[allow(dead_code)]
+pub fn try_get_pending_market_config(env: &Env, market: &Symbol) -> Option<PendingMarketConfig> {
+    env.storage()
+        .instance()
+        .get(&StorageKey::PendingMarketConfig(market.clone()))
+}
+
+#[allow(dead_code)]
+pub fn save_pending_market_config(env: &Env, market: &Symbol, pending: &PendingMarketConfig) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::PendingMarketConfig(market.clone()), pending);
+}
+
+#[allow(dead_code)]
+pub fn clear_pending_market_config(env: &Env, market: &Symbol) {
+    env.storage()
+        .instance()
+        .remove(&StorageKey::PendingMarketConfig(market.clone()));
+}
+
+// PERMISSIONLESS TTL EXTENSION (§12.4)
+//
+// Every persistent entry must be extendable by anyone: a position whose
+// owner has gone quiet must still be liquidatable, and a referral balance
+// must survive its owner's inactivity. Letting an entry expire destroys a
+// claim, which no rule in §9 permits.
+
+fn extend(env: &Env, key: &StorageKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, SHARED_THRESHOLD, SHARED_BUMP);
+}
+
+#[allow(dead_code)]
+pub fn bump_pending_action(env: &Env, id: u64) {
+    extend(env, &StorageKey::PendingAction(id));
+}
+
+#[allow(dead_code)]
+pub fn bump_market(env: &Env, market: &Symbol) {
+    extend(env, &StorageKey::Market(market.clone()));
+}
+
+#[allow(dead_code)]
+pub fn bump_referral_code(env: &Env, code: &Symbol) {
+    extend(env, &StorageKey::ReferralCode(code.clone()));
+}
+
+#[allow(dead_code)]
+pub fn bump_referrer(env: &Env, trader: &Address) {
+    extend(env, &StorageKey::Referrer(trader.clone()));
+}
+
+#[allow(dead_code)]
+pub fn bump_referral_balance(env: &Env, referrer: &Address) {
+    extend(env, &StorageKey::ReferralBalance(referrer.clone()));
 }

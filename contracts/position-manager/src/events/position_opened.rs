@@ -28,8 +28,8 @@ pub fn emit_opened(env: &Env, position: &Position, price: i128) {
         base_exposure: position.base_exposure,
         stored_collateral: position.stored_collateral,
         price,
-        take_profit: position.take_profit,
-        stop_loss: position.stop_loss,
+        take_profit: position.take_profit.price(),
+        stop_loss: position.stop_loss.price(),
     }
     .publish(env);
 }

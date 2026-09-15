@@ -19,8 +19,8 @@ pub fn emit_tp_sl_updated(env: &Env, position: &Position) {
         position_id: position.id,
         owner: position.owner.clone(),
         market: position.market.clone(),
-        take_profit: position.take_profit,
-        stop_loss: position.stop_loss,
+        take_profit: position.take_profit.price(),
+        stop_loss: position.stop_loss.price(),
     }
     .publish(env);
 }

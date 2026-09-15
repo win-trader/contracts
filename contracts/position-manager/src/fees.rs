@@ -55,7 +55,7 @@ pub fn split_revenue(
         return;
     }
     let config = storage::get_global_config(env);
-    let lp = math::mul_div_floor(env, collected, config.lp_revenue_share_bps as i128, BPS);
+    let lp = math::mul_div_floor(env, collected, config.fee_lp_revenue_share_bps as i128, BPS);
     let protocol = math::sub(env, math::sub(env, collected, lp), referral);
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
     events::emit_revenue_split(env, position_id, source, collected, lp, protocol, referral);

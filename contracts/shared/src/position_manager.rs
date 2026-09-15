@@ -137,14 +137,26 @@ pub trait PositionManager {
     /// now (KEEPER, §10). Fee accrual is lazy; this bounds staleness.
     fn update_indices(env: Env, caller: Address, market: Symbol);
 
-    /// Replace the global configuration (ADMIN). Checkpoints first so the
-    /// old parameters price all past time (§10.3).
-    fn set_global_config(env: Env, caller: Address, config: GlobalConfig);
+    /// Propose a global configuration change (configuration authority,
+    /// §12.3). Validated immediately and stored with
+    /// `effective_at = now + config_timelock_seconds`. A purely
+    /// conservative change — lowering `risk_capacity_limit_bps` with
+    /// nothing else altered — is exempt and applies at once.
+    fn propose_global_config(env: Env, caller: Address, config: GlobalConfig);
 
-    /// Create a market or replace an existing market's configuration
-    /// (ADMIN). Bounded by `max_active_markets` and the global hard-cap
-    /// factor limit.
-    fn set_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
+    /// Apply a global proposal whose timelock has elapsed. Permissionless:
+    /// the authorization happened at proposal and the delay is the
+    /// protection. Checkpoints under the old values before storing (§10.3.3).
+    fn apply_global_config(env: Env);
+
+    /// Register a market, or propose a change to an existing one
+    /// (configuration authority, §12.3). Registration and conservative
+    /// changes apply at once; everything else waits out the timelock.
+    /// Bounded by `max_active_markets` and the global hard-cap factor limit.
+    fn propose_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
+
+    /// Apply a market proposal whose timelock has elapsed. Permissionless.
+    fn apply_market_config(env: Env, market: Symbol);
 
     /// Block new opens/increases on one market (PAUSER). Existing positions
     /// keep accruing and can always decrease, close, or be liquidated.
@@ -186,22 +198,37 @@ pub trait PositionManager {
     /// Complete non-LP claims on the vault's physical cash (§4.2).
     fn non_lp_claims(env: Env) -> i128;
 
-    /// Pay out protocol revenue (ADMIN). Conservation-checked against the
-    /// remaining claims, so it is blocked during a cash shortfall.
+    /// Pay out protocol revenue (`protocol_recipient`, §12.3).
+    /// Conservation-checked against the remaining claims, so it is blocked
+    /// during a cash shortfall.
     fn claim_protocol(env: Env, caller: Address, recipient: Address, amount: i128);
 
     /// Transfer cash into the vault without minting shares (§15.2). Open to
     /// anyone; the cure for a cash shortfall.
     fn recapitalize(env: Env, contributor: Address, amount: i128);
 
-    /// Operational pause: blocks opens and increases. Accrual clocks keep
-    /// running (§10.3) and closes/liquidations stay available.
+    /// §12.2 operational pause: blocks every path that adds exposure and
+    /// none that removes it. Accrual clocks keep running (§12.2) and
+    /// closes, liquidations, and ADL stay available. `pause_authority`.
     fn pause(env: Env, caller: Address);
+    /// Clear the pause. A **separate** authority from `pause`: pausing is a
+    /// fast safety action, unpausing re-admits risk (§12.3).
     fn unpause(env: Env, caller: Address);
 
     fn propose_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>);
     fn cancel_upgrade(env: Env, caller: Address);
 
+    // §12.4 — every persistent entry is extendable permissionlessly. A
+    // position whose owner has gone quiet must still be liquidatable, and a
+    // referral balance must survive its owner's inactivity; letting either
+    // expire destroys a claim, which no rule in §9 permits.
+
     /// Re-extend a position entry's storage TTL. Open to anyone.
     fn bump_position(env: Env, position_id: u64);
+    /// Re-extend a pending action's storage TTL. Open to anyone.
+    fn bump_pending_action(env: Env, action_id: u64);
+    /// Re-extend a market's storage TTL. Open to anyone.
+    fn bump_market_entry(env: Env, market: Symbol);
+    /// Re-extend referral entries' storage TTL. Open to anyone.
+    fn bump_referral_entry(env: Env, code: Symbol, trader: Address, referrer: Address);
 }

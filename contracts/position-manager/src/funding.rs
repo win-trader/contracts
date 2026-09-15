@@ -20,7 +20,7 @@
 use soroban_sdk::{panic_with_error, Env};
 
 use shared::constants::{BPS, INDEX_PRECISION, SECONDS_PER_DAY};
-use shared::{Market, PayerSide, Position};
+use shared::{Market, PayerSide, Position, RemainderGroup};
 
 use crate::errors::PositionManagerError;
 use crate::ledger::{Bucket, Ledger};
@@ -85,43 +85,51 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
         };
         let weight_lp = math::sub(env, window.weight, weight_receiver);
 
+        // §5.4 — every carry below belongs to *this* payer direction's
+        // stream. A long-payer carry and a short-payer carry are never
+        // reused by one another: they are different funding streams, and
+        // crossing them moves sub-unit value between directions.
+        let carries = market.payer_remainders(long_pays).clone();
+
         let denominator = BPS * SECONDS_PER_DAY as i128;
         let (receiver_delta, receiver_rem) = math::carried_div(
             env,
             &math::widen(env, weight_receiver),
             denominator,
-            market.receiver_payer_remainder,
+            carries.receiver_payer_remainder,
         );
         let (lp_delta, lp_rem) = math::carried_div(
             env,
             &math::widen(env, weight_lp),
             denominator,
-            market.lp_payer_remainder,
+            carries.lp_payer_remainder,
         );
 
         // The liability and the receiver credit both derive from the exact
-        // amount the payer index will collect (§8.3), so a credit can never
+        // amount the payer index will collect (§5.12), so a credit can never
         // outrun its backing accrual. The product is formed at 256 bits: it
         // is a product on the way to a division, and both factors grow with
         // the book (§2.1.1).
         let receiver_cash = math::widen_mul(env, payer_size, receiver_delta);
-        let (liability_delta, pending_rem) = math::carried_div(
+        let (liability_delta, liability_rem) = math::carried_div(
             env,
             &receiver_cash,
             INDEX_PRECISION,
-            market.pending_remainder,
+            carries.receiver_liability_remainder,
         );
         ledger.credit(env, Bucket::ReceiverFunding, liability_delta);
-        market.pending_remainder = pending_rem;
+        // §5.12 — the market's own share of the global liability total.
+        market.pending_receiver_funding =
+            math::add(env, market.pending_receiver_funding, liability_delta);
         let (credit_delta, credit_rem) = if receiver_size > 0 {
             math::carried_div(
                 env,
                 &receiver_cash,
                 receiver_size,
-                market.receiver_index_remainder,
+                carries.distribution_remainder,
             )
         } else {
-            (0, market.receiver_index_remainder)
+            (0, carries.distribution_remainder)
         };
 
         if long_pays {
@@ -135,9 +143,11 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
             market.lp_backed_index_short = math::add(env, market.lp_backed_index_short, lp_delta);
             market.receiver_index_long = math::add(env, market.receiver_index_long, credit_delta);
         }
-        market.receiver_payer_remainder = receiver_rem;
-        market.lp_payer_remainder = lp_rem;
-        market.receiver_index_remainder = credit_rem;
+        let carries = market.payer_remainders_mut(long_pays);
+        carries.receiver_payer_remainder = receiver_rem;
+        carries.lp_payer_remainder = lp_rem;
+        carries.receiver_liability_remainder = liability_rem;
+        carries.distribution_remainder = credit_rem;
     }
     market.skew_ema = window.ema_after;
     set_display(env, market, window.integral_now);
@@ -198,10 +208,8 @@ pub struct PendingFees {
 pub fn refresh_display(env: &Env, market: &mut Market) {
     if market.long.size_open_interest == 0 && market.short.size_open_interest == 0 {
         market.skew_ema = 0;
-        market.receiver_payer_remainder = 0;
-        market.lp_payer_remainder = 0;
-        market.receiver_index_remainder = 0;
-        market.pending_remainder = 0;
+        market.long_payer_remainders = RemainderGroup::default();
+        market.short_payer_remainders = RemainderGroup::default();
         market.current_payer_side = PayerSide::None;
         market.current_payer_rate = 0;
         return;

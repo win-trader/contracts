@@ -24,10 +24,10 @@ fn require_valid_input(
 fn require_min_position_age(
     env: &Env,
     now: u64,
-    last_increased_time: u64,
+    last_size_increase_at: u64,
     min_position_lifetime: u64,
 ) {
-    if now < last_increased_time.saturating_add(min_position_lifetime) {
+    if now < last_size_increase_at.saturating_add(min_position_lifetime) {
         panic_with_error!(&env, PositionManagerError::TooEarly);
     }
 }
@@ -53,7 +53,7 @@ pub fn decrease_position(
     require_min_position_age(
         &env,
         now,
-        position.last_increased_time,
+        position.last_size_increase_at,
         config.min_position_lifetime,
     );
 

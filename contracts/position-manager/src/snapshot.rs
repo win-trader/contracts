@@ -47,7 +47,7 @@ pub fn round_price(env: &Env, round: &OracleRound, market: &Symbol, index: u32) 
 /// With `mutate_risk` set (LP settlement path, §13.5/§13.6 step 3) each
 /// market's risk states are transitioned and persisted; otherwise the states
 /// are evaluated hypothetically and only reported. The reported
-/// `lp_blocked_side_count` is always the fresh evaluation, not the stored
+/// `restricted_side_count` is always the fresh evaluation, not the stored
 /// counter.
 pub fn build_snapshot(
     env: &Env,
@@ -64,7 +64,7 @@ pub fn build_snapshot(
     let shortfall = core::cmp::max(math::sub(env, claims, physical), 0);
     let equity = ledger.cash_lp_equity(env, physical);
     let mut aggregate_pnl_numerator = 0i128;
-    let mut blocked_side_count = 0u32;
+    let mut restricted_side_count = 0u32;
 
     let mut i = 0u32;
     while i < markets.len() {
@@ -104,7 +104,7 @@ pub fn build_snapshot(
             risk::apply(env, ledger, &symbol, &mut market, &assessment);
             storage::save_market(env, &symbol, &market);
         }
-        blocked_side_count += assessment.blocked_sides();
+        restricted_side_count += assessment.restricted_sides();
         i += 1;
     }
 
@@ -144,6 +144,6 @@ pub fn build_snapshot(
         vault_nav: nav,
         total_risk_units: ledger.total_risk_units,
         open_position_count: ledger.open_position_count,
-        lp_blocked_side_count: blocked_side_count,
+        restricted_side_count,
     }
 }

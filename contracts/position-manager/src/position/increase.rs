@@ -77,7 +77,7 @@ pub fn increase_position(
     position.base_exposure = math::add(&env, position.base_exposure, base);
     position.risk_units = math::add(&env, position.risk_units, risk_units);
     if size_added > 0 {
-        position.last_increased_time = now;
+        position.last_size_increase_at = now;
     }
     {
         let side = market.side_mut(position.is_long);

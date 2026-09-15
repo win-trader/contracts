@@ -264,7 +264,7 @@ against the final layout.
 
 ### 3a. Global configuration (§5.1, §10.1, §10.3.1, §10.4)
 
-- [ ] **P3-01** Rewrite `shared::GlobalConfig`. Keep: `min_collateral`,
+- [x] **P3-01** Rewrite `shared::GlobalConfig`. Keep: `min_collateral`,
       `min_position_lifetime`, `funding_half_life_seconds`,
       `risk_capacity_limit_bps`, `base_borrow_rate_bps_day`,
       `max_variable_borrow_bps_day`, `referral_fee_share_bps`,
@@ -274,27 +274,34 @@ against the final layout.
       `max_market_order_lifetime_seconds`, `min_borrow_fee_seconds`,
       `borrow_lp_revenue_share_bps`, `config_timelock_seconds`,
       `hard_cap_relatch_band_bps`.
-- [ ] **P3-02** New `shared::KeeperRewards` struct with the eleven independent
+- [x] **P3-02** New `shared::KeeperRewards` struct with the eleven independent
       fields of §5.10: `open`, `limit_order`, `increase`, `decrease`, `close`,
       `tp`, `sl`, `expiry`, `liquidation`, `adl`, `lp_resolve`. Independent
       fields even though every initial value is `2_500_000`. Watch the Soroban
       30-character UDT field-name limit.
-- [ ] **P3-03** Fold `LpConfig` (`max_withdraw_utilization_bps`,
+- [x] **P3-03** Fold `LpConfig` (`max_withdraw_utilization_bps`,
       `min_deposit_nav_factor_bps`, `lp_request_delay_seconds`) into the global
       config surface per §5.1, or keep it a separate struct and validate it in
       the same pass — decide once, note the decision here, do not split the
       validation.
-- [ ] **P3-04** Deployment defaults from §10.4, as named constants in `shared`,
+      *Decided: separate struct, owned by the vault.* The vault is the
+      contract that enforces every one of the three bounds, so folding them
+      into `GlobalConfig` would move the values across a contract boundary
+      away from their only reader. All three §10.3.1 LP rules are validated
+      together in `vault::validate_config`; the validation is not split.
+      `lp_request_delay` is renamed to `lp_request_delay_seconds` to match
+      §5.1.
+- [x] **P3-04** Deployment defaults from §10.4, as named constants in `shared`,
       not scattered literals. Include the three `lp_request_delay_seconds`
       profiles (local `60`, test `3_600`, production `86_400`).
 
 ### 3b. Market configuration (§5.3, §10.2, §10.3.2)
 
-- [ ] **P3-05** Rewrite `shared::MarketConfig`. **Add**: `open_fee_bps`,
+- [x] **P3-05** Rewrite `shared::MarketConfig`. **Add**: `open_fee_bps`,
       `close_size_fee_bps`, `close_pnl_fee_bps`,
       `order_execution_delay_seconds`. Keep the rest. Removed fields are
       already gone from Phase 1.
-- [ ] **P3-06** Enforce §5.3's rule that `market_risk_factor_bps` may change
+- [x] **P3-06** Enforce §5.3's rule that `market_risk_factor_bps` may change
       **only while both sides have zero open interest and zero risk units** —
       otherwise every live position's canonical risk units would diverge from
       the value derived from its size, and there is no bounded way to rewrite
@@ -302,31 +309,40 @@ against the final layout.
 
 ### 3c. Records
 
-- [ ] **P3-07** `shared::Position` (§5.5): **add** `opened_at`,
+      *Encoding note (P3-07/P3-08).* `take_profit` / `stop_loss` are a
+      two-variant `Trigger` enum, not `Option<TriggerInstruction>`.
+      `#[contracttype]` generates only a fallible `TryFrom<&T> for ScVal`,
+      while `Option<T>`'s XDR conversion needs an infallible `Into<ScVal>`
+      for its inner type — so `Option<UserStruct>` compiles for wasm and
+      fails as soon as `testutils` is on. Same information, and the trap is
+      closed in the type. `Option<u64>` for `pending_mutation_action_id` is
+      fine and stays.
+
+- [x] **P3-07** `shared::Position` (§5.5): **add** `opened_at`,
       `stored_minimum_borrow_fee`, `pending_mutation_action_id: Option<u64>`.
       **Rename** `last_increased_time` → `last_size_increase_at`. **Change**
       `take_profit` / `stop_loss` from bare `i128` trigger prices to
       `Option<TriggerInstruction>`. Confirm there is still no stored entry
       price, cached PnL, or cached health value.
-- [ ] **P3-08** New `shared::TriggerInstruction { trigger_price,
+- [x] **P3-08** New `shared::TriggerInstruction { trigger_price,
       acceptable_price, committed_at, execute_after, commit_observed_at }`
       (§5.5).
-- [ ] **P3-09** `shared::MarketSide` (§5.4): **add** `hard_cap_payout_factor`
+- [x] **P3-09** `shared::MarketSide` (§5.4): **add** `hard_cap_payout_factor`
       (initialized to `INDEX_PRECISION`) and `hard_cap_reference_pnl`.
-- [ ] **P3-10** `shared::Market` (§5.4): replace the four flat remainders with
+- [x] **P3-10** `shared::Market` (§5.4): replace the four flat remainders with
       **two remainder groups**, `long_payer_remainders` and
       `short_payer_remainders`, each holding `receiver_payer_remainder`,
       `lp_payer_remainder`, `receiver_liability_remainder`,
       `receiver_distribution_remainder`. Long-payer and short-payer carries are
       never reused by one another. **Add** `pending_receiver_funding` (this
       market's share of the global liability total).
-- [ ] **P3-11** `Ledger` (§5.2): **rename** `lp_blocked_side_count` →
+- [x] **P3-11** `Ledger` (§5.2): **rename** `lp_blocked_side_count` →
       `restricted_market_side_count`. **Add** `action_escrow_total`. Confirm
       the five claim totals are exactly §2.5's five:
       `position_collateral_total`, `pending_receiver_funding_total`,
       `action_escrow_total`, `protocol_claimable_total`,
       `referral_claimable_total`.
-- [ ] **P3-12** New `PendingAction` record (§5.6): common header
+- [x] **P3-12** New `PendingAction` record (§5.6): common header
       (`action_id`, `owner`, `market_id`, `kind`, `created_at`,
       `execute_after`, `commit_observed_at`, `escrowed_collateral`) plus a
       `kind`-selected immutable payload — `MarketOpen`, `LimitOpen`,
@@ -335,10 +351,10 @@ against the final layout.
       input; settlement may read current vault state but never replaces a
       committed size, trigger, price bound, direction, or collateral amount
       with new caller input.
-- [ ] **P3-13** Add `Ledger.state_version` and the §12.4 guard
+- [x] **P3-13** Add `Ledger.state_version` and the §12.4 guard
       (`require ledger.state_version == STATE_VERSION` on every operation). No
       migration routine is written — see §0.
-- [ ] **P3-14** Storage classes per §12.4: instance for ledger/config/
+- [x] **P3-14** Storage classes per §12.4: instance for ledger/config/
       authorities, persistent for position / pending action / LP request /
       market / referral. Every persistent entry must be extendable
       permissionlessly — `bump_position` exists; add the equivalent for pending
@@ -346,7 +362,7 @@ against the final layout.
 
 ### 3d. Validation and governance
 
-- [ ] **P3-15** Rewrite `validation.rs` to §10.3.1 and §10.3.2 in full,
+- [x] **P3-15** Rewrite `validation.rs` to §10.3.1 and §10.3.2 in full,
       including the three bounds that exist for **arithmetic** rather than
       economic reasons: `min_borrow_fee_seconds <= 86_400`,
       `min_position_lifetime <= 86_400`, and the §10.2.3 size/base ceilings.
@@ -355,21 +371,27 @@ against the final layout.
       load-bearing and not cosmetic), `fee_lp_revenue_share_bps +
       referral_fee_share_bps <= BPS`, the four-way PnL-factor ordering, and
       `60 <= max_market_order_lifetime_seconds <= max_order_lifetime_seconds`.
-- [ ] **P3-16** Two-phase config change (§12.3): `propose_configuration` stores
+- [x] **P3-16** Two-phase config change (§12.3): `propose_configuration` stores
       the validated proposal with `effective_at = now + config_timelock_seconds`;
       `apply_configuration` checkpoints every affected accumulator **under the
       old value**, then stores. Reuse the existing `TimelockedUpgradeable`
       plumbing shape rather than inventing a second timelock.
-- [ ] **P3-17** Timelock exemptions — and **only** these two: setting `paused`,
+- [x] **P3-17** Timelock exemptions — and **only** these two: setting `paused`,
       and any change validated as moving a bound in the more conservative
       direction (lowering an exposure ceiling, lowering
       `risk_capacity_limit_bps`, raising a margin requirement). Exempt changes
       still checkpoint under the old value and still emit.
-- [ ] **P3-18** Split the authorities (§12.3): `configuration_authority`,
+- [x] **P3-18** Split the authorities (§12.3): `configuration_authority`,
       `pause_authority` (may set but **not clear** `paused`),
       `unpause_authority`, `oracle_authority`, `protocol_recipient`. Today
       `pause` and `unpause` share `ROLE_PAUSER` — split them, because pausing
       is a fast safety action and unpausing re-admits risk.
+      *Landed as roles, not stored addresses.* Authorities are granted
+      through `config-manager`, so "distinct keys" is achieved by granting
+      distinct roles. `ROLE_UNPAUSER` and `ROLE_PROTOCOL` are new;
+      `configuration_authority` maps to `ROLE_ADMIN`. `oracle_authority` has
+      no operation in the position manager — the router address is set once
+      at construction and never changed — so it lands with Phase 7.
 
 ---
 

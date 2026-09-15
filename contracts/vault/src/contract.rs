@@ -47,11 +47,14 @@ fn require_router(env: &Env, caller: &Address) {
     shared::bump_instance_ttl(env);
 }
 
+/// §10.3.1's three LP rules, checked together. The delay's upper bound is
+/// this implementation's own: an LP request may not outlive the storage
+/// entry that holds it.
 fn validate_config(env: &Env, config: &LpConfig) {
     if config.max_withdraw_utilization_bps > BPS as u32
         || config.min_deposit_nav_factor_bps > BPS as u32
-        || config.lp_request_delay == 0
-        || config.lp_request_delay > shared::constants::SHARED_BUMP_SECONDS
+        || config.lp_request_delay_seconds == 0
+        || config.lp_request_delay_seconds > shared::constants::SHARED_BUMP_SECONDS
     {
         panic_with_error!(env, VaultError::InvalidConfig);
     }
@@ -90,7 +93,7 @@ fn snapshot(env: &Env, round: &OracleRound, mutating: bool) -> AccountingSnapsho
 }
 
 fn settlement_blocked(s: &AccountingSnapshot) -> bool {
-    s.cash_shortfall > 0 || s.lp_blocked_side_count > 0
+    s.cash_shortfall > 0 || s.restricted_side_count > 0
 }
 
 #[contractimpl(contracttrait)]

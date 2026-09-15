@@ -85,7 +85,7 @@ pub(crate) fn request_deposit(env: &Env, owner: Address, assets: i128) -> u64 {
     let now = env.ledger().timestamp();
     let delay = VaultClient::new(env, &storage::vault(env))
         .get_lp_config()
-        .lp_request_delay;
+        .lp_request_delay_seconds;
     let request = LpRequest {
         id,
         owner,
@@ -125,7 +125,7 @@ pub(crate) fn request_withdrawal(env: &Env, owner: Address, shares: i128) -> u64
     let now = env.ledger().timestamp();
     let delay = VaultClient::new(env, &storage::vault(env))
         .get_lp_config()
-        .lp_request_delay;
+        .lp_request_delay_seconds;
     let request = LpRequest {
         id,
         owner,

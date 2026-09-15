@@ -66,10 +66,21 @@ pub const SHARE_SCALE: i128 = 1_000_000;
 pub const ROLE_ADMIN: &str = "ADMIN";
 /// Authorized to push WASM upgrades to protocol contracts.
 pub const ROLE_UPGRADER: &str = "UPGRADER";
-/// Authorized to pause/unpause Vault and PositionManager.
+/// §12.3 `pause_authority` — may **set** `paused`, not clear it. Pausing is
+/// a safety action whose worst case is lost volume, so it sits behind a fast
+/// key that can act without ceremony.
 pub const ROLE_PAUSER: &str = "PAUSER";
-/// Whitelisted keeper bot network for liquidations, ADL, index updates.
+/// §12.3 `unpause_authority` — may clear `paused`. Unpausing re-admits risk,
+/// so it belongs with the slower authority alongside configuration.
+pub const ROLE_UNPAUSER: &str = "UNPAUSER";
+/// Whitelisted keeper bot network. §7.0 removes the allowlist from ADL and
+/// index checkpoints — both become permissionless — so this now covers only
+/// operations the specification still keeps permissioned.
 pub const ROLE_KEEPER: &str = "KEEPER";
+/// §12.3 `protocol_recipient` — may claim accumulated protocol revenue.
+/// Separate from the configuration authority: claiming moves money out,
+/// configuring does not.
+pub const ROLE_PROTOCOL: &str = "PROTOCOL";
 /// Default upgrade timelock: 24h. ConfigManager admin can raise but not lower
 /// below `MIN_UPGRADE_TIMELOCK`.
 pub const DEFAULT_UPGRADE_TIMELOCK: u64 = 86_400;

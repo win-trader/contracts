@@ -191,14 +191,14 @@ pub fn risk_state_for(
     }
 }
 
-/// §14 — keep `lp_blocked_side_count` equal to the number of restricted
-/// sides (§18.8) across a state transition.
-pub fn update_blocked_count(env: &Env, ledger: &mut Ledger, old: RiskState, new: RiskState) {
+/// §5.11 — keep `restricted_market_side_count` equal to the number of
+/// restricted sides across a state transition.
+pub fn update_restricted_count(env: &Env, ledger: &mut Ledger, old: RiskState, new: RiskState) {
     if old == RiskState::Normal && new != RiskState::Normal {
-        ledger.lp_blocked_side_count += 1;
+        ledger.restricted_market_side_count += 1;
     } else if old != RiskState::Normal && new == RiskState::Normal {
-        ledger.lp_blocked_side_count = ledger
-            .lp_blocked_side_count
+        ledger.restricted_market_side_count = ledger
+            .restricted_market_side_count
             .checked_sub(1)
             .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::InvariantViolation));
     }
@@ -215,7 +215,7 @@ pub struct RiskAssessment {
 
 impl RiskAssessment {
     /// The number of restricted sides under this assessment.
-    pub fn blocked_sides(&self) -> u32 {
+    pub fn restricted_sides(&self) -> u32 {
         (self.long != RiskState::Normal) as u32 + (self.short != RiskState::Normal) as u32
     }
 }
@@ -270,8 +270,8 @@ pub fn apply(
     market: &mut Market,
     assessment: &RiskAssessment,
 ) {
-    update_blocked_count(env, ledger, market.long.risk_state, assessment.long);
-    update_blocked_count(env, ledger, market.short.risk_state, assessment.short);
+    update_restricted_count(env, ledger, market.long.risk_state, assessment.long);
+    update_restricted_count(env, ledger, market.short.risk_state, assessment.short);
     if assessment.long != market.long.risk_state {
         events::emit_risk_state_changed(env, symbol, true, assessment.long);
     }

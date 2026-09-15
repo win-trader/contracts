@@ -13,12 +13,14 @@ pub fn execute_order(env: Env, caller: Address, position_id: u64) {
     let position = storage::get_position(&env, position_id);
     let price = snapshot::authenticated_price(&env, &position.market);
 
+    let take_profit = position.take_profit.instruction().map(|t| t.trigger_price);
+    let stop_loss = position.stop_loss.instruction().map(|t| t.trigger_price);
+    let crossed_above = |trigger: Option<i128>| matches!(trigger, Some(p) if price >= p);
+    let crossed_below = |trigger: Option<i128>| matches!(trigger, Some(p) if price <= p);
     let triggered = if position.is_long {
-        (position.take_profit > 0 && price >= position.take_profit)
-            || (position.stop_loss > 0 && price <= position.stop_loss)
+        crossed_above(take_profit) || crossed_below(stop_loss)
     } else {
-        (position.take_profit > 0 && price <= position.take_profit)
-            || (position.stop_loss > 0 && price >= position.stop_loss)
+        crossed_below(take_profit) || crossed_above(stop_loss)
     };
     if !triggered {
         panic_with_error!(&env, PositionManagerError::InvalidOrder);

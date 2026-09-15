@@ -10,6 +10,7 @@
 mod adl_reward_paid;
 mod bad_debt;
 mod close_reason;
+mod config_proposed;
 mod fee_source;
 mod global_config_updated;
 mod market_checkpoint;
@@ -39,6 +40,7 @@ mod tp_sl_updated;
 pub use adl_reward_paid::*;
 pub use bad_debt::*;
 pub use close_reason::*;
+pub use config_proposed::*;
 pub use fee_source::*;
 pub use global_config_updated::*;
 pub use market_checkpoint::*;

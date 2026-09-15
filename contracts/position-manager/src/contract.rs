@@ -7,7 +7,9 @@ use crate::auth::{require_initialized, require_role, require_vault};
 use crate::errors::PositionManagerError;
 use crate::events;
 use crate::ledger::{self, Ledger};
-use crate::{borrow, funding, math, position, referral, risk, snapshot, storage, validation};
+use crate::{
+    borrow, funding, governance, math, position, referral, risk, snapshot, storage, validation,
+};
 use position::{
     decrease::decrease_position,
     deleverage::deleverage_position,
@@ -18,7 +20,10 @@ use position::{
     open::open_position,
     set_tp_sl::set_tp_sl,
 };
-use shared::constants::{INDEX_PRECISION, ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_UPGRADER};
+use shared::constants::{
+    INDEX_PRECISION, ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_PROTOCOL, ROLE_UNPAUSER,
+    ROLE_UPGRADER,
+};
 use shared::{
     AccountingSnapshot, ConfigManagerClient, EntryOrderParams, GlobalConfig, Market, MarketConfig,
     MigrationData, OracleRound, Position, PositionManager, TimelockedUpgradeable, UpgradeFailure,
@@ -28,6 +33,93 @@ use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complet
 
 #[contract]
 pub struct PositionManagerContract;
+
+/// §10.3.1 — the global rules plus the two that are stated over the active
+/// market set rather than over the record alone.
+fn validate_global_against_markets(env: &Env, config: &GlobalConfig) {
+    validation::validate_global(env, config);
+    let markets = storage::get_active_markets(env);
+    if markets.len() > config.max_active_markets {
+        panic_with_error!(env, PositionManagerError::InvalidConfig);
+    }
+    if risk::hard_cap_factor_sum(env, &markets, None) > config.global_hard_cap_limit_bps as u64 {
+        panic_with_error!(env, PositionManagerError::InvalidConfig);
+    }
+}
+
+/// §10.3.2 plus the registry bound and the aggregate hard-cap bound, with
+/// this market's proposed factor substituted in.
+fn validate_market_against_set(env: &Env, symbol: &Symbol, config: &MarketConfig) {
+    validation::validate_market(env, config);
+    let markets = storage::get_active_markets(env);
+    let global = storage::get_global_config(env);
+    if storage::try_get_market(env, symbol).is_none() && markets.len() >= global.max_active_markets
+    {
+        panic_with_error!(env, PositionManagerError::MarketLimitExceeded);
+    }
+    let hard_sum =
+        risk::hard_cap_factor_sum(env, &markets, Some((symbol, config.hard_cap_pnl_factor_bps)));
+    if hard_sum > global.global_hard_cap_limit_bps as u64 {
+        panic_with_error!(env, PositionManagerError::InvalidConfig);
+    }
+}
+
+/// §10.3.3 steps 3-6 for the global record: checkpoint under the **old**
+/// value, store, then refresh the forward-looking rate. Accruing after the
+/// store would reprice elapsed time at the new parameter, which §9.6
+/// forbids.
+fn apply_global(env: &Env, config: &GlobalConfig) {
+    let mut ledger = storage::get_ledger(env);
+    borrow::accrue(env, &mut ledger, env.ledger().timestamp());
+    storage::save_global_config(env, config);
+    borrow::refresh_rate(env, &mut ledger, ledger::physical_cash(env));
+    storage::save_ledger(env, &ledger);
+    events::emit_global_config_updated(env, config);
+}
+
+/// §10.3.3 for one market, and §5.3's risk-factor rule.
+fn apply_market(env: &Env, symbol: &Symbol, config: &MarketConfig) {
+    let mut ledger = storage::get_ledger(env);
+    let now = env.ledger().timestamp();
+    borrow::accrue(env, &mut ledger, now);
+    match storage::try_get_market(env, symbol) {
+        Some(mut market) => {
+            // §5.3 — `market_risk_factor_bps` may change only while both
+            // sides are empty. Every live position's risk units are the
+            // value derived from its size and this factor; changing it
+            // under open positions makes the stored aggregate disagree with
+            // the derivation, and there is no bounded way to rewrite them.
+            if config.market_risk_factor_bps != market.config.market_risk_factor_bps
+                && !market_is_empty(&market)
+            {
+                panic_with_error!(env, PositionManagerError::MarketNotEmpty);
+            }
+            // Checkpoint the funding window under the old half-life,
+            // maximum rate, and instant weight before they are replaced.
+            funding::accrue(env, &mut ledger, &mut market, now);
+            market.config = config.clone();
+            funding::refresh_display(env, &mut market);
+            storage::save_market(env, symbol, &market);
+        }
+        None => {
+            let mut markets = storage::get_active_markets(env);
+            storage::save_market(env, symbol, &Market::new(config.clone(), now));
+            markets.push_back(symbol.clone());
+            storage::save_active_markets(env, &markets);
+        }
+    }
+    borrow::refresh_rate(env, &mut ledger, ledger::physical_cash(env));
+    storage::save_ledger(env, &ledger);
+    events::emit_market_config_updated(env, symbol, config);
+}
+
+/// §5.3 — no open interest and no risk units on either side.
+fn market_is_empty(market: &Market) -> bool {
+    market.long.size_open_interest == 0
+        && market.short.size_open_interest == 0
+        && market.long.risk_units == 0
+        && market.short.risk_units == 0
+}
 
 #[contractimpl]
 impl PositionManagerContract {
@@ -197,60 +289,58 @@ impl PositionManager for PositionManagerContract {
         events::emit_market_checkpoint(&env, &market_symbol, &market, &ledger, now);
     }
 
-    fn set_global_config(env: Env, caller: Address, config: GlobalConfig) {
-        require_role(&env, &caller, ROLE_ADMIN);
-        validation::validate_global(&env, &config);
-        let mut ledger = storage::get_ledger(&env);
-        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
-        let markets = storage::get_active_markets(&env);
-        if markets.len() > config.max_active_markets {
-            panic_with_error!(&env, PositionManagerError::InvalidConfig);
+    fn propose_global_config(env: Env, caller: Address, config: GlobalConfig) {
+        governance::require_configuration_authority(&env, &caller);
+        validate_global_against_markets(&env, &config);
+        let now = env.ledger().timestamp();
+        // §12.3 exemption 2 — a purely conservative change applies at once.
+        // It still checkpoints under the old value and still emits.
+        if governance::global_is_conservative(&storage::get_global_config(&env), &config) {
+            apply_global(&env, &config);
+            return;
         }
-        if risk::hard_cap_factor_sum(&env, &markets, None) > config.hard_cap_factor_limit_bps as u64
-        {
-            panic_with_error!(&env, PositionManagerError::InvalidConfig);
-        }
-        storage::save_global_config(&env, &config);
-        borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
-        storage::save_ledger(&env, &ledger);
-        events::emit_global_config_updated(&env, &config);
+        governance::store_global_proposal(&env, &config, governance::effective_at(&env, now));
     }
 
-    fn set_market_config(env: Env, caller: Address, market_symbol: Symbol, config: MarketConfig) {
-        require_role(&env, &caller, ROLE_ADMIN);
-        validation::validate_market(&env, &config);
-        let mut ledger = storage::get_ledger(&env);
+    fn apply_global_config(env: Env) {
         let now = env.ledger().timestamp();
-        borrow::accrue(&env, &mut ledger, now);
-        let markets = storage::get_active_markets(&env);
+        let config = governance::take_due_global_proposal(&env, now);
+        // Re-validated at apply: the active market set may have changed
+        // while the proposal waited, and §10.3.1's cross-parameter rules
+        // are stated over the set that exists when the value takes effect.
+        validate_global_against_markets(&env, &config);
+        apply_global(&env, &config);
+    }
+
+    fn propose_market_config(env: Env, caller: Address, market_symbol: Symbol, config: MarketConfig) {
+        governance::require_configuration_authority(&env, &caller);
+        validate_market_against_set(&env, &market_symbol, &config);
         let existing = storage::try_get_market(&env, &market_symbol);
-        if existing.is_none()
-            && markets.len() >= storage::get_global_config(&env).max_active_markets
-        {
-            panic_with_error!(&env, PositionManagerError::MarketLimitExceeded);
+        // Registering a market creates no obligations to anyone, so it is
+        // not a change a timelock protects against. Only a change to a
+        // market that already has live accounting waits.
+        let exempt = match &existing {
+            None => true,
+            Some(market) => governance::market_is_conservative(&market.config, &config),
+        };
+        if exempt {
+            apply_market(&env, &market_symbol, &config);
+            return;
         }
-        let hard_sum = risk::hard_cap_factor_sum(
+        let now = env.ledger().timestamp();
+        governance::store_market_proposal(
             &env,
-            &markets,
-            Some((&market_symbol, config.hard_cap_pnl_factor_bps)),
+            &market_symbol,
+            &config,
+            governance::effective_at(&env, now),
         );
-        if hard_sum > storage::get_global_config(&env).hard_cap_factor_limit_bps as u64 {
-            panic_with_error!(&env, PositionManagerError::InvalidConfig);
-        }
-        if let Some(mut market) = existing {
-            funding::accrue(&env, &mut ledger, &mut market, now);
-            market.config = config.clone();
-            funding::refresh_display(&env, &mut market);
-            storage::save_market(&env, &market_symbol, &market);
-        } else {
-            let mut markets = markets;
-            storage::save_market(&env, &market_symbol, &Market::new(config.clone(), now));
-            markets.push_back(market_symbol.clone());
-            storage::save_active_markets(&env, &markets);
-        }
-        borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
-        storage::save_ledger(&env, &ledger);
-        events::emit_market_config_updated(&env, &market_symbol, &config);
+    }
+
+    fn apply_market_config(env: Env, market_symbol: Symbol) {
+        let now = env.ledger().timestamp();
+        let config = governance::take_due_market_proposal(&env, &market_symbol, now);
+        validate_market_against_set(&env, &market_symbol, &config);
+        apply_market(&env, &market_symbol, &config);
     }
 
     fn disable_market(env: Env, caller: Address, market: Symbol) {
@@ -308,7 +398,7 @@ impl PositionManager for PositionManagerContract {
         let claims = ledger.non_lp_claims(&env);
         borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
-        claims <= physical && ledger.lp_blocked_side_count == 0
+        claims <= physical && ledger.restricted_market_side_count == 0
     }
 
     fn accounting_snapshot(env: Env, round: OracleRound, physical: i128) -> AccountingSnapshot {
@@ -346,7 +436,7 @@ impl PositionManager for PositionManagerContract {
     }
 
     fn claim_protocol(env: Env, caller: Address, recipient: Address, amount: i128) {
-        require_role(&env, &caller, ROLE_ADMIN);
+        require_role(&env, &caller, ROLE_PROTOCOL);
         let mut ledger = storage::get_ledger(&env);
         borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
         if amount <= 0 || amount > ledger.protocol_claimable_total {
@@ -386,7 +476,7 @@ impl PositionManager for PositionManagerContract {
     }
 
     fn unpause(env: Env, caller: Address) {
-        require_role(&env, &caller, ROLE_PAUSER);
+        require_role(&env, &caller, ROLE_UNPAUSER);
         storage::save_paused(&env, false);
         events::emit_pause_changed(&env, false);
     }
@@ -402,6 +492,25 @@ impl PositionManager for PositionManagerContract {
     fn bump_position(env: Env, position_id: u64) {
         let position = storage::get_position(&env, position_id);
         storage::save_position(&env, &position);
+        shared::bump_instance_ttl(&env);
+    }
+
+    fn bump_pending_action(env: Env, action_id: u64) {
+        storage::get_pending_action(&env, action_id);
+        storage::bump_pending_action(&env, action_id);
+        shared::bump_instance_ttl(&env);
+    }
+
+    fn bump_market_entry(env: Env, market: Symbol) {
+        storage::get_market(&env, &market);
+        storage::bump_market(&env, &market);
+        shared::bump_instance_ttl(&env);
+    }
+
+    fn bump_referral_entry(env: Env, code: Symbol, trader: Address, referrer: Address) {
+        storage::bump_referral_code(&env, &code);
+        storage::bump_referrer(&env, &trader);
+        storage::bump_referral_balance(&env, &referrer);
         shared::bump_instance_ttl(&env);
     }
 }

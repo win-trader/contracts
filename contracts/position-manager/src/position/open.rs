@@ -2,7 +2,9 @@ use crate::{
     auth::{require_auth, require_initialized, require_market_active, require_not_paused},
     borrow,
     errors::PositionManagerError,
-    events, funding, ledger, math, risk, snapshot, storage,
+    events, funding, ledger, math,
+    position::set_tp_sl,
+    risk, snapshot, storage,
     validation::{check_slippage, validate_orders},
 };
 use shared::{MarketConfig, Position, RiskState};
@@ -113,6 +115,7 @@ pub(crate) fn open_from_collateral(
 
     let base = math::base_added(&env, size, price, is_long);
     let risk_units = math::risk_added(&env, size, market.config.market_risk_factor_bps);
+    let execution_delay = market.config.order_execution_delay_seconds;
     let mut position = Position {
         id: position_id,
         owner: owner.clone(),
@@ -123,12 +126,17 @@ pub(crate) fn open_from_collateral(
         stored_collateral: 0,
         risk_units,
         borrow_debt: 0,
+        // §3.3.2 — the window's monetary minimum is quoted when the borrow
+        // window opens (P4-03), not here.
+        stored_minimum_borrow_fee: 0,
         funding_paid_to_receivers_debt: 0,
         funding_paid_to_lps_debt: 0,
         funding_received_debt: 0,
-        last_increased_time: now,
-        take_profit,
-        stop_loss,
+        opened_at: now,
+        last_size_increase_at: now,
+        pending_mutation_action_id: None,
+        take_profit: set_tp_sl::attach_trigger(take_profit, now, execution_delay),
+        stop_loss: set_tp_sl::attach_trigger(stop_loss, now, execution_delay),
     };
 
     ledger::add_stored_collateral(

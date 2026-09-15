@@ -7,6 +7,7 @@ mod errors;
 mod events;
 mod fees;
 mod funding;
+mod governance;
 mod ledger;
 mod math;
 mod position;

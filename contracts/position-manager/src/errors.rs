@@ -49,4 +49,18 @@ pub enum PositionManagerError {
     ReferralCodeNotFound = 30,
     /// A trader tried to set their own code as their referrer.
     SelfReferral = 31,
+    /// §12.4 — the stored ledger's `state_version` is not the one this
+    /// build understands. Every operation rejects until a migration has
+    /// advanced it.
+    StateVersionMismatch = 32,
+    /// No pending action exists for the given id — including one whose id
+    /// was consumed by a terminal settlement (§8.13).
+    ActionNotFound = 33,
+    /// §12.3 — `apply_configuration` with no proposal stored.
+    NoPendingConfig = 34,
+    /// §12.3 — `apply_configuration` before the proposal's `effective_at`.
+    ConfigTimelockNotElapsed = 35,
+    /// §5.3 — `market_risk_factor_bps` changed while the market still has
+    /// open interest or risk units on either side.
+    MarketNotEmpty = 36,
 }

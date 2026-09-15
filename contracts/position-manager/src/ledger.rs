@@ -22,15 +22,31 @@ use shared::{MarketSide, Position, VaultClient};
 use crate::errors::PositionManagerError;
 use crate::{math, storage};
 
-/// §5.1 global state: the non-LP claim totals, the risk counters, and
-/// the global borrow accrual. The receiver-funding liability total is fed
-/// per-market by `funding::accrue` (§8.3).
+/// §12.4 — the state layout version this build understands. A stored ledger
+/// at any other version rejects every operation until a migration advances
+/// it. No migration routine is written for the settlement-spec change
+/// itself: that is a redeploy, not an upgrade.
+pub const STATE_VERSION: u32 = 2;
+
+/// §5.2 global accounting state: the **five** non-LP claim totals of §2.5,
+/// the risk counters, the migration guard, and the global borrow clock. The
+/// receiver-funding liability total is fed per-market by `funding::accrue`
+/// (§5.12).
+///
+/// The record is loaded once, changed as one in-memory unit, and saved once
+/// at the end of an atomic action. Ownership totals are never updated
+/// through independent storage paths.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Ledger {
     // -- Non-LP claims (§4.2): each is a label on the one vault balance. --
     pub position_collateral_total: i128,
+    /// §5.12 — the sum of `market.pending_receiver_funding` across active
+    /// markets, **not** the sum of current position credits.
     pub pending_receiver_funding_total: i128,
+    /// §5.7 — collateral committed to pending trader actions and held
+    /// inside the vault.
+    pub action_escrow_total: i128,
     pub protocol_claimable_total: i128,
     /// §11.1 referral rewards accrued but not yet claimed — the aggregate
     /// backing the per-referrer `ReferralBalance` map (their sum is this
@@ -40,7 +56,13 @@ pub struct Ledger {
     // -- Risk counters. --
     pub total_risk_units: i128,
     pub open_position_count: u64,
-    pub lp_blocked_side_count: u32,
+    /// §5.2 — market sides latched in `Warning`, `ADL`, or `HardCap`.
+    pub restricted_market_side_count: u32,
+    /// §12.4 migration guard. Every operation requires it to equal
+    /// `STATE_VERSION`; a half-migrated vault whose aggregates no longer
+    /// equal the sum of their records violates §5.11, and there is no safe
+    /// way to keep trading through that.
+    pub state_version: u32,
     // -- Global borrow accrual (§9.2). --
     pub borrow_index: i128,
     pub borrow_index_remainder: i128,
@@ -54,11 +76,13 @@ impl Ledger {
         Ledger {
             position_collateral_total: 0,
             pending_receiver_funding_total: 0,
+            action_escrow_total: 0,
             protocol_claimable_total: 0,
             referral_claimable_total: 0,
             total_risk_units: 0,
             open_position_count: 0,
-            lp_blocked_side_count: 0,
+            restricted_market_side_count: 0,
+            state_version: STATE_VERSION,
             borrow_index: 0,
             borrow_index_remainder: 0,
             current_borrow_rate: initial_borrow_rate,
@@ -70,6 +94,7 @@ impl Ledger {
     pub fn non_lp_claims(&self, env: &Env) -> i128 {
         let mut total = self.position_collateral_total;
         total = math::add(env, total, self.pending_receiver_funding_total);
+        total = math::add(env, total, self.action_escrow_total);
         total = math::add(env, total, self.protocol_claimable_total);
         math::add(env, total, self.referral_claimable_total)
     }
@@ -112,6 +137,7 @@ fn vault(env: &Env) -> VaultClient<'_> {
 #[derive(Clone, Copy, Debug)]
 pub enum Bucket {
     ReceiverFunding,
+    ActionEscrow,
     ProtocolClaimable,
     Referral,
 }
@@ -120,6 +146,7 @@ impl Ledger {
     fn bucket_mut(&mut self, bucket: Bucket) -> &mut i128 {
         match bucket {
             Bucket::ReceiverFunding => &mut self.pending_receiver_funding_total,
+            Bucket::ActionEscrow => &mut self.action_escrow_total,
             Bucket::ProtocolClaimable => &mut self.protocol_claimable_total,
             Bucket::Referral => &mut self.referral_claimable_total,
         }
