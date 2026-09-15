@@ -86,31 +86,37 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
         let weight_lp = math::sub(env, window.weight, weight_receiver);
 
         let denominator = BPS * SECONDS_PER_DAY as i128;
-        let (receiver_delta, receiver_rem) = carried_div(
+        let (receiver_delta, receiver_rem) = math::carried_div(
             env,
-            weight_receiver,
+            &math::widen(env, weight_receiver),
             denominator,
             market.receiver_payer_remainder,
         );
-        let (lp_delta, lp_rem) =
-            carried_div(env, weight_lp, denominator, market.lp_payer_remainder);
+        let (lp_delta, lp_rem) = math::carried_div(
+            env,
+            &math::widen(env, weight_lp),
+            denominator,
+            market.lp_payer_remainder,
+        );
 
         // The liability and the receiver credit both derive from the exact
         // amount the payer index will collect (§8.3), so a credit can never
-        // outrun its backing accrual.
-        let receiver_cash = math::mul(env, payer_size, receiver_delta);
-        let (liability_delta, pending_rem) = carried_div(
+        // outrun its backing accrual. The product is formed at 256 bits: it
+        // is a product on the way to a division, and both factors grow with
+        // the book (§2.1.1).
+        let receiver_cash = math::widen_mul(env, payer_size, receiver_delta);
+        let (liability_delta, pending_rem) = math::carried_div(
             env,
-            receiver_cash,
+            &receiver_cash,
             INDEX_PRECISION,
             market.pending_remainder,
         );
         ledger.credit(env, Bucket::ReceiverFunding, liability_delta);
         market.pending_remainder = pending_rem;
         let (credit_delta, credit_rem) = if receiver_size > 0 {
-            carried_div(
+            math::carried_div(
                 env,
-                receiver_cash,
+                &receiver_cash,
                 receiver_size,
                 market.receiver_index_remainder,
             )
@@ -136,13 +142,6 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
     market.skew_ema = window.ema_after;
     set_display(env, market, window.integral_now);
     market.last_funding_checkpoint = now;
-}
-
-/// One accumulator advance: `(numerator + remainder) / divisor`, returning
-/// the delta and the carried remainder. `divisor` must be positive.
-fn carried_div(env: &Env, numerator: i128, divisor: i128, remainder: i128) -> (i128, i128) {
-    let total = math::add(env, numerator, remainder);
-    (total / divisor, total % divisor)
 }
 
 /// §8.1 cold start — an empty book carries no history, and zero is not "no

@@ -125,42 +125,46 @@ goes first.
 
 Nothing below depends on anything above it. Do it all in one pass.
 
-- [ ] **P1-01** Remove `execution_budget` from `shared::Position` and
+- [x] **P1-01** Remove `execution_budget` from `shared::Position` and
       `shared::EntryOrder`/`EntryOrderParams`; delete
       `position/fund_execution_budget.rs`, `position/withdraw_execution_budget.rs`,
       their trait methods on `PositionManager`, and their events.
-- [ ] **P1-02** Delete `Bucket::ExecutionBudget` and
+- [x] **P1-02** Delete `Bucket::ExecutionBudget` and
       `Ledger.execution_budget_total`. (It returns in Phase 3 renamed as
       `action_escrow_total` — deleting first keeps the two meanings from
       blurring.)
-- [ ] **P1-03** Delete `Bucket::KeeperReserve`, `Ledger.risk_keeper_reserve_total`,
+- [x] **P1-03** Delete `Bucket::KeeperReserve`, `Ledger.risk_keeper_reserve_total`,
       `GlobalConfig.risk_keeper_revenue_share_bps`, and the keeper slice in
       `fees::split_revenue`. Drop the `risk_keeper_reserve_total` view method.
-- [ ] **P1-04** Delete the insolvency-touch reward path in
+- [x] **P1-04** Delete the insolvency-touch reward path in
       `position/liquidate.rs` and `GlobalConfig.max_insolvent_touch_reward`;
       delete `events/insolvency_reward_paid.rs`.
-- [ ] **P1-05** Delete `MarketConfig.liquidation_reward_bps`,
+- [x] **P1-05** Delete `MarketConfig.liquidation_reward_bps`,
       `MarketConfig.adl_reward_bps`, `GlobalConfig.max_adl_reward`, and their
       use in `settle::finalize_close` / `position/deleverage.rs`. Liquidation
       and ADL temporarily pay nothing; Phase 6 restores fixed rewards.
-- [ ] **P1-06** Delete `fees::tiered_close_fee_bps`, `math::skew_abs`, and
+- [x] **P1-06** Delete `fees::tiered_close_fee_bps`, `math::skew_abs`, and
       `MarketConfig.close_fee_low_bps` / `close_fee_high_bps`. Closing fee
       temporarily becomes zero; Phase 5 restores it.
-- [ ] **P1-07** Delete `math::borrow_rate_exp`, `math::neg_log2`,
+- [x] **P1-07** Delete `math::borrow_rate_exp`, `math::neg_log2`,
       `math::borrow_rate` (the test-only reference), and
       `GlobalConfig.borrow_exponent_bps`. `borrow::refresh_rate` gets the
       fixed square in Phase 4; leave a `todo!()`-free placeholder that returns
       `base * INDEX_PRECISION` so the crate builds.
-- [ ] **P1-08** Delete `GlobalConfig.min_borrow_index_delta` and the
+- [x] **P1-08** Delete `GlobalConfig.min_borrow_index_delta` and the
       `borrow_floor` branch in `funding::pending_fees`.
-- [ ] **P1-09** Delete `math::smul_div` and `math::remaining`.
-- [ ] **P1-10** Delete `LpRequestStatus::Expired` and the
+- [x] **P1-09** Delete `math::smul_div` and `math::remaining`.
+      *Landed split:* `smul_div` went in Phase 2 with P2-03, its replacement.
+      `remaining` still has its one caller (`settle::removed_exposure`) and
+      goes in Phase 5 with P5-19, which also changes its behaviour. Deleting
+      either in Phase 1 would have broken the build against ground rule 1.
+- [x] **P1-10** Delete `LpRequestStatus::Expired` and the
       `round.previous_timestamp >= execute_after` branch in
       `request-router/src/requests.rs::resolve_next`.
-- [ ] **P1-11** Delete the loss-recognition branch in
+- [x] **P1-11** Delete the loss-recognition branch in
       `snapshot::build_snapshot` — recognize `max(raw_side_pnl, 0)` only
       (§2.3). Keep the single-conversion `PRICE_PRECISION` numerator trick.
-- [ ] **P1-12** Delete `validation.rs` entries for every removed field. Leave
+- [x] **P1-12** Delete `validation.rs` entries for every removed field. Leave
       the file; it is rewritten wholesale in Phase 3.
 
 ---
@@ -179,30 +183,42 @@ multiply. If metering turns out to bite on the hot path (`refresh_borrow_rate`
 runs after *every* mutation), the fallback is a two-`u128`-limb implementation
 in `shared`, measured before it is written.
 
-- [ ] **P2-01** `mul_div_floor(a, b, d)` — widen both operands to 256-bit, form
+- [x] **P2-01** `mul_div_floor(a, b, d)` — widen both operands to 256-bit, form
       the product, divide, **range-check the narrowing back to 128-bit**, error
       on failure. The narrowing check is what turns a silent wrap into a
       revert; it is not optional.
-- [ ] **P2-02** `mul_div_ceil(a, b, d)` — same, `(p + d - 1) / d`. Drop the
+- [x] **P2-02** `mul_div_ceil(a, b, d)` — same, `(p + d - 1) / d`. Drop the
       current `checked_add(denominator - 1)` overflow dance; at 256-bit it
       cannot overflow.
-- [ ] **P2-03** `mul_div_trunc(a, b, d)` — **signed**, truncating toward zero.
+- [x] **P2-03** `mul_div_trunc(a, b, d)` — **signed**, truncating toward zero.
       Replaces `smul_div`. Callers: signed skew (§3.4.1), blend coefficient `B`
       and every decayed value derived from it (§6.2.1).
-- [ ] **P2-04** `carried_div(n, d, r)` — **`n` is a 256-bit value, not
+- [x] **P2-04** `carried_div(n, d, r)` — **`n` is a 256-bit value, not
       `i128`.** §6.2 passes it a funding weight that reaches ~`1e40`. Typing
       the numerator as `i128` overflows on the first funding checkpoint of a
       busy market. `d`, the quotient, and the remainder are 128-bit and are
       range-checked.
-- [ ] **P2-05** Keep `add`/`sub`/`mul` checked at 128-bit; confirm every
+- [x] **P2-05** Keep `add`/`sub`/`mul` checked at 128-bit; confirm every
       standalone arithmetic site outside the four helpers is checked. No
       saturating or wrapping operation may appear anywhere in the crate
       (§2.1.1: an overflow is an unexpected failure under §8.9 and must
       revert).
+      *Audit result.* Fixed in Phase 2: the unchecked `long_base - short_base`
+      in `math::skew_frac`, and the two saturating counter decrements in
+      `risk.rs` (`open_position_count`, `lp_blocked_side_count`) — an
+      underflow there is an invariant break being silently rounded away, so
+      both now revert. Three saturating sites are left deliberately, each
+      inside a later phase's rewrite: `oracle-router/logic.rs` cache and
+      staleness deadlines (Phase 7), `decrease.rs`'s
+      `last_increased_time.saturating_add(min_position_lifetime)` (P6-25
+      replaces the whole gate; P3-15 bounds the addend at 86_400), and the
+      vault's `cash_lp_equity.saturating_add/sub(assets)` (P8-05 rewrites the
+      withdrawal gates). None is reachable at validated parameters; all four
+      must be checked by the time their phase lands.
 
 ### 2b. Transcendentals (§2.1.2, §2.1.3)
 
-- [ ] **P2-06** Transcribe `HALF_POW[1..=48]` from §2.1.3 **exactly**. The
+- [x] **P2-06** Transcribe `HALF_POW[1..=48]` from §2.1.3 **exactly**. The
       current `EXP2_FRAC` is 47 entries rounded-to-nearest; the spec's table is
       48 entries floored. **16 of the 47 shared entries differ by one unit**,
       and the current entry 47 is `100_000_000_000_000` where the spec floors
@@ -211,30 +227,30 @@ in `shared`, measured before it is written.
       table is reference data, not a derivation to redo at a different
       precision; every rounding in these primitives must truncate so the error
       is one-directional and a decay factor is never overstated.
-- [ ] **P2-07** `LN2 = 69_314_718_055_994` as a stored constant. Replaces the
+- [x] **P2-07** `LN2 = 69_314_718_055_994` as a stored constant. Replaces the
       `INV_LN2_NUM / INV_LN2_DEN` ratio.
-- [ ] **P2-08** Rewrite `exp2_neg(x)` to the §2.1.2 signature: `x` is an
+- [x] **P2-08** Rewrite `exp2_neg(x)` to the §2.1.2 signature: `x` is an
       `INDEX_PRECISION`-scaled value, **not** an `(elapsed, half_life)` pair.
       Split into whole `n` and fractional `f`; `n >= 128 → 0`; 48 iterations;
       **apply the shift last**, after the fractional product. The current
       implementation already shifts last — keep that, change everything else.
-- [ ] **P2-09** New `log2(y)` for `y >= INDEX_PRECISION` (§2.1.2). Integer part
+- [x] **P2-09** New `log2(y)` for `y >= INDEX_PRECISION` (§2.1.2). Integer part
       from bit length, 48 fraction iterations by repeated squaring. This is a
       different function from the deleted `neg_log2`, with a different domain
       and a single caller (`t_star` in §6.2.1) — do not try to reuse it for the
       borrow curve, which no longer needs a logarithm at all.
-- [ ] **P2-10** Add the §2.1.3 conformance vectors as constants in the crate so
+- [x] **P2-10** Add the §2.1.3 conformance vectors as constants in the crate so
       the QA phase can assert them without re-deriving: the seven `exp2_neg`
       rows, the six `log2` rows, and the six borrow-curve rows. Note in the
       code comment that `log2(3)` is expected to return `158_496_250_072_105`
       against an exact `158_496_250_072_115` — low by `6e-14` relative, inside
       `DECAY_TOLERANCE`, and in the safe direction.
-- [ ] **P2-11** Add `DECAY_TOLERANCE = 1e-12 relative` as a documented bound
+- [x] **P2-11** Add `DECAY_TOLERANCE = 1e-12 relative` as a documented bound
       (used by QA, not by the contract).
 
 ### 2c. Constants
 
-- [ ] **P2-12** `shared/src/constants.rs`: confirm `PRICE_PRECISION = 1e7`,
+- [x] **P2-12** `shared/src/constants.rs`: confirm `PRICE_PRECISION = 1e7`,
       `INDEX_PRECISION = 1e14`, `BPS = 1e4`, `SECONDS_PER_DAY = 86_400` — all
       already correct. Add `SHARE_SCALE = 1e6`. Update the stale scale-mapping
       doc comment, which still points at the superseded 2026-07 ste100 doc.

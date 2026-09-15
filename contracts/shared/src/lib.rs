@@ -3,6 +3,7 @@
 pub mod config_manager;
 pub mod constants;
 pub mod events;
+pub mod fixed;
 pub mod math;
 pub mod oracle;
 pub mod oracle_router;

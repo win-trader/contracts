@@ -9,9 +9,10 @@
 //! - rates: bps/day scaled by `INDEX_PRECISION`
 //! - indices: fee per unit of fee base, scaled by `INDEX_PRECISION`
 
-use soroban_sdk::{panic_with_error, Env};
+use soroban_sdk::{panic_with_error, Env, U256};
 
 use shared::constants::{BPS, INDEX_PRECISION, PRICE_PRECISION};
+use shared::fixed::{self, LN2};
 
 use crate::errors::PositionManagerError;
 
@@ -32,11 +33,37 @@ pub fn mul(env: &Env, a: i128, b: i128) -> i128 {
 }
 
 pub fn mul_div_floor(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
-    shared::math::mul_div_floor(a, b, denominator).unwrap_or_else(|| fail(env))
+    shared::math::mul_div_floor(env, a, b, denominator).unwrap_or_else(|| fail(env))
 }
 
 pub fn mul_div_ceil(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
-    shared::math::mul_div_ceil(a, b, denominator).unwrap_or_else(|| fail(env))
+    shared::math::mul_div_ceil(env, a, b, denominator).unwrap_or_else(|| fail(env))
+}
+
+/// §2.1.1 — signed `a × b / d`, truncating toward zero. Replaces the
+/// deleted local `smul_div` (P1-09/P2-03): the sign handling moves into the
+/// 256-bit helper instead of being recomposed from magnitudes here.
+pub fn mul_div_trunc(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
+    shared::math::mul_div_trunc(env, a, b, denominator).unwrap_or_else(|| fail(env))
+}
+
+/// §2.1.1 — one accumulator advance with its remainder carried. The
+/// numerator is 256-bit; see `shared::math::carried_div`.
+pub fn carried_div(env: &Env, numerator: &U256, divisor: i128, remainder: i128) -> (i128, i128) {
+    shared::math::carried_div(env, numerator, divisor, remainder).unwrap_or_else(|| fail(env))
+}
+
+/// Widen a non-negative `i128` for a `carried_div` numerator.
+pub fn widen(env: &Env, value: i128) -> U256 {
+    shared::math::widen(env, value).unwrap_or_else(|| fail(env))
+}
+
+/// The 256-bit product `a × b`, for a `carried_div` numerator. §2.1.1
+/// requires every product on the way to a division to be formed at 256 bits;
+/// this is the form for the ones whose quotient is taken by `carried_div`
+/// rather than by a `mul_div_*` helper.
+pub fn widen_mul(env: &Env, a: i128, b: i128) -> U256 {
+    widen(env, a).mul(&widen(env, b))
 }
 
 /// §7.1 — base exposure bought by `size` USD notional at `price`. Longs
@@ -71,106 +98,13 @@ pub fn skew_frac(env: &Env, long_base: i128, short_base: i128) -> i128 {
     if total == 0 {
         return 0;
     }
-    let diff = long_base - short_base;
+    let diff = sub(env, long_base, short_base);
     let magnitude = mul_div_floor(env, diff.abs(), INDEX_PRECISION, total);
     if diff < 0 {
         -magnitude
     } else {
         magnitude
     }
-}
-
-/// Signed `a × b / d`, truncated toward zero. `shared::math` operates on
-/// magnitudes only (§16); the sign is recomposed here. `d` must be positive.
-pub fn smul_div(env: &Env, a: i128, b: i128, d: i128) -> i128 {
-    let magnitude = mul_div_floor(env, a.abs(), b.abs(), d);
-    if (a < 0) != (b < 0) {
-        -magnitude
-    } else {
-        magnitude
-    }
-}
-
-/// `round(INDEX_PRECISION × 2^(−2^(−i)))` for `i = 1..=47` — the
-/// square-and-multiply constants behind `exp2_neg`. Entry `i` satisfies
-/// `T[i]² ≈ T[i−1] × INDEX_PRECISION`; both properties are unit-tested.
-const EXP2_FRAC: [i128; 47] = [
-    70_710_678_118_655,
-    84_089_641_525_371,
-    91_700_404_320_467,
-    95_760_328_069_857,
-    97_857_206_208_770,
-    98_922_801_319_398,
-    99_459_942_348_363,
-    99_729_605_608_547,
-    99_864_711_289_097,
-    99_932_332_750_265,
-    99_966_160_649_624,
-    99_983_078_893_193,
-    99_991_539_088_661,
-    99_995_769_454_843,
-    99_997_884_705_049,
-    99_998_942_346_931,
-    99_999_471_172_067,
-    99_999_735_585_684,
-    99_999_867_792_755,
-    99_999_933_896_355,
-    99_999_966_948_172,
-    99_999_983_474_085,
-    99_999_991_737_042,
-    99_999_995_868_521,
-    99_999_997_934_260,
-    99_999_998_967_130,
-    99_999_999_483_565,
-    99_999_999_741_783,
-    99_999_999_870_891,
-    99_999_999_935_446,
-    99_999_999_967_723,
-    99_999_999_983_861,
-    99_999_999_991_931,
-    99_999_999_995_965,
-    99_999_999_997_983,
-    99_999_999_998_991,
-    99_999_999_999_496,
-    99_999_999_999_748,
-    99_999_999_999_874,
-    99_999_999_999_937,
-    99_999_999_999_968,
-    99_999_999_999_984,
-    99_999_999_999_992,
-    99_999_999_999_996,
-    99_999_999_999_998,
-    99_999_999_999_999,
-    100_000_000_000_000,
-];
-
-/// `1/ln 2` as a fixed ratio, for the closed-form decay integrals.
-const INV_LN2_NUM: i128 = 14_426_950_408_889_634;
-const INV_LN2_DEN: i128 = 10_000_000_000_000_000;
-
-/// §8.1 — `2^(−elapsed/half_life)` at `INDEX_PRECISION` scale: whole
-/// half-lives as a right shift, the fractional part by square-and-multiply
-/// over `EXP2_FRAC`. Splitting an interval multiplies out to the same value
-/// up to table quantization (~1e-13 relative).
-pub fn exp2_neg(env: &Env, elapsed: u64, half_life: u64) -> i128 {
-    let whole = elapsed / half_life;
-    if whole >= 47 {
-        return 0;
-    }
-    let mut acc = INDEX_PRECISION;
-    let mut r = (elapsed % half_life) as i128;
-    let h = half_life as i128;
-    for entry in EXP2_FRAC.iter() {
-        if r == 0 || acc == 0 {
-            break;
-        }
-        r = mul(env, r, 2);
-        if r >= h {
-            r -= h;
-            acc = mul_div_floor(env, acc, *entry, INDEX_PRECISION);
-        }
-    }
-    acc >> (whole as u32)
 }
 
 /// Everything one §8.1 funding window resolves to.
@@ -207,33 +141,32 @@ pub fn funding_window(
     let p = INDEX_PRECISION;
     let s = skew_frac(env, long_base, short_base);
     let a = s;
-    let b = smul_div(
+    let b = mul_div_trunc(
         env,
         sub(env, BPS, instant_weight_bps as i128),
         sub(env, ema, s),
         BPS,
     );
-    let d = exp2_neg(env, elapsed, half_life);
     let dt = elapsed as i128;
     let h = half_life as i128;
-    let j1 = mul_div_floor(env, sub(env, p, d), mul(env, h, INV_LN2_NUM), INV_LN2_DEN);
+    let d = decay(env, elapsed, half_life);
+    // `H / ln 2` at INDEX_PRECISION, from the §2.1.2 constant: dividing by
+    // `LN2` (which carries the IP factor) expresses the same quantity the
+    // deleted `INV_LN2_NUM / INV_LN2_DEN` ratio did.
+    let h_scaled = mul(env, h, p);
+    let j1 = mul_div_floor(env, sub(env, p, d), h_scaled, LN2);
     let d2 = mul_div_floor(env, d, d, p);
-    let j2 = mul_div_floor(
-        env,
-        sub(env, p, d2),
-        mul(env, h, INV_LN2_NUM),
-        mul(env, 2, INV_LN2_DEN),
-    );
-    let term1 = mul(env, smul_div(env, a, a, p), dt);
-    let term2 = mul(env, 2, smul_div(env, b, smul_div(env, a, j1, p), p));
-    let term3 = smul_div(env, b, smul_div(env, b, j2, p), p);
+    let j2 = mul_div_floor(env, sub(env, p, d2), h_scaled, mul(env, 2, LN2));
+    let term1 = mul(env, mul_div_trunc(env, a, a, p), dt);
+    let term2 = mul(env, 2, mul_div_trunc(env, b, mul_div_trunc(env, a, j1, p), p));
+    let term3 = mul_div_trunc(env, b, mul_div_trunc(env, b, j2, p), p);
     let sum = core::cmp::max(add(env, add(env, term1, term2), term3), 0);
-    let linear = add(env, mul(env, a, dt), smul_div(env, b, j1, p));
+    let linear = add(env, mul(env, a, dt), mul_div_trunc(env, b, j1, p));
     FundingWindow {
         weight: mul(env, max_rate_bps_day, sum),
         payer_sign: linear.signum(),
-        ema_after: add(env, s, smul_div(env, sub(env, ema, s), d, p)),
-        integral_now: add(env, a, smul_div(env, b, d, p)),
+        ema_after: add(env, s, mul_div_trunc(env, sub(env, ema, s), d, p)),
+        integral_now: add(env, a, mul_div_trunc(env, b, d, p)),
     }
 }
 
@@ -242,9 +175,18 @@ pub fn integral_skew(env: &Env, skew: i128, ema: i128, instant_weight_bps: u32) 
     let w = instant_weight_bps as i128;
     add(
         env,
-        smul_div(env, skew, w, BPS),
-        smul_div(env, ema, sub(env, BPS, w), BPS),
+        mul_div_trunc(env, skew, w, BPS),
+        mul_div_trunc(env, ema, sub(env, BPS, w), BPS),
     )
+}
+
+/// §2.1.2 — the window decay factor `d = 2^(−elapsed/H)`, formed the way the
+/// specification forms `d_end`: scale the elapsed fraction of a half-life to
+/// `INDEX_PRECISION` first, then take `exp2_neg` of it. The primitive itself
+/// no longer takes an `(elapsed, half_life)` pair.
+pub fn decay(env: &Env, elapsed: u64, half_life: u64) -> i128 {
+    let x = mul_div_floor(env, elapsed as i128, INDEX_PRECISION, half_life as i128);
+    fixed::exp2_neg(env, x).unwrap_or_else(|| fail(env))
 }
 
 /// §8.1 — instantaneous payer rate from a signed integral skew:
@@ -351,44 +293,7 @@ mod tests {
         assert_eq!(skew_frac(&e, 0, 1_000), -INDEX_PRECISION);
     }
 
-    #[test]
-    fn exp2_frac_table_matches_its_defining_recurrences() {
-        let e = env();
-        // T[0] = 2^(-1/2): squaring it recovers 1/2 within 1 ulp.
-        let half = mul_div_floor(&e, EXP2_FRAC[0], EXP2_FRAC[0], INDEX_PRECISION);
-        assert!((half - INDEX_PRECISION / 2).abs() <= 1, "T[1]^2 != 1/2");
-        // Telescoping: T[i]^2 == T[i-1] within rounding, for every entry.
-        for i in 1..EXP2_FRAC.len() {
-            let squared = mul_div_floor(&e, EXP2_FRAC[i], EXP2_FRAC[i], INDEX_PRECISION);
-            assert!(
-                (squared - EXP2_FRAC[i - 1]).abs() <= 2,
-                "table entry {} breaks the telescoping recurrence",
-                i
-            );
-        }
-    }
 
-    #[test]
-    fn exp2_neg_halves_per_half_life_and_splits_cleanly() {
-        let e = env();
-        let h = 43_200u64;
-        assert_eq!(exp2_neg(&e, 0, h), INDEX_PRECISION);
-        assert_eq!(exp2_neg(&e, h, h), INDEX_PRECISION / 2);
-        assert_eq!(exp2_neg(&e, 2 * h, h), INDEX_PRECISION / 4);
-        assert_eq!(exp2_neg(&e, 47 * h, h), 0, "underflow clamps to zero");
-        // Quarter half-life: 2^(-1/4) = 0.8408964...
-        let q = exp2_neg(&e, h / 4, h);
-        assert!((q - 84_089_641_525_371).abs() <= 5, "2^(-1/4) off: {q}");
-        // Split-invariance up to quantization: d(a)·d(b) ≈ d(a+b).
-        let a = 10_000u64;
-        let b = 25_000u64;
-        let joined = exp2_neg(&e, a + b, h);
-        let split = mul_div_floor(&e, exp2_neg(&e, a, h), exp2_neg(&e, b, h), INDEX_PRECISION);
-        assert!(
-            (joined - split).abs() <= 50,
-            "split {split} vs joined {joined}"
-        );
-    }
 
     #[test]
     fn funding_window_degenerates_to_constant_rate_at_full_instant_weight() {

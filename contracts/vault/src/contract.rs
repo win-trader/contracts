@@ -66,12 +66,12 @@ fn cash(env: &Env) -> i128 {
 }
 
 fn mul_div_floor(env: &Env, a: i128, b: i128, d: i128) -> i128 {
-    shared::math::mul_div_floor(a, b, d)
+    shared::math::mul_div_floor(env, a, b, d)
         .unwrap_or_else(|| panic_with_error!(env, VaultError::ArithmeticError))
 }
 
 fn mul_div_ceil(env: &Env, a: i128, b: i128, d: i128) -> i128 {
-    shared::math::mul_div_ceil(a, b, d)
+    shared::math::mul_div_ceil(env, a, b, d)
         .unwrap_or_else(|| panic_with_error!(env, VaultError::ArithmeticError))
 }
 

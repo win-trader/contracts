@@ -31,25 +31,11 @@ pub const SHARED_BUMP_SECONDS: u64 = (SHARED_BUMP as u64) * SECONDS_PER_LEDGER;
 // Math precision (used by PositionManager + tests)
 // ---------------------------------------------------------------------------
 
-/// 1e7 — price precision. All on-chain prices, USD notionals, and base
-/// exposures are scaled by this.
+/// 1e7 — price precision (§2.1). Prices, collateral cash amounts, USD
+/// notionals, and base exposure use this scale: with seven decimal places,
+/// one dollar or one whole unit is `10_000_000`.
 ///
-/// Scale mapping against the design doc's numerical model
-/// (`docs/design/2026-07-fee-vault-contract-mechanics-ste100.md` §3). The doc
-/// specifies idealized 10^30 precisions; the implementation picks smaller
-/// scales so every intermediate product fits i128 (a size × index product at
-/// 10^30 would overflow at ~1.7 units):
-///
-/// | doc name          | code name         | scale              |
-/// |-------------------|-------------------|--------------------|
-/// | `PRICE_PRECISION` | `PRICE_PRECISION` | 1e7                |
-/// | `INDEX_PRECISION` | `INDEX_PRECISION` | 1e14               |
-/// | `RATE_PRECISION`  | `INDEX_PRECISION` | 1e14 (one scale for rates and indices) |
-/// | `FACTOR_PRECISION`| bps (`BPS`)       | 1e4                |
-/// | `SHARE_PRECISION` | vault decimals offset | asset decimals + 6 |
-/// | `ASSET_PRECISION` | token decimals    | collateral-token native |
-///
-/// PnL numerators (§7.2) carry one extra `PRICE_PRECISION` factor and are
+/// PnL numerators (§2.8) carry one extra `PRICE_PRECISION` factor and are
 /// converted to cash exactly once at the final step.
 pub const PRICE_PRECISION: i128 = 10_000_000;
 /// Protocol-wide price scale, expressed as a decimal exponent:
@@ -57,13 +43,20 @@ pub const PRICE_PRECISION: i128 = 10_000_000;
 /// OracleRouter aggregates must report this scale, or its prices would skew
 /// the median.
 pub const PRICE_DECIMALS: u32 = 7;
-/// 1e14 — borrow/funding index accumulator precision. Also the scale for
-/// stored rates (the doc's `RATE_PRECISION`): bps/day rates are stored
-/// multiplied by this so fractional per-second accrual never rounds to zero
-/// before the remainder carry.
+/// 1e14 — the scale for borrow and funding rates, cumulative indices, skew
+/// fractions, and decay factors (§2.1): everywhere fractional precision
+/// beyond basis points is required. bps/day rates are stored multiplied by
+/// this so fractional per-second accrual never rounds to zero before the
+/// remainder carry.
 pub const INDEX_PRECISION: i128 = 100_000_000_000_000;
-/// 10_000 — basis-point denominator. Single source of truth.
+/// 10_000 — basis-point denominator, one whole as basis points (§2.1).
+/// Single source of truth.
 pub const BPS: i128 = 10_000;
+/// 1e6 — LP shares carry six more decimal places than the collateral asset
+/// (§2.1): the share supply per collateral unit at the initial conversion
+/// rate. The vault's decimals offset produces the same scale; §7.17's
+/// conversion offsets are stated in terms of this constant.
+pub const SHARE_SCALE: i128 = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // Role constants — mirrored in ConfigManager's role names.

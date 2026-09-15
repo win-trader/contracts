@@ -40,9 +40,14 @@ pub fn register_position(ledger: &mut Ledger) {
     ledger.open_position_count += 1;
 }
 
-/// Count a fully closed position.
-pub fn release_position(ledger: &mut Ledger) {
-    ledger.open_position_count = ledger.open_position_count.saturating_sub(1);
+/// Count a fully closed position. Underflow is an invariant break — more
+/// positions released than registered — so it reverts rather than clamping
+/// (§2.1.1).
+pub fn release_position(env: &Env, ledger: &mut Ledger) {
+    ledger.open_position_count = ledger
+        .open_position_count
+        .checked_sub(1)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::InvariantViolation));
 }
 
 /// §9.1 — the global capacity gate: new total risk must stay within the
@@ -188,11 +193,14 @@ pub fn risk_state_for(
 
 /// §14 — keep `lp_blocked_side_count` equal to the number of restricted
 /// sides (§18.8) across a state transition.
-pub fn update_blocked_count(ledger: &mut Ledger, old: RiskState, new: RiskState) {
+pub fn update_blocked_count(env: &Env, ledger: &mut Ledger, old: RiskState, new: RiskState) {
     if old == RiskState::Normal && new != RiskState::Normal {
         ledger.lp_blocked_side_count += 1;
     } else if old != RiskState::Normal && new == RiskState::Normal {
-        ledger.lp_blocked_side_count = ledger.lp_blocked_side_count.saturating_sub(1);
+        ledger.lp_blocked_side_count = ledger
+            .lp_blocked_side_count
+            .checked_sub(1)
+            .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::InvariantViolation));
     }
 }
 
@@ -262,8 +270,8 @@ pub fn apply(
     market: &mut Market,
     assessment: &RiskAssessment,
 ) {
-    update_blocked_count(ledger, market.long.risk_state, assessment.long);
-    update_blocked_count(ledger, market.short.risk_state, assessment.short);
+    update_blocked_count(env, ledger, market.long.risk_state, assessment.long);
+    update_blocked_count(env, ledger, market.short.risk_state, assessment.short);
     if assessment.long != market.long.risk_state {
         events::emit_risk_state_changed(env, symbol, true, assessment.long);
     }

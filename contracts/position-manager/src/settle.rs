@@ -306,7 +306,7 @@ impl<'a> Settlement<'a> {
             );
         }
         storage::remove_position(self.env, self.position.id);
-        risk::release_position(self.ledger);
+        risk::release_position(self.env, self.ledger);
         tail
     }
 

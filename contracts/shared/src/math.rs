@@ -1,18 +1,38 @@
-//! Checked i128 arithmetic cores shared by every protocol contract.
+//! Checked arithmetic cores shared by every protocol contract — §2.1.1.
 //!
 //! Every function returns `None` on overflow or a domain violation instead of
 //! panicking. Contract crates wrap these with a typed panic
 //! (`ArithmeticError` in their own error enum) so a failing invocation
 //! reports an error code that identifies the source contract. Keeping the
-//! cores here guarantees one rounding/sign policy across contracts — the
-//! vault and position-manager previously carried divergent copies.
+//! cores here guarantees one rounding/sign policy across contracts.
 //!
-//! Sign policy: `mul_div_floor` / `mul_div_ceil` are defined for
-//! non-negative `a`/`b` and strictly positive `denominator` only. All fee,
-//! index, and conversion math in the protocol operates on magnitudes;
-//! signed PnL is handled by the callers before conversion.
+//! **Every product formed on the way to a division is computed in 256-bit**,
+//! regardless of how small its operands look (§2.1.1). Three products in the
+//! specification exceed `u128` at configured parameter limits — the funding
+//! weight outright, LP share minting and the minimum borrow fee by a margin a
+//! single parameter change could remove. A uniform 256-bit product removes
+//! the whole class of question, and the range-check on narrowing the quotient
+//! back to 128 bits is what turns a would-be silent wrap into a revert. It is
+//! not optional.
+//!
+//! The widening uses `soroban_sdk::U256` / `I256`, which are host types: the
+//! 256-bit work is a host call rather than a WASM software multiply. The one
+//! hot-path caller is §6.14's borrow rate, a single `mul_div_floor` per
+//! mutation; the 48-iteration primitives in `crate::fixed` run once per
+//! funding window.
+//!
+//! Sign policy: `mul_div_floor` / `mul_div_ceil` are defined for non-negative
+//! `a`/`b` and strictly positive `d` only. `mul_div_trunc` is the signed
+//! helper and truncates toward zero, so the magnitude of a signed skew is
+//! never overstated in either direction — which floor division would not give
+//! for a negative value. No saturating or wrapping operation appears
+//! anywhere: an overflow is an unexpected failure under §8.9, it reverts, and
+//! it is never a terminal business outcome.
 
-/// `a + b`, `None` on overflow.
+use soroban_sdk::{Env, I256, U256};
+
+/// `a + b`, `None` on overflow. Checked at 128 bits (§2.1.1: additions
+/// outside the four helpers are checked and error on overflow).
 #[inline]
 pub fn add(a: i128, b: i128) -> Option<i128> {
     a.checked_add(b)
@@ -24,85 +44,192 @@ pub fn sub(a: i128, b: i128) -> Option<i128> {
     a.checked_sub(b)
 }
 
-/// `a * b`, `None` on overflow.
+/// `a * b`, `None` on overflow. A standalone multiplication, not one on the
+/// way to a division — those go through the helpers below.
 #[inline]
 pub fn mul(a: i128, b: i128) -> Option<i128> {
     a.checked_mul(b)
 }
 
-/// `floor(a * b / denominator)` for `a, b >= 0`, `denominator > 0`.
-/// `None` on overflow or domain violation.
-pub fn mul_div_floor(a: i128, b: i128, denominator: i128) -> Option<i128> {
-    if a < 0 || b < 0 || denominator <= 0 {
+/// Widen a non-negative `i128` to 256-bit. `None` for a negative value: the
+/// unsigned helpers are defined on magnitudes only.
+#[inline]
+pub fn widen(env: &Env, value: i128) -> Option<U256> {
+    if value < 0 {
         return None;
     }
-    a.checked_mul(b)?.checked_div(denominator)
+    Some(U256::from_u128(env, value as u128))
 }
 
-/// `ceil(a * b / denominator)` for `a, b >= 0`, `denominator > 0`.
-/// `None` on overflow or domain violation.
-pub fn mul_div_ceil(a: i128, b: i128, denominator: i128) -> Option<i128> {
-    if a < 0 || b < 0 || denominator <= 0 {
+/// Narrow a 256-bit value back to `i128`, `None` if it does not fit. This is
+/// the check §2.1.1 calls "what turns a would-be silent wrap into a revert".
+#[inline]
+pub fn narrow(value: &U256) -> Option<i128> {
+    match value.to_u128() {
+        Some(v) if v <= i128::MAX as u128 => Some(v as i128),
+        _ => None,
+    }
+}
+
+/// §2.1.1 — `floor(a * b / d)` for `a, b >= 0`, `d > 0`, the product formed
+/// in 256-bit and the quotient range-checked on the way back to `i128`.
+pub fn mul_div_floor(env: &Env, a: i128, b: i128, denominator: i128) -> Option<i128> {
+    if denominator <= 0 {
         return None;
     }
-    let product = a.checked_mul(b)?;
-    if product == 0 {
-        return Some(0);
+    let product = widen(env, a)?.mul(&widen(env, b)?);
+    narrow(&product.div(&widen(env, denominator)?))
+}
+
+/// §2.1.1 — `ceil(a * b / d)` for `a, b >= 0`, `d > 0`. At 256-bit the
+/// rounding add cannot overflow, so there is no `checked_add` dance: the
+/// product is at most `2^254` and `d - 1` is below `2^127`.
+pub fn mul_div_ceil(env: &Env, a: i128, b: i128, denominator: i128) -> Option<i128> {
+    if denominator <= 0 {
+        return None;
     }
-    product
-        .checked_add(denominator - 1)?
-        .checked_div(denominator)
+    let d = widen(env, denominator)?;
+    let product = widen(env, a)?.mul(&widen(env, b)?);
+    let rounded = product.add(&d).sub(&U256::from_u32(env, 1));
+    narrow(&rounded.div(&d))
+}
+
+/// §2.1.1 — signed `a * b / d`, **truncating toward zero**, for `d > 0`.
+/// The helper for signed quantities: the signed skew of §3.4.1, the blend
+/// coefficient `B` of §4.6, and every decayed value derived from them.
+/// `I256::to_i128` performs the narrowing range-check.
+pub fn mul_div_trunc(env: &Env, a: i128, b: i128, denominator: i128) -> Option<i128> {
+    if denominator <= 0 {
+        return None;
+    }
+    let product = I256::from_i128(env, a).mul(&I256::from_i128(env, b));
+    product.div(&I256::from_i128(env, denominator)).to_i128()
+}
+
+/// §2.1.1 — one accumulator advance: `(n + r) / d` with the remainder
+/// carried, returning `(quotient, remainder)`.
+///
+/// `n` is the one numerator in this module that is **not** bounded by 128
+/// bits — §6.2 passes it a funding weight the specification puts near
+/// `1e40`, already the output of a 256-bit product. Only `d`, the quotient,
+/// and the remainder are declared at 128 bits, and all three are
+/// range-checked. Typing the numerator as `i128` to match the other helpers
+/// overflows on the first funding checkpoint of a busy market.
+pub fn carried_div(
+    env: &Env,
+    numerator: &U256,
+    divisor: i128,
+    remainder: i128,
+) -> Option<(i128, i128)> {
+    if divisor <= 0 {
+        return None;
+    }
+    let d = widen(env, divisor)?;
+    let total = numerator.add(&widen(env, remainder)?);
+    Some((narrow(&total.div(&d))?, narrow(&total.rem_euclid(&d))?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn env() -> Env {
+        Env::default()
+    }
+
     #[test]
     fn floor_and_ceil_agree_on_exact_division() {
-        assert_eq!(mul_div_floor(10, 4, 2), Some(20));
-        assert_eq!(mul_div_ceil(10, 4, 2), Some(20));
+        let e = env();
+        assert_eq!(mul_div_floor(&e, 10, 4, 2), Some(20));
+        assert_eq!(mul_div_ceil(&e, 10, 4, 2), Some(20));
     }
 
     #[test]
     fn ceil_rounds_up_floor_rounds_down() {
-        assert_eq!(mul_div_floor(10, 3, 4), Some(7)); // 30/4 = 7.5
-        assert_eq!(mul_div_ceil(10, 3, 4), Some(8));
+        let e = env();
+        assert_eq!(mul_div_floor(&e, 10, 3, 4), Some(7)); // 30/4 = 7.5
+        assert_eq!(mul_div_ceil(&e, 10, 3, 4), Some(8));
     }
 
     #[test]
     fn zero_product_is_zero_both_directions() {
-        assert_eq!(mul_div_floor(0, 5, 3), Some(0));
-        assert_eq!(mul_div_ceil(0, 5, 3), Some(0));
+        let e = env();
+        assert_eq!(mul_div_floor(&e, 0, 5, 3), Some(0));
+        assert_eq!(mul_div_ceil(&e, 0, 5, 3), Some(0));
     }
 
     #[test]
     fn negative_inputs_are_domain_violations() {
-        assert_eq!(mul_div_floor(-1, 5, 3), None);
-        assert_eq!(mul_div_floor(5, -1, 3), None);
-        assert_eq!(mul_div_floor(5, 1, 0), None);
-        assert_eq!(mul_div_ceil(-1, 5, 3), None);
-        assert_eq!(mul_div_ceil(5, -1, 3), None);
-        assert_eq!(mul_div_ceil(5, 1, -3), None);
+        let e = env();
+        assert_eq!(mul_div_floor(&e, -1, 5, 3), None);
+        assert_eq!(mul_div_floor(&e, 5, -1, 3), None);
+        assert_eq!(mul_div_floor(&e, 5, 1, 0), None);
+        assert_eq!(mul_div_ceil(&e, -1, 5, 3), None);
+        assert_eq!(mul_div_ceil(&e, 5, -1, 3), None);
+        assert_eq!(mul_div_ceil(&e, 5, 1, -3), None);
+        assert_eq!(mul_div_trunc(&e, 5, 1, 0), None);
+        assert_eq!(mul_div_trunc(&e, 5, 1, -3), None);
     }
 
     #[test]
-    fn overflow_is_none_not_panic() {
-        assert_eq!(mul_div_floor(i128::MAX, 2, 1), None);
-        assert_eq!(mul_div_ceil(i128::MAX, 2, 1), None);
+    fn the_product_is_formed_in_256_bit_not_128() {
+        let e = env();
+        // `i128::MAX * 2 / 2` wraps at 128 bits and is exact at 256.
+        assert_eq!(mul_div_floor(&e, i128::MAX, 2, 2), Some(i128::MAX));
+        assert_eq!(mul_div_ceil(&e, i128::MAX, 2, 2), Some(i128::MAX));
+        assert_eq!(mul_div_trunc(&e, i128::MAX, 2, 2), Some(i128::MAX));
+        assert_eq!(mul_div_trunc(&e, i128::MIN, 2, 2), Some(i128::MIN));
+    }
+
+    #[test]
+    fn a_quotient_that_does_not_fit_128_bits_is_none_not_a_wrap() {
+        let e = env();
+        assert_eq!(mul_div_floor(&e, i128::MAX, 4, 2), None);
+        assert_eq!(mul_div_ceil(&e, i128::MAX, 4, 2), None);
+        assert_eq!(mul_div_trunc(&e, i128::MAX, 4, 2), None);
+        assert_eq!(mul_div_trunc(&e, i128::MIN, 4, 2), None);
+    }
+
+    #[test]
+    fn trunc_rounds_toward_zero_in_both_directions() {
+        let e = env();
+        // -7/2 is -3.5: truncation gives -3, floor would give -4.
+        assert_eq!(mul_div_trunc(&e, -7, 1, 2), Some(-3));
+        assert_eq!(mul_div_trunc(&e, 7, 1, 2), Some(3));
+        assert_eq!(mul_div_trunc(&e, 7, -1, 2), Some(-3));
+        assert_eq!(mul_div_trunc(&e, -7, -1, 2), Some(3));
+    }
+
+    #[test]
+    fn carried_div_carries_the_remainder_exactly() {
+        let e = env();
+        let n = widen(&e, 10).unwrap();
+        assert_eq!(carried_div(&e, &n, 3, 0), Some((3, 1)));
+        // The carried remainder is what makes the next advance whole.
+        assert_eq!(carried_div(&e, &n, 3, 1), Some((3, 2)));
+        assert_eq!(carried_div(&e, &n, 3, 2), Some((4, 0)));
+        assert_eq!(carried_div(&e, &n, 0, 0), None);
+        assert_eq!(carried_div(&e, &n, 3, -1), None);
+    }
+
+    #[test]
+    fn carried_div_takes_a_numerator_wider_than_128_bits() {
+        let e = env();
+        // ~1e40: the scale §6.2 puts a busy market's funding weight at. An
+        // i128 numerator cannot represent it at all.
+        let big = U256::from_u128(&e, 10u128.pow(20)).mul(&U256::from_u128(&e, 10u128.pow(20)));
+        let (q, r) = carried_div(&e, &big, 10i128.pow(18), 0).unwrap();
+        assert_eq!(q, 10i128.pow(22));
+        assert_eq!(r, 0);
+        // A quotient that still does not fit 128 bits is refused, not wrapped.
+        assert_eq!(carried_div(&e, &big, 1, 0), None);
+    }
+
+    #[test]
+    fn checked_128_bit_helpers_are_unchanged() {
         assert_eq!(add(i128::MAX, 1), None);
         assert_eq!(sub(i128::MIN, 1), None);
         assert_eq!(mul(i128::MAX, 2), None);
-    }
-
-    #[test]
-    fn ceil_near_max_does_not_overflow_the_rounding_add() {
-        // The rounding add (`product + denominator - 1`) is checked too: it
-        // can overflow even when the true ceil would fit. Returning None
-        // (typed panic upstream) beats wrapping.
-        assert_eq!(mul_div_ceil(i128::MAX, 1, 2), None);
-        assert_eq!(mul_div_ceil(i128::MAX, 1, 1), Some(i128::MAX));
-        // Exact division at the boundary stays exact.
-        assert_eq!(mul_div_ceil(i128::MAX - 1, 1, 2), Some((i128::MAX - 1) / 2));
+        assert_eq!(add(2, 3), Some(5));
     }
 }
