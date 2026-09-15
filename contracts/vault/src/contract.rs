@@ -17,8 +17,22 @@ use stellar_tokens::{
 use crate::errors::VaultError;
 use crate::{events, storage};
 
-const VIRTUAL_ASSETS: i128 = 1;
-const VIRTUAL_SHARES: i128 = 1_000_000;
+/// §7.17's conversion offsets. Minting divides by `marked_vault_nav + 1`:
+/// as NAV falls toward zero with shares still outstanding that denominator
+/// collapses, and a deposit of any size would mint an unbounded number of
+/// shares. The offsets keep the arithmetic **defined**, not fair — the
+/// `min_deposit_nav_factor_bps` gate is what keeps it away from that regime.
+const NAV_OFFSET: i128 = 1;
+const SHARE_OFFSET: i128 = shared::constants::SHARE_SCALE;
+
+/// §12.1 — the collateral token's decimals are part of the trust boundary.
+/// Every cash amount in the specification is stated at `PRICE_PRECISION` and
+/// compared directly against the token balance, and §2.2 forbids a second
+/// authoritative cash counter, which is what a conversion factor would
+/// amount to.
+const REQUIRED_ASSET_DECIMALS: u32 = shared::constants::PRICE_DECIMALS;
+/// §12.1 — `7` collateral decimals plus the six-decimal share offset.
+const REQUIRED_SHARE_DECIMALS: u32 = REQUIRED_ASSET_DECIMALS + 6;
 
 #[contract]
 pub struct VaultContract;
@@ -95,8 +109,31 @@ fn snapshot(env: &Env, mutating: bool) -> AccountingSnapshot {
     }
 }
 
-fn settlement_blocked(s: &AccountingSnapshot) -> bool {
-    s.cash_shortfall > 0 || s.restricted_side_count > 0
+/// §7.17 — the shared prefix of both gates: the vault must not be short of
+/// its own claims. A shortfall means physical cash no longer covers what has
+/// already been promised, and neither minting against it nor paying out of
+/// it is defensible until it is cured.
+fn vault_is_short(s: &AccountingSnapshot) -> bool {
+    s.cash_shortfall > 0
+}
+
+/// §5.10 `keeper_lp_resolve_reward`, read from the position manager's live
+/// configuration rather than cached here: §5.10 owns every reward, and a
+/// second copy would be a second thing to keep in step.
+fn lp_resolve_reward(env: &Env) -> i128 {
+    PositionManagerClient::new(env, &storage::position_manager(env))
+        .global_config()
+        .keeper_rewards
+        .lp_resolve
+}
+
+fn failed(env: &Env) -> SettlementResult {
+    let _ = env;
+    SettlementResult {
+        status: SettlementStatus::Failed,
+        amount: 0,
+        reward: 0,
+    }
 }
 
 #[contractimpl(contracttrait)]
@@ -128,6 +165,14 @@ impl VaultContract {
         validate_config(&env, &lp_config);
         Vault::set_asset(&env, asset_address);
         Vault::set_decimals_offset(&env, 6);
+        // §12.1 — checked at the moment the token is wired rather than
+        // discovered at the first deposit. A token with different decimals
+        // would make every claim wrong by a power of ten.
+        if TokenClient::new(&env, &asset(&env)).decimals() != REQUIRED_ASSET_DECIMALS
+            || Vault::decimals(&env) != REQUIRED_SHARE_DECIMALS
+        {
+            panic_with_error!(&env, VaultError::InvalidConfig);
+        }
         Base::set_metadata(
             &env,
             Vault::decimals(&env),
@@ -210,41 +255,44 @@ impl VaultInterface for VaultContract {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
         if storage::get::<bool>(&env, &storage::Key::Paused).unwrap_or(false) {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+            return failed(&env);
         }
         let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
-        let clean_first = s.physical_cash == 0
-            && s.non_lp_claims == 0
-            && s.total_risk_units == 0
-            && s.open_position_count == 0
-            && supply == 0;
-        let config = storage::lp_config(&env);
-        let later_ok = s.cash_lp_equity > 0
-            && s.vault_nav > 0
-            && mul_div_floor(&env, s.vault_nav, BPS, s.cash_lp_equity)
-                >= config.min_deposit_nav_factor_bps as i128;
-        let restores_capacity = s.cash_lp_equity.saturating_add(assets) >= s.required_risk_backing;
-        if settlement_blocked(&s) || !restores_capacity || (!clean_first && !later_ok) {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+
+        // §7.17 `deposit_eligible`, and nothing else. It is a guard on the
+        // conversion arithmetic, not a judgement about market conditions:
+        // the depositor is already protected because marked NAV deducts
+        // recognized trader profit before conversion, so depositing into a
+        // vault under stress is priced rather than subsidized.
+        //
+        // A deposit is deliberately **not** gated on side risk state. It
+        // adds LP equity and therefore lowers every side's PnL factor, which
+        // is the direction the vault wants in exactly the conditions that
+        // would make such a gate bind.
+        let eligible = if supply == 0 {
+            // No holders to dilute.
+            true
+        } else if s.cash_lp_equity == 0 {
+            // Shares outstanding against no cash equity. Recapitalization is
+            // governance's job (§15.2); this operation is not the path.
+            false
+        } else {
+            mul_div_floor(&env, s.vault_nav, BPS, s.cash_lp_equity)
+                >= storage::lp_config(&env).min_deposit_nav_factor_bps as i128
+        };
+        if vault_is_short(&s) || !eligible {
+            return failed(&env);
         }
+
         let shares = mul_div_floor(
             &env,
             assets,
-            supply + VIRTUAL_SHARES,
-            s.vault_nav + VIRTUAL_ASSETS,
+            supply + SHARE_OFFSET,
+            s.vault_nav + NAV_OFFSET,
         );
         if shares <= 0 {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+            return failed(&env);
         }
         transfer_asset(&env, &caller, &env.current_contract_address(), assets);
         Base::mint(&env, &owner, shares);
@@ -262,6 +310,10 @@ impl VaultInterface for VaultContract {
         SettlementResult {
             status: SettlementStatus::Settled,
             amount: shares,
+            // The router pays a deposit's reward out of its own asset
+            // escrow, before conversion, so no share is minted against value
+            // that went to the executor. It reports it, not the vault.
+            reward: 0,
         }
     }
 
@@ -270,32 +322,35 @@ impl VaultInterface for VaultContract {
         caller: Address,
         owner: Address,
         shares: i128,
+        executor: Address,
     ) -> SettlementResult {
         require_router(&env, &caller);
         if shares <= 0 || Base::balance(&env, &caller) < shares {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
         if storage::get::<bool>(&env, &storage::Key::Paused).unwrap_or(false) {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+            return failed(&env);
         }
         let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
         let mut assets = mul_div_floor(
             &env,
             shares,
-            s.vault_nav + VIRTUAL_ASSETS,
-            supply + VIRTUAL_SHARES,
+            s.vault_nav + NAV_OFFSET,
+            supply + SHARE_OFFSET,
         );
-        if shares == supply
+        // §7.17 — in a clean terminal vault the final LP takes all residual
+        // cash LP equity, so conversion rounding cannot strand ownerless
+        // assets behind a supply of zero.
+        let empties_supply = shares == supply;
+        let clean_terminal = empties_supply
             && s.open_position_count == 0
             && s.total_risk_units == 0
-            && s.non_lp_claims == 0
-        {
+            && s.non_lp_claims == 0;
+        if clean_terminal {
             assets = s.cash_lp_equity;
         }
+
         let post_equity = s.cash_lp_equity.saturating_sub(assets);
         let post_util = if s.total_risk_units == 0 {
             0
@@ -305,24 +360,40 @@ impl VaultInterface for VaultContract {
             mul_div_ceil(&env, s.total_risk_units, BPS, post_equity)
         };
         let config = storage::lp_config(&env);
-        let empties_supply = shares == supply;
-        let unsafe_empty = empties_supply
-            && (s.open_position_count > 0 || s.total_risk_units > 0 || s.non_lp_claims > 0);
-        if settlement_blocked(&s)
+        // A withdrawal removes LP equity, and LP equity is the denominator
+        // of every side's PnL factor, so paying one out pushes every side
+        // closer to restriction. `Warning` does not block it (§6.16.1); a
+        // side actually in `ADL` or `HardCap` does.
+        if vault_is_short(&s)
+            || s.deleveraging_side_count > 0
             || assets > s.free_lp_capital
             || post_util > config.max_withdraw_utilization_bps as i128
-            || unsafe_empty
+            // Burning the last share while the vault still owes anything
+            // would leave those claims with no equity behind them.
+            || (empties_supply && !clean_terminal)
         {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+            return failed(&env);
         }
+
+        // §7.17 — the reward comes out of the assets this withdrawal
+        // releases, after every capacity and health check has been satisfied
+        // on the full amount. A withdrawal worth less than the reward pays
+        // the executor everything it releases; it is never topped up from LP
+        // equity.
+        let reward = core::cmp::min(lp_resolve_reward(&env), assets);
+        let to_owner = assets - reward;
+
         Base::burn(&env, &caller, shares);
-        transfer_asset(&env, &env.current_contract_address(), &owner, assets);
+        let current = env.current_contract_address();
+        if reward > 0 {
+            transfer_asset(&env, &current, &executor, reward);
+        }
+        if to_owner > 0 {
+            transfer_asset(&env, &current, &owner, to_owner);
+        }
         let new_cash = cash(&env);
         PositionManagerClient::new(&env, &storage::position_manager(&env))
-            .refresh_borrow_rate(&env.current_contract_address(), &new_cash);
+            .refresh_borrow_rate(&current, &new_cash);
         events::WithdrawalSettled {
             owner,
             shares,
@@ -334,7 +405,12 @@ impl VaultInterface for VaultContract {
         SettlementResult {
             status: SettlementStatus::Settled,
             amount: assets,
+            reward,
         }
+    }
+
+    fn lp_resolve_reward(env: Env) -> i128 {
+        lp_resolve_reward(&env)
     }
 
     fn set_lp_config(env: Env, caller: Address, config: LpConfig) {

@@ -273,10 +273,27 @@ pub struct RiskAssessment {
 }
 
 impl RiskAssessment {
-    /// The number of restricted sides under this assessment.
+    /// The number of restricted sides under this assessment — `Warning`
+    /// included.
     pub fn restricted_sides(&self) -> u32 {
         (self.long.next_state != RiskState::Normal) as u32
             + (self.short.next_state != RiskState::Normal) as u32
+    }
+
+    /// The number of sides actually requiring deleveraging: `ADL` or
+    /// `HardCap`, never `Warning`.
+    ///
+    /// §7.17's withdrawal gate is stated over this count and not over
+    /// `restricted_sides`. Paying a withdrawal removes LP equity, which is
+    /// the denominator of every side's PnL factor, so it is refused while a
+    /// side is latched — but `Warning` is a stickiness latch rather than a
+    /// stop, and gating on it would freeze the LP queue in a state the vault
+    /// is not treating as an emergency.
+    pub fn deleveraging_sides(&self) -> u32 {
+        fn counts(state: RiskState) -> u32 {
+            matches!(state, RiskState::Adl | RiskState::HardCap) as u32
+        }
+        counts(self.long.next_state) + counts(self.short.next_state)
     }
 }
 

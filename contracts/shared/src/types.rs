@@ -701,6 +701,15 @@ pub struct AccountingSnapshot {
     /// `ADL`, or `HardCap`. Always the fresh evaluation, not the stored
     /// counter.
     pub restricted_side_count: u32,
+    /// Sides in `ADL` or `HardCap` only — the count §7.17's withdrawal gate
+    /// is stated over.
+    ///
+    /// Reported separately because `Warning` must **not** block a
+    /// withdrawal, for the same reason it does not block new exposure
+    /// (§6.16.1): it is a latch that makes recovery sticky, not a stop.
+    /// Gating on `restricted_side_count` would freeze the whole LP queue on
+    /// four sides sitting at 4.9% while nothing is actually restricted.
+    pub deleveraging_side_count: u32,
 }
 
 #[contracttype]
@@ -735,6 +744,10 @@ pub struct LpRequest {
 pub enum SettlementStatus {
     Settled,
     Failed,
+    /// §7.17 — the FIFO head is not yet resolvable. No state changes, no
+    /// reward is paid, and the request stays `Pending`. Distinct from
+    /// `Failed`, which is terminal and consumes the request.
+    NotReady,
 }
 
 #[contracttype]
@@ -743,6 +756,11 @@ pub struct SettlementResult {
     pub status: SettlementStatus,
     /// Shares minted for a deposit or assets paid for a withdrawal.
     pub amount: i128,
+    /// §7.17 `keeper_lp_resolve_reward` actually paid to the executor. Zero
+    /// on a failed **withdrawal**, whose escrow is shares rather than cash:
+    /// it releases no assets, and taking the reward in shares would
+    /// confiscate part of an LP's stake for an outcome they did not cause.
+    pub reward: i128,
 }
 
 /// §4.12 — a read-only quote of everything a position has accrued as of a

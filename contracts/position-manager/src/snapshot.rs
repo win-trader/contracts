@@ -71,6 +71,7 @@ pub fn build_snapshot(
     let equity = ledger.cash_lp_equity(env, physical);
     let mut aggregate_pnl_numerator = 0i128;
     let mut restricted_side_count = 0u32;
+    let mut deleveraging_side_count = 0u32;
 
     let mut i = 0u32;
     while i < markets.len() {
@@ -115,6 +116,7 @@ pub fn build_snapshot(
             storage::save_market(env, &symbol, &market);
         }
         restricted_side_count += assessment.restricted_sides();
+        deleveraging_side_count += assessment.deleveraging_sides();
         i += 1;
     }
 
@@ -155,5 +157,6 @@ pub fn build_snapshot(
         total_risk_units: ledger.total_risk_units,
         open_position_count: ledger.open_position_count,
         restricted_side_count,
+        deleveraging_side_count,
     }
 }

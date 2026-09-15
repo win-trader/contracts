@@ -965,6 +965,7 @@ dependencies = [
  "config-manager",
  "mock-oracle",
  "mock-token",
+ "request-router",
  "shared",
  "soroban-sdk",
  "stellar-access",

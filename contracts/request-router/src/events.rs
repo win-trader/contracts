@@ -28,4 +28,7 @@ pub struct LpRequestResolved {
     pub status: LpRequestStatus,
     /// Shares minted (deposit) or assets paid (withdrawal); 0 on failure.
     pub settled_amount: i128,
+    /// §7.17 `keeper_lp_resolve_reward` paid to the executor. Zero on a
+    /// failed withdrawal, which releases no assets to pay from.
+    pub reward: i128,
 }

@@ -66,12 +66,23 @@ pub trait VaultInterface {
 
     /// Settle a matured withdrawal request (RequestRouter only, §7.17).
     /// Full-or-nothing; never leaves a cash claim behind.
+    ///
+    /// `executor` receives `keeper_lp_resolve_reward` out of the assets the
+    /// withdrawal releases, after every capacity and health check has passed
+    /// on the full amount. The vault pays it rather than the router because
+    /// the router's escrow for a withdrawal is shares, not cash.
     fn settle_withdrawal(
         env: Env,
         caller: Address,
         owner: Address,
         shares: i128,
+        executor: Address,
     ) -> SettlementResult;
+
+    /// §5.10 `keeper_lp_resolve_reward`, read through to the position
+    /// manager's live configuration. The router needs it to size a deposit's
+    /// reward, which comes out of its own asset escrow before conversion.
+    fn lp_resolve_reward(env: Env) -> i128;
 
     fn set_lp_config(env: Env, caller: Address, config: LpConfig);
     fn get_lp_config(env: Env) -> LpConfig;

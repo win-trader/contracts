@@ -426,10 +426,14 @@ impl PositionManager for PositionManagerContract {
         require_vault(&env, &caller);
         let mut ledger = storage::get_ledger(&env);
         borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
-        let claims = ledger.non_lp_claims(&env);
+        // The **fresh** evaluation, not the stored counter, and the
+        // deleveraging count rather than the restricted one: §7.17's gate is
+        // `ADL` or `HardCap`, and `Warning` must not close the queue (the
+        // stored counter includes it).
+        let snapshot = snapshot::build_snapshot(&env, &mut ledger, physical, false);
         borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
-        claims <= physical && ledger.restricted_market_side_count == 0
+        snapshot.cash_shortfall == 0 && snapshot.deleveraging_side_count == 0
     }
 
     fn accounting_snapshot(env: Env, physical: i128) -> AccountingSnapshot {

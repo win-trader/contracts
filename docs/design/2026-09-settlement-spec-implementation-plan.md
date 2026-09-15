@@ -918,45 +918,81 @@ should be recorded rather than discovered.
 
 ## Phase 8 — LP path (§7.17)
 
-- [ ] **P8-01** `keeper_lp_resolve_reward` paid on **every** terminal outcome
+- [x] **P8-01** `keeper_lp_resolve_reward` paid on **every** terminal outcome
       except a failed withdrawal. A deposit pays it from asset escrow **before
       conversion**, so no share is minted against value paid to the executor. A
       successful withdrawal pays it from the assets it releases, after every
       capacity and health check has passed on the full amount.
-- [ ] **P8-02** A **failed withdrawal pays no reward** — its escrow is shares,
+      **Implemented:** the two rewards have different payers because they
+      have different sources. The router pays a deposit's out of the asset
+      escrow it already holds; the vault pays a withdrawal's out of the
+      assets it releases. `VaultInterface::lp_resolve_reward` reads §5.10's
+      figure through to the position manager so the router can size a
+      deposit's without new wiring and without a second cached copy of a
+      governed value.
+- [x] **P8-02** A **failed withdrawal pays no reward** — its escrow is shares,
       not cash, and it releases no assets; taking the reward in shares would
       confiscate part of an LP's stake for an outcome they did not cause.
-- [ ] **P8-03** `fail_lp_request` fails rather than reverts (§7.17). Only the
+- [x] **P8-03** `fail_lp_request` fails rather than reverts (§7.17). Only the
       FIFO head is resolvable, so a `require` would let one unsatisfiable
       request block every LP behind it for as long as the condition held.
-- [ ] **P8-04** Deposit gate: `min_deposit_nav_factor_bps` is a guard on the
+      **Deviation (fixed):** "not yet resolvable" was a `TooEarly` panic,
+      which is a revert. §7.17 has no `Expired` outcome for an LP request, so
+      a premature call must leave the head pending and pay nothing — added
+      `SettlementStatus::NotReady` as a returned status. The router's
+      `TooEarly` and `QueueBlocked` codes are now reserved.
+- [x] **P8-04** Deposit gate: `min_deposit_nav_factor_bps` is a guard on the
       **conversion arithmetic**, not a market judgement. First deposit into an
       empty vault is exempt; a vault with shares outstanding and zero cash
       equity accepts no deposit. A deposit is **not** gated on side risk state
       at all — it adds LP equity and lowers every side's factor.
-- [ ] **P8-05** Withdrawal gates: `assets_to_pay <= free_lp_capital`,
+      **Deviation (removed):** the deposit path carried two gates §7.17 does
+      not state — `restores_capacity` (`cash_lp_equity + assets >=
+      required_risk_backing`) and the shared `restricted_side_count > 0`
+      block. Both are gone. A deposit adds LP equity and lowers every side's
+      factor, so gating it on risk state refuses rescue capital in exactly
+      the state that needs it. `clean_first` is now §7.17's `share_supply ==
+      0` alone rather than a five-way emptiness test: there are no holders to
+      dilute, which is the whole reason for the exemption.
+- [x] **P8-05** Withdrawal gates: `assets_to_pay <= free_lp_capital`,
       post-withdraw utilization `<= max_withdraw_utilization_bps`,
       `vault_shortfall == 0`, and **no active market side in `ADL` or
       `HardCap`**. `Warning` does not block, for the same reason it does not
       block new exposure. Today `can_create_lp_request` blocks on
       `lp_blocked_side_count == 0`, which blocks on `Warning` too.
-- [ ] **P8-06** Conversion offsets: `marked_vault_nav + 1` and `share_supply +
+      **Implemented:** `AccountingSnapshot` gains `deleveraging_side_count`,
+      counting `ADL` and `HardCap` only. The stored
+      `restricted_market_side_count` includes `Warning` and could not be
+      reused — four sides sitting at 4.9% would have frozen the whole LP
+      queue while nothing was actually restricted. `can_create_lp_request`
+      moves onto the fresh evaluation for the same reason.
+- [x] **P8-06** Conversion offsets: `marked_vault_nav + 1` and `share_supply +
       SHARE_SCALE`. Today's `VIRTUAL_ASSETS = 1` / `VIRTUAL_SHARES = 1_000_000`
       already match — rename to the spec's names and leave the arithmetic
       alone.
-- [ ] **P8-07** Marked NAV per §2.3: `max(cash_lp_equity - Σ max(raw_side_pnl,
+      **Done:** `NAV_OFFSET` and `SHARE_OFFSET`, with the share offset now
+      taken from `shared::constants::SHARE_SCALE` instead of a local
+      `1_000_000` literal that happened to agree with it. Arithmetic
+      unchanged.
+- [x] **P8-07** Marked NAV per §2.3: `max(cash_lp_equity - Σ max(raw_side_pnl,
       0), 0)`. The loss-recognition branch was deleted in P1-11; confirm the
       consequence is documented — LP share price understates while traders are
       collectively losing and steps up as losses are realized, and that
       asymmetry is the point.
-- [ ] **P8-08** §12.1 token requirements: `require decimals(vault_asset) == 7`
+- [x] **P8-08** §12.1 token requirements: `require decimals(vault_asset) == 7`
       and `decimals(share_token) == 13` at initialization. The current
       `set_decimals_offset(6)` produces 13 for a 7-decimal asset, but the check
       is not written down.
-- [ ] **P8-09** No partial fills, no persistent pending-withdrawal cash claim.
+      **Done:** checked in the vault constructor, against the token, at the
+      moment it is wired — not at the first deposit.
+- [x] **P8-09** No partial fills, no persistent pending-withdrawal cash claim.
       In a clean terminal vault the final LP may withdraw all residual cash LP
       equity so conversion rounding cannot strand ownerless assets. (Today's
       `shares == supply` special case is close — re-verify against §7.17.)
+      **Verified:** the clean-terminal case is `shares == supply` **and** no
+      positions, no risk units, no claims, and it pays the full residual cash
+      LP equity. Burning the last share in any other state is refused
+      outright rather than left to the capacity gates to catch indirectly.
 
 ---
 
