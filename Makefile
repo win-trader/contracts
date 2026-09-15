@@ -1,11 +1,11 @@
-CONTRACTS = vault request-router position-manager config-manager oracle oracle-router mock-oracle mock-token
+CONTRACTS = vault request-router position-manager config-manager mock-oracle mock-token
 WASM_DIR  = target/wasm32v1-none/release
 
 # Local network
 RPC_URL       ?= http://localhost:8000/soroban/rpc
 PASSPHRASE    ?= Standalone Network ; February 2017
 SOURCE        ?= admin
-DEPLOY_CONTRACTS = config-manager oracle-router vault request-router position-manager
+DEPLOY_CONTRACTS = config-manager vault request-router position-manager
 
 .PHONY: build optimize bind check clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-local upgrade-testnet grant-keepers add-market cex-oracles cex-oracles-testnet local
 
@@ -15,8 +15,6 @@ build:
 		-p request-router \
 		-p position-manager \
 		-p config-manager \
-		-p oracle \
-		-p oracle-router \
 		-p mock-token \
 		-p mock-oracle
 

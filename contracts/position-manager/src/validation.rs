@@ -77,6 +77,10 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
         || c.max_market_order_lifetime > c.max_order_lifetime_seconds
         || c.funding_half_life_seconds < 60
         || c.funding_half_life_seconds > MAX_FUNDING_HALF_LIFE
+        // A zero bound would reject every price; an unbounded one would
+        // accept any age, which is the whole of the protection.
+        || c.max_price_age_seconds == 0
+        || c.max_price_age_seconds > MAX_BOUNDED_DURATION
         || c.risk_capacity_limit_bps == 0
         || c.risk_capacity_limit_bps > BPS as u32
         || c.base_borrow_rate_bps_day < 0

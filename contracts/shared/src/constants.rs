@@ -39,9 +39,9 @@ pub const SHARED_BUMP_SECONDS: u64 = (SHARED_BUMP as u64) * SECONDS_PER_LEDGER;
 /// converted to cash exactly once at the final step.
 pub const PRICE_PRECISION: i128 = 10_000_000;
 /// Protocol-wide price scale, expressed as a decimal exponent:
-/// `PRICE_PRECISION == 10^PRICE_DECIMALS`. Every SEP-40 source the
-/// OracleRouter aggregates must report this scale, or its prices would skew
-/// the median.
+/// `PRICE_PRECISION == 10^PRICE_DECIMALS`. The external price feed must
+/// report this scale; it is checked when the feed is wired, because a feed
+/// reporting different decimals would misprice every position silently.
 pub const PRICE_DECIMALS: u32 = 7;
 /// 1e14 — the scale for borrow and funding rates, cumulative indices, skew
 /// fractions, and decay factors (§2.1): everywhere fractional precision
@@ -77,6 +77,10 @@ pub const ROLE_UNPAUSER: &str = "UNPAUSER";
 /// index checkpoints — both become permissionless — so this now covers only
 /// operations the specification still keeps permissioned.
 pub const ROLE_KEEPER: &str = "KEEPER";
+/// §12.3 `oracle_authority` — names the contract that supplies
+/// authenticated prices. Its own role because pointing the protocol at a
+/// different feed is neither a parameter change nor a safety action.
+pub const ROLE_ORACLE: &str = "ORACLE";
 /// §12.3 `protocol_recipient` — may claim accumulated protocol revenue.
 /// Separate from the configuration authority: claiming moves money out,
 /// configuring does not.
@@ -92,18 +96,6 @@ pub const DEFAULT_UPGRADE_TIMELOCK: u64 = 86_400;
 /// Minimum permissible `upgrade_timelock_seconds` — 24h. The admin cannot
 /// shorten the timelock below this floor.
 pub const MIN_UPGRADE_TIMELOCK: u64 = 86_400;
-
-/// Maximum permissible `max_deviation_bps` in OracleConfig — 100%. Stops the
-/// admin from disabling the deviation gate by setting it to `i128::MAX`.
-pub const MAX_DEVIATION_BPS_CEILING: i128 = 10_000;
-
-/// Maximum number of oracle sources per symbol (`primary + secondary` for
-/// the legacy API, or the flat source pool post-refactor). Bounds the O(n²)
-/// dedup cost.
-pub const MAX_ORACLE_SOURCES: u32 = 16;
-/// Minimum permissible `min_required_sources`. A single-source median has no
-/// quorum and a structurally-zero deviation check.
-pub const MIN_REQUIRED_SOURCES_FLOOR: u32 = 2;
 
 /// Maximum permissible upgrade timelock — 30 days. Bounds admin error: an
 /// oversized timelock would push every upgrade eta past the horizon (or

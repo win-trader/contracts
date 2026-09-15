@@ -25,6 +25,9 @@ pub const MAX_MARKET_ORDER_LIFETIME: u64 = 300;
 pub const MIN_BORROW_FEE_SECONDS: u64 = 900;
 /// Twelve hours.
 pub const FUNDING_HALF_LIFE_SECONDS: u64 = 43_200;
+/// One minute. Long enough to tolerate ordinary feed cadence, short enough
+/// that a commitment is never settled against a materially stale print.
+pub const MAX_PRICE_AGE_SECONDS: u64 = 60;
 /// 85%.
 pub const RISK_CAPACITY_LIMIT_BPS: u32 = 8_500;
 pub const BASE_BORROW_RATE_BPS_DAY: i128 = 25;
@@ -128,6 +131,7 @@ pub fn global_config() -> GlobalConfig {
         max_market_order_lifetime: MAX_MARKET_ORDER_LIFETIME,
         min_borrow_fee_seconds: MIN_BORROW_FEE_SECONDS,
         funding_half_life_seconds: FUNDING_HALF_LIFE_SECONDS,
+        max_price_age_seconds: MAX_PRICE_AGE_SECONDS,
         risk_capacity_limit_bps: RISK_CAPACITY_LIMIT_BPS,
         base_borrow_rate_bps_day: BASE_BORROW_RATE_BPS_DAY,
         max_variable_borrow_bps_day: MAX_VARIABLE_BORROW_BPS_DAY,

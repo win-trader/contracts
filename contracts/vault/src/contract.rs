@@ -1,6 +1,6 @@
 use shared::constants::{BPS, ROLE_ADMIN, ROLE_PAUSER, ROLE_UPGRADER};
 use shared::{
-    AccountingSnapshot, ConfigManagerClient, LpConfig, MigrationData, OracleRound,
+    AccountingSnapshot, ConfigManagerClient, LpConfig, MigrationData,
     PositionManagerClient, SettlementResult, SettlementStatus, TimelockedUpgradeable,
     UpgradeFailure, VaultInterface,
 };
@@ -82,13 +82,16 @@ fn transfer_asset(env: &Env, from: &Address, to: &Address, amount: i128) {
     TokenClient::new(env, &asset(env)).transfer(from, to, &amount);
 }
 
-fn snapshot(env: &Env, round: &OracleRound, mutating: bool) -> AccountingSnapshot {
+/// The position manager prices every active market from the external feed
+/// inside this call, so the snapshot is synchronized by virtue of being one
+/// transaction rather than by a separately published round.
+fn snapshot(env: &Env, mutating: bool) -> AccountingSnapshot {
     let physical = cash(env);
     let pm = PositionManagerClient::new(env, &storage::position_manager(env));
     if mutating {
-        pm.prepare_lp_snapshot(&env.current_contract_address(), round, &physical)
+        pm.prepare_lp_snapshot(&env.current_contract_address(), &physical)
     } else {
-        pm.accounting_snapshot(round, &physical)
+        pm.accounting_snapshot(&physical)
     }
 }
 
@@ -201,7 +204,6 @@ impl VaultInterface for VaultContract {
         caller: Address,
         owner: Address,
         assets: i128,
-        round: OracleRound,
     ) -> SettlementResult {
         require_router(&env, &caller);
         if assets <= 0 {
@@ -213,7 +215,7 @@ impl VaultInterface for VaultContract {
                 amount: 0,
             };
         }
-        let s = snapshot(&env, &round, true);
+        let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
         let clean_first = s.physical_cash == 0
             && s.non_lp_claims == 0
@@ -268,7 +270,6 @@ impl VaultInterface for VaultContract {
         caller: Address,
         owner: Address,
         shares: i128,
-        round: OracleRound,
     ) -> SettlementResult {
         require_router(&env, &caller);
         if shares <= 0 || Base::balance(&env, &caller) < shares {
@@ -280,7 +281,7 @@ impl VaultInterface for VaultContract {
                 amount: 0,
             };
         }
-        let s = snapshot(&env, &round, true);
+        let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
         let mut assets = mul_div_floor(
             &env,
@@ -353,8 +354,8 @@ impl VaultInterface for VaultContract {
             .can_create_lp_request(&env.current_contract_address(), &physical)
     }
 
-    fn accounting_snapshot(env: Env, round: OracleRound) -> AccountingSnapshot {
-        snapshot(&env, &round, false)
+    fn accounting_snapshot(env: Env) -> AccountingSnapshot {
+        snapshot(&env, false)
     }
 
     fn physical_cash(env: Env) -> i128 {

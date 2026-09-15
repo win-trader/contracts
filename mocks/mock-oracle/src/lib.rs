@@ -1,16 +1,26 @@
-//! Mock SEP-40 price oracle for use in integration tests.
+//! Test stand-in for the third-party price feed.
 //!
-//! Allows tests to set arbitrary prices for any symbol so the OracleRouter
-//! and PositionManager can be exercised under controlled price conditions.
+//! The protocol owns no oracle. This mock exists only so integration tests
+//! can drive prices deterministically; in every real deployment the address
+//! wired into the position manager belongs to an external provider (or to a
+//! thin adapter that forwards to one).
 
 #![no_std]
 
 use soroban_sdk::{contract, contractimpl, contracttype, Env, Symbol};
 
+/// Mirrors `shared::PriceData`. Declared locally so the mock has no
+/// dependency on the protocol crates.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PriceData {
+    pub price: i128,
+    pub timestamp: u64,
+}
+
 #[contracttype]
 pub enum StorageKey {
     Price(Symbol),
-    LastUpdate(Symbol),
 }
 
 #[contract]
@@ -20,34 +30,33 @@ pub struct MockOracle;
 impl MockOracle {
     pub fn initialize(_env: Env) {}
 
-    /// Manually set the price for `symbol` (scaled by 1e7). Test-only.
+    /// Set the price for `symbol` (scaled by 1e7), stamped with the current
+    /// ledger timestamp. Test-only.
     pub fn set_price(env: Env, symbol: Symbol, price: i128) {
+        let data = PriceData {
+            price,
+            timestamp: env.ledger().timestamp(),
+        };
         env.storage()
             .instance()
-            .set(&StorageKey::Price(symbol.clone()), &price);
-        env.storage()
-            .instance()
-            .set(&StorageKey::LastUpdate(symbol), &env.ledger().timestamp());
+            .set(&StorageKey::Price(symbol), &data);
     }
 
-    /// Return the stored price for `symbol`. Implements SEP-40 price interface.
-    pub fn get_price(env: Env, symbol: Symbol) -> i128 {
+    /// Set a price with an explicit observation timestamp, so tests can
+    /// exercise the staleness bound and the fresh-observation cursor.
+    pub fn set_price_at(env: Env, symbol: Symbol, price: i128, timestamp: u64) {
+        let data = PriceData { price, timestamp };
         env.storage()
             .instance()
-            .get(&StorageKey::Price(symbol))
-            .unwrap_or_else(|| panic!("no price set"))
+            .set(&StorageKey::Price(symbol), &data);
     }
 
-    /// Return the ledger timestamp when the price was last set.
-    pub fn last_update(env: Env, symbol: Symbol) -> u64 {
-        env.storage()
-            .instance()
-            .get(&StorageKey::LastUpdate(symbol))
-            .unwrap_or(0u64)
+    /// `shared::PriceFeed::lastprice`.
+    pub fn lastprice(env: Env, symbol: Symbol) -> Option<PriceData> {
+        env.storage().instance().get(&StorageKey::Price(symbol))
     }
 
-    /// Price scale this source reports — 7, matching the protocol-wide
-    /// `shared::constants::PRICE_DECIMALS` so the router accepts it as a source.
+    /// `shared::PriceFeed::decimals` — 7, matching `PRICE_DECIMALS`.
     pub fn decimals(_env: Env) -> u32 {
         7
     }

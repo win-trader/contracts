@@ -20,7 +20,10 @@ use crate::ledger::Ledger;
 #[derive(Clone)]
 pub enum StorageKey {
     ConfigManager,
-    OracleRouter,
+    /// The external price feed this deployment reads from. Rewireable by
+    /// the oracle authority, because a provider can be replaced without
+    /// redeploying the protocol.
+    PriceFeed,
     Vault,
     GlobalConfig,
     Initialized,
@@ -262,17 +265,17 @@ pub fn save_config_manager(env: &Env, config_manager: &Address) {
         .set(&StorageKey::ConfigManager, config_manager);
 }
 
-pub fn get_oracle_router(env: &Env) -> Address {
+pub fn get_price_feed(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get(&StorageKey::OracleRouter)
+        .get(&StorageKey::PriceFeed)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
-pub fn save_oracle_router(env: &Env, oracle_router: &Address) {
+pub fn save_price_feed(env: &Env, price_feed: &Address) {
     env.storage()
         .instance()
-        .set(&StorageKey::OracleRouter, oracle_router);
+        .set(&StorageKey::PriceFeed, price_feed);
 }
 
 pub fn get_vault(env: &Env) -> Address {

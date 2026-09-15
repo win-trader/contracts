@@ -21,18 +21,28 @@ use position::{
     set_tp_sl::set_tp_sl,
 };
 use shared::constants::{
-    INDEX_PRECISION, ROLE_ADMIN, ROLE_KEEPER, ROLE_PAUSER, ROLE_PROTOCOL, ROLE_UNPAUSER,
-    ROLE_UPGRADER,
+    INDEX_PRECISION, PRICE_DECIMALS, ROLE_ADMIN, ROLE_KEEPER, ROLE_ORACLE, ROLE_PAUSER,
+    ROLE_PROTOCOL, ROLE_UNPAUSER, ROLE_UPGRADER,
 };
 use shared::{
     AccountingSnapshot, ConfigManagerClient, EntryOrderParams, GlobalConfig, Market, MarketConfig,
-    MigrationData, OracleRound, Position, PositionManager, TimelockedUpgradeable, UpgradeFailure,
+    MigrationData, Position, PositionManager, PriceFeedClient, TimelockedUpgradeable,
+    UpgradeFailure,
 };
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
 
 #[contract]
 pub struct PositionManagerContract;
+
+/// A feed reporting a different decimal scale would misprice every position
+/// silently, so it is rejected at the moment it is wired rather than
+/// discovered at the first settlement.
+fn require_feed_decimals(env: &Env, price_feed: &Address) {
+    if PriceFeedClient::new(env, price_feed).decimals() != PRICE_DECIMALS {
+        panic_with_error!(env, PositionManagerError::PriceUnavailable);
+    }
+}
 
 /// §10.3.1 — the global rules plus the two that are stated over the active
 /// market set rather than over the record alone.
@@ -126,12 +136,13 @@ impl PositionManagerContract {
     pub fn __constructor(
         env: Env,
         config_manager: Address,
-        oracle_router: Address,
+        price_feed: Address,
         config: GlobalConfig,
     ) {
         validation::validate_global(&env, &config);
         storage::save_config_manager(&env, &config_manager);
-        storage::save_oracle_router(&env, &oracle_router);
+        require_feed_decimals(&env, &price_feed);
+        storage::save_price_feed(&env, &price_feed);
         storage::save_global_config(&env, &config);
         storage::save_initialized(&env);
         storage::save_paused(&env, false);
@@ -145,6 +156,18 @@ impl PositionManagerContract {
 
 #[contractimpl]
 impl PositionManager for PositionManagerContract {
+    fn set_price_feed(env: Env, caller: Address, price_feed: Address) {
+        require_initialized(&env);
+        require_role(&env, &caller, ROLE_ORACLE);
+        require_feed_decimals(&env, &price_feed);
+        storage::save_price_feed(&env, &price_feed);
+        events::emit_price_feed_changed(&env, &price_feed);
+    }
+
+    fn price_feed(env: Env) -> Address {
+        storage::get_price_feed(&env)
+    }
+
     fn set_vault(env: Env, caller: Address, vault: Address) {
         require_initialized(&env);
         require_role(&env, &caller, ROLE_ADMIN);
@@ -359,12 +382,7 @@ impl PositionManager for PositionManagerContract {
         storage::is_market_disabled(&env, &market)
     }
 
-    fn prepare_lp_snapshot(
-        env: Env,
-        caller: Address,
-        round: OracleRound,
-        physical: i128,
-    ) -> AccountingSnapshot {
+    fn prepare_lp_snapshot(env: Env, caller: Address, physical: i128) -> AccountingSnapshot {
         require_vault(&env, &caller);
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
@@ -377,7 +395,7 @@ impl PositionManager for PositionManagerContract {
             funding::accrue(&env, &mut ledger, &mut market, now);
             storage::save_market(&env, &symbol, &market);
         }
-        let result = snapshot::build_snapshot(&env, &mut ledger, &round, physical, true);
+        let result = snapshot::build_snapshot(&env, &mut ledger, physical, true);
         borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
         result
@@ -401,9 +419,9 @@ impl PositionManager for PositionManagerContract {
         claims <= physical && ledger.restricted_market_side_count == 0
     }
 
-    fn accounting_snapshot(env: Env, round: OracleRound, physical: i128) -> AccountingSnapshot {
+    fn accounting_snapshot(env: Env, physical: i128) -> AccountingSnapshot {
         let mut ledger = storage::get_ledger(&env);
-        snapshot::build_snapshot(&env, &mut ledger, &round, physical, false)
+        snapshot::build_snapshot(&env, &mut ledger, physical, false)
     }
 
     fn get_position(env: Env, position_id: u64) -> Position {

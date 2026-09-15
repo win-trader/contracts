@@ -6,9 +6,8 @@ pub mod defaults;
 pub mod events;
 pub mod fixed;
 pub mod math;
-pub mod oracle;
-pub mod oracle_router;
 pub mod position_manager;
+pub mod price_feed;
 pub mod request_router;
 pub mod types;
 pub mod upgrade;
@@ -18,18 +17,17 @@ use constants::{INSTANCE_BUMP, INSTANCE_THRESHOLD};
 use soroban_sdk::{contractclient, Address, Env, Symbol};
 
 pub use config_manager::{ConfigManager, ConfigManagerClient};
-pub use oracle::{Oracle, OracleClient};
-pub use oracle_router::{OracleRouter, OracleRouterClient};
 pub use position_manager::{PositionManager, PositionManagerClient};
+pub use price_feed::{PriceData, PriceFeed, PriceFeedClient, StampedPrice};
 pub use request_router::{RequestRouter, RequestRouterClient};
 pub use types::{
     AccountingSnapshot, ActionKind, ActionOutcome, ActionPayload, ClosePayload, DecreasePayload,
     EntryOrder, EntryOrderParams, FailureReason, FundingIndices, GlobalConfig, IncreasePayload,
     KeeperRewards, LpConfig, LpRequest, LpRequestKind, LpRequestStatus, Market, MarketConfig,
-    MarketSide, MigrationData, OpenPayload, OracleConfig, OracleRound, PayerSide, PendingAction,
+    MarketSide, MigrationData, OpenPayload, PayerSide, PendingAction,
     PendingFeesView, PendingGlobalConfig, PendingMarketConfig, PendingUpgrade, Position,
     RemainderGroup, RiskState,
-    RoundPrice, SettlementResult, SettlementStatus, Trigger, TriggerCondition,
+    SettlementResult, SettlementStatus, Trigger, TriggerCondition,
     TriggerInstruction,
 };
 pub use upgrade::{TimelockedUpgradeable, UpgradeFailure};

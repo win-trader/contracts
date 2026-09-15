@@ -46,7 +46,7 @@ untouched.
 |---|---|---|
 | `position-manager` | **Rewrite** | Two-phase lifecycle, funding segments, fee model, keeper rewards, risk-state semantics, failure taxonomy |
 | `shared` | **Rewrite** | `types.rs` is almost entirely re-shaped (§5); `math.rs` gains 256-bit helpers and loses the old transcendentals (§2.1) |
-| `oracle-router` | **Surgery** | `read_stamped_price` returning `observed_at`; settlement reads never answered from a retained value; §12.7.3 degraded mode; error renumber. Median/quorum/deviation core survives intact |
+| `oracle-router` | **Deleted** | Superseded by a third-party feed (Phase 7). `oracle` is deleted with it |
 | `vault` | **Surgery** | LP gate changes (`Warning` stops blocking; `ADL`/`HardCap` block withdrawal), resolve reward paid from released assets, §12.1 decimals checks, error renumber |
 | `request-router` | **Light** | Delete `Expired` and the round-assignment cutoff, pay the resolve reward from deposit escrow, error renumber |
 | `config-manager` | **Light** | Split `PAUSER` into pause vs unpause authority (§12.3), drop the keeper allowlist from ADL, error renumber |
@@ -800,43 +800,62 @@ place.
 
 ---
 
-## Phase 7 — Oracle interface
+## Phase 7 — External price feed
 
-- [ ] **P7-01** `read_stamped_price(symbol) -> StampedPrice { price,
-      observed_at }` (§12.7.1). `observed_at` is the **oldest** source
-      timestamp contributing to the accepted aggregate — the router already
-      computes this as `oldest_source_update`; it just is not returned.
-- [ ] **P7-02** **No call may answer from a retained value.** The current
-      `get_price` serves a cache. A retained stamp is backdated by however long
-      it was retained, so `commit_observed_at` becomes older than the moment
-      the trader committed, and a fill then satisfies `fill_observed_at >
-      commit_observed_at` against an observation that predates the commitment —
-      the test passing with no new information having arrived. On the forced
-      paths, a retained price is a price the caller chose: a keeper who can pin
-      a momentary adverse print can liquidate a currently-healthy position, or
-      latch a side into `HardCap`. Route every settlement read through the
-      existing uncached `fetch_fresh_price` path and return the stamp with it.
-- [ ] **P7-03** Keep synchronized rounds as they are (§12.7.2) — separate
-      mechanism, separate purpose, already uncached. Note the liveness
-      dependency: if rounds stop, LP deposits and withdrawals stop while
-      positions keep trading and liquidating on per-symbol prices.
-- [ ] **P7-04** §12.7.3: **a risk-reducing operation must not be blocked by a
-      guard whose purpose is to protect risk-adding operations.** The deviation
-      guard is currently absorbing — while sources disagree, every open *and*
-      every close reverts together and the protocol cannot trade its way out.
-      This matches the known oracle-publisher wedge. The spec states the
-      requirement and leaves the mechanism to the oracle side: a wider bound for
-      liquidation, a documented fallback aggregate, or an explicit degraded
-      mode. **One guard governing both directions is not acceptable.** Pick one
-      — this is the one open decision that blocks Phase 7.
-- [ ] **P7-05** §12.7.4 router-side bounds: source decimals exactly `7`,
-      `min_required_sources >= 2`, `max_deviation_bps <= 10_000`, source count
-      `<= 16`. All already enforced — verify and document that
-      `staleness_threshold` is the deliberate choice, because it silently
-      widens the window a trader commits against without any §10 parameter
-      changing.
+**Decision (2026-09, product): the protocol does not own an oracle.** Prices
+come from a third-party provider. `oracle-router` and `oracle` are deleted
+outright rather than reworked, and §12.7 is reinterpreted: it specifies the
+price interface the protocol *depends on*, not a contract this workspace
+ships.
 
----
+This dissolves the plan's only blocking open decision. P7-04 asked how the
+oracle should stop its deviation guard from blocking exits; there is no
+longer a deviation guard here to fix, because aggregation across sources
+belongs to the provider.
+
+- [x] **P7-01** `read_stamped_price(symbol) -> StampedPrice { price,
+      observed_at }`. Satisfied by the feed itself: SEP-40's `lastprice`
+      already returns a price with its observation timestamp, so the cursor
+      §7.0 needs arrives without the router having to compute
+      `oldest_source_update`.
+- [x] **P7-02** No call answers from a retained value. There is no cache to
+      serve from — the retained-price path was the router's, and it is gone.
+      The requirement is restated on the `PriceFeed` trait as a condition on
+      the provider, because it is now their implementation that has to
+      satisfy it.
+- [x] **P7-03** Synchronized rounds are **deleted**, not kept. A round was
+      the router's way of pricing every market at one instant; reading each
+      active market inside the settling transaction is the same guarantee
+      without a publication step. This removes the liveness dependency the
+      item was written to warn about — there is no longer anything that can
+      stop publishing while positions keep trading.
+- [x] **P7-04** *Dissolved.* No longer a protocol concern.
+- [x] **P7-05** Router-side bounds are gone with the router. What the
+      protocol keeps is what only it can decide: `max_price_age_seconds` (a
+      governed §10 parameter, validated `0 < x <= 86_400`), rejection of a
+      non-positive price, and a `decimals() == PRICE_DECIMALS` check at the
+      moment a feed is wired — a feed reporting a different scale would
+      misprice every position silently.
+
+### What this changes elsewhere
+
+| Was | Now |
+|---|---|
+| `oracle-router` aggregates N `oracle` sources: median, quorum, deviation | Provider's concern |
+| `publish_round` → `OracleRound` → vault → PM | PM reads each active market from the feed, in the settling transaction |
+| `request-router` waits for a round newer than `execute_after` | Waits on wall clock: `now >= execute_after` |
+| `OracleConfig` (deviation, quorum, cache duration) | `max_price_age_seconds` only |
+| Oracle address fixed at deploy | `set_price_feed`, held by `oracle_authority` — a provider can be replaced without redeploying |
+| `mocks/mock-oracle` feeds the router | Stands in for the third party in tests |
+
+**What the protocol gives up, stated plainly.** Multi-source median, quorum,
+and deviation rejection are no longer ours. If the provider publishes a bad
+print, nothing in these contracts will out-vote it. What remains between a
+bad print and a bad fill is the staleness bound, the trader's own
+`acceptable_price` on every action, and the §7.0 requirement that a fill
+observe a strictly newer price than its commitment. That is a deliberate
+trade — it is the reason for buying a feed rather than running one — but it
+should be recorded rather than discovered.
 
 ## Phase 8 — LP path (§7.17)
 
@@ -1026,10 +1045,9 @@ here so they are not discovered at rotation time.
 
 These block the phases named; everything else is determined by the spec.
 
-1. **P7-04 — how the oracle stops the deviation guard from blocking exits.**
-   Wider bound for forced paths, documented fallback aggregate, or explicit
-   degraded mode. Oracle-side decision; the spec deliberately does not
-   prescribe. *Blocks Phase 7.*
+1. ~~**P7-04 — how the oracle stops the deviation guard from blocking
+   exits.**~~ *Resolved 2026-09 by removing the oracle from the product.*
+   There is no protocol-side deviation guard left to block anything.
 2. **P2-01 — `soroban_sdk::U256` host types vs a two-limb software
    implementation.** Plan assumes the host types. `refresh_borrow_rate` runs
    after every mutation, so measure before committing. *Blocks nothing; revisit

@@ -1,6 +1,5 @@
 use shared::{
-    LpRequest, LpRequestKind, LpRequestStatus, OracleRouterClient, SettlementResult,
-    SettlementStatus, VaultClient,
+    LpRequest, LpRequestKind, LpRequestStatus, SettlementResult, SettlementStatus, VaultClient,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
@@ -14,20 +13,6 @@ use crate::{events, storage};
 
 fn transfer(env: &Env, token: &Address, from: &Address, to: &Address, amount: i128) {
     TokenClient::new(env, token).transfer(from, to, &amount);
-}
-
-fn latest_valid_round(env: &Env) -> shared::OracleRound {
-    let client = OracleRouterClient::new(env, &storage::oracle(env));
-    let latest = client.latest_round_id();
-    if latest == 0 {
-        panic_with_error!(env, RequestRouterError::NoOracleRound);
-    }
-    let round = client.get_round(&latest);
-    let max_age = client.get_oracle_config().staleness_threshold;
-    if env.ledger().timestamp() > round.timestamp.saturating_add(max_age) {
-        panic_with_error!(env, RequestRouterError::NoOracleRound);
-    }
-    round
 }
 
 fn ensure_lp_actions_open(env: &Env) {
@@ -154,8 +139,11 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
     if request.status != LpRequestStatus::Pending {
         panic_with_error!(env, RequestRouterError::InvalidRequest);
     }
-    let round = latest_valid_round(env);
-    if round.timestamp < request.execute_after {
+    // §7.17 — the delay is a wall-clock wait, not a wait for a published
+    // round. The vault prices every market from the external feed inside the
+    // settling transaction, so there is no separate publication step whose
+    // stalling would strand LP requests while positions keep trading.
+    if env.ledger().timestamp() < request.execute_after {
         panic_with_error!(env, RequestRouterError::TooEarly);
     }
     // Mark and advance before external effects. A panic rolls the complete
@@ -170,14 +158,12 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
             &env.current_contract_address(),
             &request.owner,
             &request.amount,
-            &round,
         )
     } else {
         vault_client.settle_withdrawal(
             &env.current_contract_address(),
             &request.owner,
             &request.amount,
-            &round,
         )
     };
     if result.status == SettlementStatus::Failed {

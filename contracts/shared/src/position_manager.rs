@@ -18,7 +18,7 @@ use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
 use crate::types::{
     AccountingSnapshot, EntryOrder, EntryOrderParams, GlobalConfig, Market, MarketConfig,
-    OracleRound, PendingFeesView, Position,
+    PendingFeesView, Position,
 };
 
 #[contractclient(name = "PositionManagerClient")]
@@ -26,6 +26,19 @@ pub trait PositionManager {
     /// One-time wiring of the vault address (ADMIN). Panics with
     /// `AlreadyInitialized` on a second call.
     fn set_vault(env: Env, caller: Address, vault: Address);
+
+    /// Point the protocol at a different external price feed
+    /// (`oracle_authority`, §12.3). Verifies the feed reports
+    /// `PRICE_DECIMALS`.
+    ///
+    /// Rewireable rather than fixed at deploy: the protocol does not own its
+    /// oracle, so replacing the provider must not require redeploying the
+    /// protocol. It is the one authority whose whole job is naming the
+    /// contract that supplies authenticated prices.
+    fn set_price_feed(env: Env, caller: Address, price_feed: Address);
+
+    /// The external price feed currently in use.
+    fn price_feed(env: Env) -> Address;
 
     /// Open a leveraged position (§12.1). Transfers `collateral` from
     /// `owner` — nothing is charged at open (§11.1) — and enforces the
@@ -164,16 +177,17 @@ pub trait PositionManager {
     fn enable_market(env: Env, caller: Address, market: Symbol);
     fn is_market_disabled(env: Env, market: Symbol) -> bool;
 
-    /// LP-settlement snapshot (vault only, §13.5/§13.6): checkpoints global
-    /// accrual, evaluates and persists every side's risk state at the
-    /// round's prices, and returns the accounting snapshot the settlement
-    /// decides against.
-    fn prepare_lp_snapshot(
-        env: Env,
-        caller: Address,
-        round: OracleRound,
-        physical_cash: i128,
-    ) -> AccountingSnapshot;
+    /// LP-settlement snapshot (vault only, §7.17): checkpoints global
+    /// accrual, prices every active market from the external feed inside
+    /// this transaction, evaluates and persists every side's risk state
+    /// against those prices, and returns the accounting snapshot the
+    /// settlement decides against.
+    ///
+    /// Reading each market here rather than accepting a published round is
+    /// what removes the liveness dependency the round carried: there is no
+    /// separate publication step that can stop while positions keep
+    /// trading.
+    fn prepare_lp_snapshot(env: Env, caller: Address, physical_cash: i128) -> AccountingSnapshot;
 
     /// Recompute the borrow rate from current utilization (vault only,
     /// called after vault cash moved).
@@ -183,10 +197,9 @@ pub trait PositionManager {
     /// side in a restricted risk state (vault only, §14).
     fn can_create_lp_request(env: Env, caller: Address, physical_cash: i128) -> bool;
 
-    /// Read-only accounting snapshot for `round` — no risk-state
-    /// transitions are persisted and no accrual checkpoint runs.
-    fn accounting_snapshot(env: Env, round: OracleRound, physical_cash: i128)
-        -> AccountingSnapshot;
+    /// Read-only accounting snapshot at current feed prices — no
+    /// risk-state transitions are persisted and no accrual checkpoint runs.
+    fn accounting_snapshot(env: Env, physical_cash: i128) -> AccountingSnapshot;
 
     fn get_position(env: Env, position_id: u64) -> Position;
 

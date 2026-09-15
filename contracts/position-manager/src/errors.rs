@@ -19,7 +19,9 @@ pub enum PositionManagerError {
     PositionHealthy = 13,
     RiskStateBlocked = 14,
     ArithmeticError = 15,
-    InvalidOracleRound = 16,
+    /// Reserved. Its raiser went with the oracle router; prices now come
+    /// from an external feed and fail as `PriceUnavailable` or `StalePrice`.
+    Reserved16 = 16,
     TooEarly = 17,
     InvalidOrder = 18,
     /// Reserved. Its raiser was deleted with the execution budget (P1-01);
@@ -63,4 +65,11 @@ pub enum PositionManagerError {
     /// §5.3 — `market_risk_factor_bps` changed while the market still has
     /// open interest or risk units on either side.
     MarketNotEmpty = 36,
+    /// The external price feed returned no price for the symbol, or a
+    /// non-positive one.
+    PriceUnavailable = 37,
+    /// The feed's latest observation is older than `max_price_age_seconds`.
+    /// Distinct from `PriceUnavailable`: the feed answered, the answer is
+    /// just too old to act on.
+    StalePrice = 38,
 }

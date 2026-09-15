@@ -9,7 +9,6 @@ use crate::errors::RequestRouterError;
 pub(crate) enum Key {
     Asset,
     Vault,
-    OracleRouter,
     ConfigManager,
     NextId,
     NextToResolve,
@@ -31,10 +30,6 @@ pub(crate) fn asset(env: &Env) -> Address {
 
 pub(crate) fn vault(env: &Env) -> Address {
     get(env, &Key::Vault).unwrap()
-}
-
-pub(crate) fn oracle(env: &Env) -> Address {
-    get(env, &Key::OracleRouter).unwrap()
 }
 
 pub(crate) fn config_manager(env: &Env) -> Address {

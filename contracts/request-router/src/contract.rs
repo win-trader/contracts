@@ -25,12 +25,10 @@ impl RequestRouterContract {
         env: Env,
         asset_address: Address,
         vault_address: Address,
-        oracle_router: Address,
         config_manager_address: Address,
     ) {
         storage::set(&env, &storage::Key::Asset, &asset_address);
         storage::set(&env, &storage::Key::Vault, &vault_address);
-        storage::set(&env, &storage::Key::OracleRouter, &oracle_router);
         storage::set(&env, &storage::Key::ConfigManager, &config_manager_address);
         storage::set(&env, &storage::Key::NextId, &1u64);
         storage::set(&env, &storage::Key::NextToResolve, &1u64);

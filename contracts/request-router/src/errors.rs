@@ -9,7 +9,9 @@ pub enum RequestRouterError {
     TooEarly = 3,
     QueueBlocked = 4,
     LpActionBlocked = 5,
-    NoOracleRound = 6,
+    /// Reserved. Its raiser went with the oracle router; P9-01b decides
+    /// this contract's error range and renumbers the enum.
+    Reserved6 = 6,
     Unauthorized = 7,
     /// `upgrade` called with no pending proposal.
     UpgradeNoPending = 8,

@@ -15,7 +15,7 @@
 
 use soroban_sdk::{contractclient, Address, BytesN, Env};
 
-use crate::types::{AccountingSnapshot, LpConfig, OracleRound, SettlementResult};
+use crate::types::{AccountingSnapshot, LpConfig, SettlementResult};
 
 #[contractclient(name = "VaultClient")]
 pub trait VaultInterface {
@@ -52,34 +52,34 @@ pub trait VaultInterface {
     /// See the module docs for why this bypasses the conservation check.
     fn transfer_safety_claim(env: Env, caller: Address, recipient: Address, amount: i128);
 
-    /// Settle a matured deposit request against `round` (RequestRouter
-    /// only, §13.5). Returns `Failed` (escrow refunded by the router)
-    /// instead of panicking for business rejections.
+    /// Settle a matured deposit request (RequestRouter only, §7.17). Prices
+    /// every active market from the external feed inside this transaction,
+    /// so the whole NAV calculation sees one timestamp. Returns `Failed`
+    /// (escrow refunded by the router) instead of panicking for business
+    /// rejections.
     fn settle_deposit(
         env: Env,
         caller: Address,
         owner: Address,
         assets: i128,
-        round: OracleRound,
     ) -> SettlementResult;
 
-    /// Settle a matured withdrawal request against `round` (RequestRouter
-    /// only, §13.6). Full-or-nothing; never leaves a cash claim behind.
+    /// Settle a matured withdrawal request (RequestRouter only, §7.17).
+    /// Full-or-nothing; never leaves a cash claim behind.
     fn settle_withdrawal(
         env: Env,
         caller: Address,
         owner: Address,
         shares: i128,
-        round: OracleRound,
     ) -> SettlementResult;
 
     fn set_lp_config(env: Env, caller: Address, config: LpConfig);
     fn get_lp_config(env: Env) -> LpConfig;
     /// Whether the protocol currently accepts new LP requests (§14).
     fn can_create_lp_request(env: Env) -> bool;
-    /// Read-only accounting snapshot at `round` — delegates to the
-    /// PositionManager with the current physical cash.
-    fn accounting_snapshot(env: Env, round: OracleRound) -> AccountingSnapshot;
+    /// Read-only accounting snapshot at current feed prices — delegates to
+    /// the PositionManager with the current physical cash.
+    fn accounting_snapshot(env: Env) -> AccountingSnapshot;
     /// `collateral_token.balanceOf(vault)` — the only authoritative cash
     /// balance (§4.1).
     fn physical_cash(env: Env) -> i128;

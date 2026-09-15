@@ -1,26 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
-
-/// Global safety thresholds for price validation.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct OracleConfig {
-    /// Maximum allowed spread between oracle sources in basis points
-    /// (e.g., 100 = 1%). Bounded at `crate::constants::MAX_DEVIATION_BPS_CEILING`.
-    pub max_deviation_bps: i128,
-    /// Maximum age of an external SEP-40 price feed before it is rejected
-    /// as stale (in seconds).
-    pub staleness_threshold: u64,
-    /// How long a cached aggregated price remains valid after the router
-    /// fetch (in seconds). A cache hit also requires every source timestamp
-    /// used for the cached median to remain within `staleness_threshold`.
-    /// Must be > 0 and <= `staleness_threshold`.
-    pub cache_duration: u64,
-    /// Minimum number of source responses that must agree within
-    /// `max_deviation_bps` for OracleRouter to return a price. Floored at
-    /// `crate::constants::MIN_REQUIRED_SOURCES_FLOOR`, ceilinged at
-    /// `crate::constants::MAX_ORACLE_SOURCES`.
-    pub min_required_sources: u32,
-}
+use soroban_sdk::{contracttype, Address, BytesN, Symbol};
 
 /// §5.5 — one open position.
 ///
@@ -501,6 +479,14 @@ pub struct GlobalConfig {
     /// §3.4 half-life of the funding skew EMA, seconds (global: one memory
     /// horizon for every market).
     pub funding_half_life_seconds: u64,
+    /// How old the external feed's latest observation may be before an
+    /// action refuses to act on it.
+    ///
+    /// The protocol does not aggregate price sources — that is the feed
+    /// provider's job — so this is the main price-quality control it retains,
+    /// and it is governed rather than constant because it silently widens
+    /// the window a trader commits against.
+    pub max_price_age_seconds: u64,
     pub risk_capacity_limit_bps: u32,
     pub base_borrow_rate_bps_day: i128,
     pub max_variable_borrow_bps_day: i128,
@@ -723,23 +709,6 @@ pub struct AccountingSnapshot {
     /// `ADL`, or `HardCap`. Always the fresh evaluation, not the stored
     /// counter.
     pub restricted_side_count: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct RoundPrice {
-    pub symbol: Symbol,
-    pub price: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct OracleRound {
-    pub id: u64,
-    pub timestamp: u64,
-    pub previous_id: u64,
-    pub previous_timestamp: u64,
-    pub prices: Vec<RoundPrice>,
 }
 
 #[contracttype]

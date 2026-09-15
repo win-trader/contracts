@@ -939,30 +939,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
-name = "oracle"
-version = "0.1.0"
-dependencies = [
- "config-manager",
- "shared",
- "soroban-sdk",
- "stellar-contract-utils",
- "stellar-macros",
-]
-
-[[package]]
-name = "oracle-router"
-version = "0.1.0"
-dependencies = [
- "config-manager",
- "mock-oracle",
- "shared",
- "soroban-sdk",
- "stellar-access",
- "stellar-contract-utils",
- "stellar-macros",
-]
-
-[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -997,7 +973,6 @@ dependencies = [
  "config-manager",
  "mock-oracle",
  "mock-token",
- "oracle-router",
  "shared",
  "soroban-sdk",
  "stellar-access",
