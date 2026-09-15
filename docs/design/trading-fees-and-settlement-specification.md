@@ -158,6 +158,7 @@
   - [11.9 Liquidation after a violent price movement](#119-liquidation-after-a-violent-price-movement)
   - [11.10 Automatic deleveraging](#1110-automatic-deleveraging)
   - [11.11 Expired-order cleanup](#1111-expired-order-cleanup)
+  - [11.12 Funding window split at a sign change](#1112-funding-window-split-at-a-sign-change)
 - [12. Operational contract](#12-operational-contract)
   - [12.1 Collateral and share token requirements](#121-collateral-and-share-token-requirements)
   - [12.2 Pause semantics](#122-pause-semantics)
@@ -439,7 +440,7 @@ declared here rather than left to the implementation.
 | Basis-point configuration | `u32` |
 
 Every product formed on the way to a division is computed in **256-bit**,
-regardless of how small its operands look. This is the contract for the three
+regardless of how small its operands look. This is the contract for the four
 helpers from §6:
 
 ```text
@@ -453,12 +454,33 @@ mul_div_floor(a, b, d):
 mul_div_ceil(a, b, d):
     as above with q = (p + d - 1) / d
 
+mul_div_trunc(a, b, d):           # signed operands, truncates toward zero
+    require d > 0
+    p = widen_256(a) * widen_256(b)
+    q = trunc_toward_zero(p / d)
+    require q fits the declared result width
+    return narrow_128(q)
+
 carried_div(n, d, r):
     require d > 0
     t = widen_256(n) + widen_256(r)
     require t / d and t % d both fit their declared widths
     return (narrow_128(t / d), narrow_128(t % d))
 ```
+
+`mul_div_trunc` is the helper for signed quantities: the signed skew of §3.4.1,
+the blend coefficient `B` of §4.6, and the decayed values derived from them.
+Truncation toward zero means the magnitude of a signed skew is never
+overstated, in either direction, which floor division would not give for a
+negative value.
+
+`carried_div` is the one helper whose numerator is **not** bounded by 128 bits.
+§6.2 passes it a funding weight that this section itself puts near `1e40`, so
+`n` is a 256-bit value that is already the output of a 256-bit product, and
+`widen_256(n)` is a no-op on it rather than a widening. Only `d`, the quotient,
+and the remainder are declared at 128 bits. An implementation that types the
+numerator as `u128` to match the other helpers overflows on the first funding
+checkpoint of a busy market.
 
 Every addition, subtraction, and standalone multiplication outside these
 helpers is checked and errors on overflow. An overflow is an unexpected
@@ -471,6 +493,8 @@ specification exceed `u128` at configured parameter limits:
 ```text
 funding weight    max_funding_rate_bps_day * A^2 * elapsed
                   1e4 * (1e14)^2 * 3.2e7  ~= 3.2e39   > 3.4e38
+                  formed from an INDEX_PRECISION-carried intermediate
+                  (§6.2.1) that reaches ~1.7e45 before its final division
 
 LP share minting  deposit_assets * (share_supply + SHARE_SCALE)
                   1e16 * 1e22             = 1e38      ~ at the limit
@@ -495,9 +519,10 @@ min_position_lifetime  <= 86,400
 
 #### 2.1.2 Fixed-point transcendental primitives
 
-Funding integration needs `2^-x`, the borrow curve needs `u^e`, and locating a
-funding sign change needs `log2`. All three reduce to one pair of primitives,
-both evaluated at `INDEX_PRECISION` and both fully deterministic.
+Funding integration needs `2^-x` and locating a funding sign change needs
+`log2`. Both are evaluated at `INDEX_PRECISION` and both are fully
+deterministic. Nothing else in this specification needs a transcendental: the
+borrow curve is a plain square (§6.14).
 
 `exp2_neg(x)` returns `2^-x` for `x >= 0`, with `x` and the result scaled by
 `INDEX_PRECISION`. Split `x` into its whole and fractional parts, `x = n + f`:
@@ -506,49 +531,67 @@ both evaluated at `INDEX_PRECISION` and both fully deterministic.
 2^-x = 2^-n * 2^-f
 ```
 
-`2^-n` is a right shift by `n`, saturating to zero once `n >= 128`. For the
-fractional part, expand `f` in binary as `f = sum(b_i * 2^-i)` and multiply in
-one precomputed constant per set bit:
+`f` is an `INDEX_PRECISION`-scaled integer representing the fraction `f / 1e14`
+in `[0, 1)`, and `b_i` is the `i`-th binary digit of that fraction, not a bit
+of the integer `f`. The digits come out by repeated doubling:
 
 ```text
-result = INDEX_PRECISION
-for i in 1 ..= 48:
-    if bit i of f is set:
-        result = mul_div_floor(result, HALF_POW[i], INDEX_PRECISION)
+function exp2_neg(x):
+    require x >= 0
+    n = x / INDEX_PRECISION
+    f = x % INDEX_PRECISION
+    if n >= 128:
+        return 0
+
+    result = INDEX_PRECISION
+    rem    = f
+    for i in 1 ..= 48:
+        rem = rem * 2
+        if rem >= INDEX_PRECISION:
+            rem = rem - INDEX_PRECISION
+            result = mul_div_floor(result, HALF_POW[i], INDEX_PRECISION)
+
+    return result >> n
 ```
 
-`HALF_POW[i]` is the `INDEX_PRECISION`-scaled constant `2^(-2^-i)`, a fixed
-table of 48 entries stored in the contract. The loop is bounded, branch-free
-in cost, and uses no division other than the helper's.
+The shift is applied **last**, after the fractional product, so the
+multiplications keep full precision and only one truncation is taken at the
+end. Shifting first would discard `n` bits of the mantissa before any of them
+were used.
+
+`HALF_POW[i]` is the `INDEX_PRECISION`-scaled constant `2^(-2^-i)`, truncated,
+a fixed table of 48 entries stored in the contract. The loop is bounded,
+branch-free in cost, and uses no division other than the helper's. The table is
+the one in §2.1.3.
 
 `log2(y)` for `y >= INDEX_PRECISION` returns its base-2 logarithm at
-`INDEX_PRECISION`, by the mirror construction: take the integer part from the
-bit length, then recover the fraction one bit at a time by repeated squaring
-of the normalized mantissa, again for 48 iterations.
-
-From these, with `u`, `e`, and the result all at `INDEX_PRECISION`, so that
-`INDEX_PRECISION` denotes one whole in each of them:
+`INDEX_PRECISION` by the mirror construction — integer part from the bit
+length, then one fraction bit at a time by repeated squaring of the normalized
+mantissa, again for 48 iterations:
 
 ```text
-pow(u, e) = exp2_neg(
-                mul_div_floor(
-                    e,
-                    log2(mul_div_floor(INDEX_PRECISION, INDEX_PRECISION, u)),
-                    INDEX_PRECISION
-                )
-            )
-            for 0 < u < INDEX_PRECISION
+function log2(y):
+    require y >= INDEX_PRECISION
 
-pow(0, e)                = 0                 for e > 0
-pow(INDEX_PRECISION, e)  = INDEX_PRECISION
+    n = bit_length(y / INDEX_PRECISION) - 1
+    m = y >> n                       # normalized to [1, 2) at INDEX_PRECISION
+    result = n * INDEX_PRECISION
+
+    for i in 1 ..= 48:
+        m = mul_div_floor(m, m, INDEX_PRECISION)
+        if m >= 2 * INDEX_PRECISION:
+            m = m / 2
+            result = result + (INDEX_PRECISION >> i)
+
+    return result
 ```
 
-The inner `mul_div_floor` forms `1/u` at `INDEX_PRECISION`, which is at least
-one whole, so `log2` receives an argument in its declared domain and returns a
-non-negative value.
-
-§6.14 calls this `pow` after converting utilization and the borrow exponent
-from basis points to `INDEX_PRECISION`.
+`log2` exists here for one caller: locating the funding sign change `t_star`
+in §6.2.1. An earlier revision also raised utilization to a configurable power
+for the borrow curve, which needed a general `pow` built from both primitives.
+That exponent is now fixed at two and the curve is a single multiplication
+(§6.14), so `pow` is gone and `log2` is called once per funding window rather
+than on every action that moves the borrow rate.
 
 One further constant is required, by the window integral in §4.6:
 
@@ -579,20 +622,155 @@ Three properties follow, and an implementation must test them directly:
    consults a platform float, a transcendental library, or a wall-clock value.
 
 The funding sign change in §4.6 is located analytically rather than by search.
-With `I(t) = A + B * d(t)`, a crossing exists in the window exactly when `A`
-and `A + B` have opposite signs, and then:
+`I(t) = A + B * d(t)` is monotonic across the window, so a crossing exists
+exactly when the two endpoints of that window disagree in sign:
 
 ```text
-d_star = -A / B                       in (0, 1)
+d_end    = exp2_neg(mul_div_floor(elapsed, INDEX_PRECISION, H))
+crossing = sign(A + B) != sign(A + mul_div_trunc(B, d_end, INDEX_PRECISION))
+```
+
+The endpoint at `elapsed` is what makes this test correct. Comparing `A + B`
+against `A` alone tests for a crossing on `[0, infinity)`, because `A` is the
+limit of `I(t)` rather than its value at the end of the window. A window whose
+EMA is still far from live skew satisfies that weaker test while its crossing
+lies hours beyond `elapsed`, and the window would then be split at a point
+outside itself.
+
+When the endpoint test passes:
+
+```text
+d_star = -A / B                       in (d_end, 1)
 t_star = mul_div_floor(H, log2(mul_div_floor(INDEX_PRECISION,
                                              INDEX_PRECISION, d_star)),
                        INDEX_PRECISION)
 ```
 
+`d_star > d_end` places `t_star` strictly inside `(0, elapsed)`.
+
 `t_star` is used at this precision and is not rounded to a whole second before
 the two subintervals are integrated. Its residual error is second order: the
 integrand `I(t)^2` vanishes at the crossing, so a small error in `t_star`
 perturbs each subinterval's contribution by an amount quadratic in that error.
+
+#### 2.1.3 Constants and conformance vectors
+
+`HALF_POW` is reference data, not a derivation an implementation may redo at a
+different precision. Every entry is `floor(INDEX_PRECISION * 2^(-2^-i))`:
+
+```text
+HALF_POW[ 1] = 70710678118654
+HALF_POW[ 2] = 84089641525371
+HALF_POW[ 3] = 91700404320467
+HALF_POW[ 4] = 95760328069857
+HALF_POW[ 5] = 97857206208770
+HALF_POW[ 6] = 98922801319397
+HALF_POW[ 7] = 99459942348363
+HALF_POW[ 8] = 99729605608547
+HALF_POW[ 9] = 99864711289097
+HALF_POW[10] = 99932332750265
+HALF_POW[11] = 99966160649624
+HALF_POW[12] = 99983078893192
+HALF_POW[13] = 99991539088661
+HALF_POW[14] = 99995769454843
+HALF_POW[15] = 99997884705049
+HALF_POW[16] = 99998942346931
+HALF_POW[17] = 99999471172067
+HALF_POW[18] = 99999735585684
+HALF_POW[19] = 99999867792754
+HALF_POW[20] = 99999933896355
+HALF_POW[21] = 99999966948172
+HALF_POW[22] = 99999983474084
+HALF_POW[23] = 99999991737042
+HALF_POW[24] = 99999995868520
+HALF_POW[25] = 99999997934260
+HALF_POW[26] = 99999998967130
+HALF_POW[27] = 99999999483565
+HALF_POW[28] = 99999999741782
+HALF_POW[29] = 99999999870891
+HALF_POW[30] = 99999999935445
+HALF_POW[31] = 99999999967722
+HALF_POW[32] = 99999999983861
+HALF_POW[33] = 99999999991930
+HALF_POW[34] = 99999999995965
+HALF_POW[35] = 99999999997982
+HALF_POW[36] = 99999999998991
+HALF_POW[37] = 99999999999495
+HALF_POW[38] = 99999999999747
+HALF_POW[39] = 99999999999873
+HALF_POW[40] = 99999999999936
+HALF_POW[41] = 99999999999968
+HALF_POW[42] = 99999999999984
+HALF_POW[43] = 99999999999992
+HALF_POW[44] = 99999999999996
+HALF_POW[45] = 99999999999998
+HALF_POW[46] = 99999999999999
+HALF_POW[47] = 99999999999999
+HALF_POW[48] = 99999999999999
+```
+
+Entries 46 through 48 are identical because `ln(2) / 2^i` drops below one unit
+in `1e14` at `i = 47`. They are kept so the loop bound matches the 46.5 bits of
+fraction that `INDEX_PRECISION` can represent, and so the table is indexable
+without a special case.
+
+The vectors below are the output of the algorithms exactly as specified in
+§2.1.2, not the mathematically exact values. Where they differ, the truncating
+algorithm is normative and an implementation must reproduce these integers
+bit for bit.
+
+`exp2_neg(x)`:
+
+| `x` as a decimal | `x` | `exp2_neg(x)` |
+|---|---|---|
+| `0` | `0` | `100000000000000` |
+| `0.5` | `50000000000000` | `70710678118654` |
+| `1` | `100000000000000` | `50000000000000` |
+| `2` | `200000000000000` | `25000000000000` |
+| `3.25` | `325000000000000` | `10511205190671` |
+| `10` | `1000000000000000` | `97656250000` |
+| `127` | `12700000000000000` | `0` |
+
+`exp2_neg(0.5 * IP)` and `exp2_neg(3.25 * IP)` happen to agree with the exact
+values to all 14 places. `log2` does not, and that is expected:
+
+`log2(y)`:
+
+| `y` as a decimal | `y` | `log2(y)` |
+|---|---|---|
+| `1` | `100000000000000` | `0` |
+| `2` | `200000000000000` | `100000000000000` |
+| `3` | `300000000000000` | `158496250072105` |
+| `4` | `400000000000000` | `200000000000000` |
+| `4.2` | `420000000000000` | `207038932789131` |
+| `10` | `1000000000000000` | `332192809488729` |
+
+`log2(3)` returns `158496250072105` against an exact `158496250072115`, low by
+ten units in `1.6e14`, or `6e-14` relative — inside `DECAY_TOLERANCE` and in
+the safe direction.
+
+The borrow curve of §6.14, at the initial rate parameters:
+
+| Utilization (bps) | `u` | `u^2` | `current_borrow_rate` |
+|---|---|---|---|
+| `0` | `0` | `0` | `2500000000000000` |
+| `2500` | `25000000000000` | `6250000000000` | `4062500000000000` |
+| `5000` | `50000000000000` | `25000000000000` | `8750000000000000` |
+| `7500` | `75000000000000` | `56250000000000` | `16562500000000000` |
+| `8500` | `85000000000000` | `72250000000000` | `20562500000000000` |
+| `10000` | `100000000000000` | `100000000000000` | `27500000000000000` |
+
+The rate column is `base_borrow_rate_bps_day * INDEX_PRECISION +
+max_variable_borrow_bps_day * mul_div_floor(u, u, INDEX_PRECISION)`, so it
+reads as bps per day at `INDEX_PRECISION`: `25` at zero utilization, `87.5` at
+half, `205.625` at the `8,500` bps capacity limit, and `275` at full. The
+`87.5` figure is the one §3.10 Example F, §11.4, and §11.8 use, and this table
+is where it comes from.
+
+Every entry is exact. `u` is a utilization in basis points scaled to
+`INDEX_PRECISION`, so it is a multiple of `1e10` and its square is a multiple
+of `1e6` — the division by `INDEX_PRECISION` has no remainder at any reachable
+utilization. A test may assert these values exactly.
 
 ### 2.2 Physical vault cash
 
@@ -1164,20 +1342,27 @@ as aggregate risk consumes LP cash equity:
 
 ```text
 u = utilization_bps / BPS
-e = borrow_exponent_bps / BPS
 
 borrow_rate_bps_day =
       base_borrow_rate_bps_day
-    + max_variable_borrow_bps_day * u^e
+    + max_variable_borrow_bps_day * u^2
 ```
 
 Initial global defaults are:
 
 ```text
-base_borrow_rate_bps_day  = 25
+base_borrow_rate_bps_day    = 25
 max_variable_borrow_bps_day = 250
-borrow_exponent_bps       = 20,000  # exponent 2, a square curve
 ```
+
+The square is fixed, not configured. A configurable exponent would be a
+governance dial over the curve's shape, and its cost is paid on every single
+action: the rate is refreshed after every mutation that moves risk units or LP
+equity (§6.14), and a general power needs roughly a hundred rounds of
+fixed-point iteration where a square needs one multiplication. The shape a
+square gives — cheap while utilization is low, steep as it approaches the
+capacity limit — is the shape this curve is for, and the two rate parameters
+remain configurable for its height.
 
 The configured rate is expressed on risk units. With a 10% market risk factor,
 a rate of 25 bps per day on risk units feels like 2.5 bps per day on position
@@ -2030,21 +2215,43 @@ B = (1 - w) * (E0 - S)
 I(t) = A + B * d(t)
 ```
 
-At elapsed time `dt`:
+A window is integrated one **segment** at a time. An unsplit window is a single
+segment spanning the whole of it; a window containing a sign change is two. A
+segment runs from `t1` to `t2` with decay factors `d1 = d(t1)` and `d2 = d(t2)`,
+and the general forms are:
 
 ```text
-d  = 2^(-dt / H)
-J1 = H * INDEX_PRECISION / LN2   * (1 - d) / INDEX_PRECISION
-J2 = H * INDEX_PRECISION / LN2   * (1 - d^2) / (2 * INDEX_PRECISION)
+J1 = H / ln(2)       * (d1 - d2)
+J2 = H / (2 * ln(2)) * (d1^2 - d2^2)
 
-quadratic_integral =
-    A^2 * dt + 2*A*B*J1 + B^2*J2
+quadratic_integral = A^2 * (t2 - t1) + 2*A*B*J1 + B^2*J2
 
-funding_weight =
-    max_funding_rate_bps_day * quadratic_integral
+funding_weight = max_funding_rate_bps_day * quadratic_integral
 
-linear_integral = A * dt + B * J1
+linear_integral = A * (t2 - t1) + B * J1
 ```
+
+For an unsplit window, `t1 = 0`, `d1 = 1`, and these reduce to the familiar
+`(1 - d)` and `(1 - d^2)`. Note that `d1` and `d2` are always measured from the
+**window** origin, never from the segment's own start, so the second segment of
+a split window carries the decay already accumulated before its crossing.
+
+`J1` and `J2` are durations, but they are carried at `INDEX_PRECISION` rather
+than as whole seconds, and §6.2.1 performs the single compensating division at
+the end. Flooring them to whole seconds instead would be the dominant error in
+the whole calculation: a typical `J1` is on the order of `1e4` seconds, so one
+discarded second is `1e-5` relative — seven orders of magnitude outside
+`DECAY_TOLERANCE`, and far larger than anything the 48-iteration primitives
+contribute.
+
+Two properties of these forms are worth stating because they are directly
+testable. The quadratic integral is an integral of a square and is therefore
+never negative, so a negative result can only be truncation residue and is
+clamped at zero rather than reverting — this is not the forbidden kind of
+clamp in §2.11, which concerns a pending amount derived from a monotonic
+index. And segment integrals are additive: splitting a window at any interior
+point and summing the two quadratic integrals reproduces the one-segment result
+for the same window. §11.12 works an example where the two agree exactly.
 
 The scale of each quantity here is load-bearing and is fixed as follows.
 `A` and `B` are skew fractions at `INDEX_PRECISION`. `d`, being a decay factor
@@ -2076,10 +2283,11 @@ its sign does not select one payer for an interval containing both signs.
 For an interval on which `I(t)` keeps one sign, that sign selects the payer and
 the non-negative quadratic integral determines the amount. Because `I(t)` is
 monotonic while live skew is constant, it has at most one zero crossing in a
-checkpoint interval. A crossing exists exactly when `A` and `A + B` have
-opposite signs; §2.1.2 gives the closed form for `t_star`. Integrate the two
-subintervals independently and carry each result to the corresponding payer
-stream. The crossing uses the same declared decay quantization as the EMA
+checkpoint interval. A crossing exists exactly when `I` disagrees in sign at
+the two ends of that interval, `A + B` and `A + B * d`; §2.1.2 states the test
+and gives the closed form for `t_star`, which the test places strictly inside
+the window. Integrate the two subintervals independently and carry each result
+to the corresponding payer stream. The crossing uses the same declared decay quantization as the EMA
 calculation; it is not rounded to an arbitrary whole-second boundary before
 integration.
 
@@ -2355,7 +2563,6 @@ Global configuration applies to the complete vault.
 | `risk_capacity_limit_bps` | Bps | Maximum share of cash LP equity assignable to risk units; initial value `8,500` |
 | `base_borrow_rate_bps_day` | Bps/day | Borrow rate when utilization is zero; initial value `25` |
 | `max_variable_borrow_bps_day` | Bps/day | Maximum utilization-dependent addition; initial value `250` |
-| `borrow_exponent_bps` | Bps exponent | Shape of the utilization curve; `20,000` means a square |
 | `fee_lp_revenue_share_bps` | Bps | LP share of collected opening and closing fees; initial value `9,000` |
 | `borrow_lp_revenue_share_bps` | Bps | LP share of collected borrow; initial value `9,000` |
 | `referral_fee_share_bps` | Bps | Referral share of collected opening and closing fees; initial value `250` and carved from protocol revenue |
@@ -3031,7 +3238,7 @@ function accrue_market_funding(ledger, market, now, global_config):
 
     elapsed = now - market.last_funding_checkpoint
 
-    segments = integrate_funding_window_by_sign(
+    window = integrate_funding_window_by_sign(
         market.long.base_exposure,
         market.short.base_exposure,
         market.skew_ema,
@@ -3042,7 +3249,8 @@ function accrue_market_funding(ledger, market, now, global_config):
     )
 ```
 
-Process each nonzero-sign segment in chronological order. Select its payer and
+Process each segment of `window.segments` in the order returned, which is
+chronological (§6.2.1). Select its payer and
 receiver aggregates from the segment sign and select the remainder group keyed
 by that payer direction. If its funding weight or payer size is zero, skip its
 index and liability changes. In all cases, advance the EMA and timestamp for
@@ -3109,14 +3317,160 @@ if receiver.size_open_interest > 0:
 Finish the checkpoint in every branch:
 
 ```text
-market.skew_ema = segments.ema_after
-market.current_payer_side = payer_side_at_window_end
-market.current_payer_rate = displayed_rate_at_window_end
+market.skew_ema = window.ema_after
+market.current_payer_side = window.payer_side_at_window_end
+market.current_payer_rate = window.displayed_rate_at_window_end
 market.last_funding_checkpoint = now
 ```
 
 The liability credit changes cash LP equity but not physical cash. The enclosing
 action refreshes global borrow only after all such claim changes are complete.
+
+#### 6.2.1 Integrate a funding window by sign
+
+`accrue_market_funding` delegates the whole of the window mathematics to this
+function. It is pure: it reads no storage, writes none, and its result is a
+function of its arguments alone.
+
+```text
+function integrate_funding_window_by_sign(
+    long_base,
+    short_base,
+    skew_ema,
+    instant_weight_bps,
+    half_life_seconds,
+    max_funding_rate_bps_day,
+    elapsed
+):
+    require elapsed > 0
+    require half_life_seconds > 0
+
+    # --- live skew, constant for the whole window (§3.4.1) ---
+    total_base = long_base + short_base
+    if total_base == 0:
+        S = 0
+    else:
+        S = mul_div_trunc(long_base - short_base, INDEX_PRECISION, total_base)
+
+    # --- blend coefficients (§4.6) ---
+    w = mul_div_floor(instant_weight_bps, INDEX_PRECISION, BPS)
+    A = S
+    B = mul_div_trunc(INDEX_PRECISION - w, skew_ema - S, INDEX_PRECISION)
+
+    # --- decay at the window end ---
+    d_end = exp2_neg(
+        mul_div_floor(elapsed, INDEX_PRECISION, half_life_seconds)
+    )
+
+    ema_after = S + mul_div_trunc(skew_ema - S, d_end, INDEX_PRECISION)
+
+    # --- endpoint values of the blended skew ---
+    I_start = A + B
+    I_end   = A + mul_div_trunc(B, d_end, INDEX_PRECISION)
+
+    # --- split the window at a sign change, if there is one (§2.1.2) ---
+    if I_start != 0 and I_end != 0 and sign(I_start) != sign(I_end):
+        d_star = mul_div_trunc(-A, INDEX_PRECISION, B)
+        require d_end < d_star < INDEX_PRECISION
+
+        t_star = mul_div_floor(
+            half_life_seconds,
+            log2(mul_div_floor(INDEX_PRECISION, INDEX_PRECISION, d_star)),
+            INDEX_PRECISION
+        )
+        require 0 < t_star < elapsed
+
+        spans = [
+            (0,      INDEX_PRECISION, t_star,  d_star, I_start),
+            (t_star, d_star,          elapsed, d_end,  I_end)
+        ]
+    else:
+        spans = [
+            (0, INDEX_PRECISION, elapsed, d_end, I_start if I_start != 0
+                                                 else I_end)
+        ]
+
+    # --- integrate each span (§4.6) ---
+    segments = []
+    for (t1, d1, t2, d2, I_sign_source) in spans:
+        if t2 <= t1:
+            continue
+
+        j1 = mul_div_floor(
+            half_life_seconds * (d1 - d2), INDEX_PRECISION, LN2
+        )
+        j2 = mul_div_floor(
+            half_life_seconds * (
+                  mul_div_floor(d1, d1, INDEX_PRECISION)
+                - mul_div_floor(d2, d2, INDEX_PRECISION)
+            ),
+            INDEX_PRECISION,
+            2 * LN2
+        )
+
+        # INDEX_PRECISION^3 * seconds; every product formed in 256-bit
+        quadratic_scaled =
+              A * A * (t2 - t1) * INDEX_PRECISION
+            + 2 * A * B * j1
+            + B * B * j2
+
+        # one compensating division returns the declared
+        # INDEX_PRECISION^2 * seconds of §4.6
+        quadratic_integral = max(0, quadratic_scaled / INDEX_PRECISION)
+
+        if I_sign_source > 0:
+            payer = Long
+        else if I_sign_source < 0:
+            payer = Short
+        else:
+            continue                  # no funding accrues on a zero segment
+
+        segments.append(Segment {
+            payer_side:     payer,
+            funding_weight: max_funding_rate_bps_day * quadratic_integral
+        })
+
+    return FundingWindow {
+        segments,
+        ema_after,
+        payer_side_at_window_end:
+            Long if I_end > 0 else Short if I_end < 0 else None,
+        displayed_rate_at_window_end:
+            mul_div_floor(
+                max_funding_rate_bps_day * abs(I_end),
+                abs(I_end),
+                INDEX_PRECISION
+            )
+    }
+```
+
+Four things about this function are load-bearing.
+
+The segments come back in **chronological order**, which is what §6.2 means by
+processing them in that order. Order does not change the arithmetic, but it
+does change which carried remainder each division sees, and a window whose
+crossing is replayed out of order will not reproduce the same indices.
+
+`d1` and `d2` are decay factors measured from the window origin, so the second
+segment starts at `d_star` rather than at `INDEX_PRECISION`. Restarting the
+decay at each segment would integrate the second one as though the EMA were
+fresh and would roughly double the funding attributed to it.
+
+`require d_end < d_star < INDEX_PRECISION` and `require 0 < t_star < elapsed`
+are the guards that the endpoint test of §2.1.2 is supposed to make
+unreachable. They are cheap, and an implementation that gets the sign test
+wrong fails loudly at the checkpoint rather than silently integrating a window
+at 150 times its true length.
+
+The clamp on `quadratic_integral` is bounded truncation residue on a quantity
+that is mathematically non-negative, which is why it is a clamp and not a
+revert. It is not the negative-pending-amount case that §2.11 and §9.5 forbid
+hiding: nothing here is derived by subtracting a stored baseline from a
+monotonic index.
+
+`displayed_rate_at_window_end` is a display field only (§5.4). It is the
+quadratic rate at the window's final blended skew, and no obligation is ever
+read from it.
 
 ### 6.3 Calculate pending borrow
 
@@ -3276,14 +3630,41 @@ part of applying the risk-state change in §6.16. Leaving `HardCap` clears the
 factor back to `INDEX_PRECISION`. A side that re-enters later takes a fresh
 snapshot from the book at that moment.
 
+Nothing evaluates a side's risk state on a price move alone, so the stored
+state is only as current as the last action that touched the market. Every
+operation that reads a payout factor must therefore refresh that state from its
+own price snapshot **before** it calculates payable PnL, never after. This is a
+rule, not a property of any one operation: §7.2 and §7.9 through §7.12 refresh
+it immediately after their checkpoints, §7.13 from its own liquidation
+snapshot, and §7.14 by applying the side transition before it values the
+position. Refreshing afterwards would let the first position
+to exit a side that has crossed the threshold settle at a factor of one whole
+and latch the side only on its way out, leaving every position behind it scaled
+— a first-mover advantage on exactly the run the state exists to stop. The
+mirror case is a side that has economically recovered but is still stored as
+`HardCap`, whose first exit is scaled when it should not be.
+
 The factor must not be recomputed at settlement. Each settlement pays out and
 removes exposure, so both `cash_lp_equity` and the side's aggregate positive
 PnL move; a factor derived again afterwards measures the next position against
 a shrunken denominator. Payouts would become order-dependent, and their sum
 would bear no relation to `hard_cap_value`. With one snapshot, every position
-on the side is scaled by the same number, settlement order cannot change any
-individual outcome, and the total paid is bounded by the `hard_cap_value`
-measured when the side latched.
+on the side is scaled by the same number and settlement order cannot change any
+individual outcome.
+
+What the snapshot does not do is bound the total paid. It bounds it at the
+moment of latching, and no further: while the side stays latched its raw
+aggregate PnL can keep growing, and payable PnL grows with it at the frozen
+ratio. A side that latches at `$80,000` of profit against a `$60,000` cap
+carries a factor of `0.75`; if its raw profit then runs to `$200,000` the side
+pays `$150,000`, and it never re-snapshots because its PnL factor never falls
+back below the threshold. What actually bounds the loss beyond the latch is the
+payment-time clamp below — which bounds it at LP equity, meaning LPs can be
+taken to zero — together with ADL removing profitable exposure from the
+restricted side. Restoring a real bound means re-latching on a band, for
+example a fresh snapshot once current side PnL exceeds the latched denominator
+by a configured margin, which keeps order-independence inside each band. That
+is a mechanism change and is not specified here.
 
 Two properties of the snapshot are deliberate. It cannot exceed
 `INDEX_PRECISION`, so a side entering `HardCap` while its aggregate profit is
@@ -4020,13 +4401,7 @@ function refresh_borrow_rate(ledger, physical_cash, global_config):
     )
 
     u = mul_div_floor(utilization, INDEX_PRECISION, BPS)
-    e = mul_div_floor(
-        global_config.borrow_exponent_bps,
-        INDEX_PRECISION,
-        BPS
-    )
-
-    variable_factor = pow(u, e)          # §2.1.2, at INDEX_PRECISION
+    variable_factor = mul_div_floor(u, u, INDEX_PRECISION)
 
     ledger.current_borrow_rate =
           global_config.base_borrow_rate_bps_day * INDEX_PRECISION
@@ -4040,10 +4415,12 @@ multiplied by an already-scaled factor, so it arrives at the same scale
 without a second multiplication. At full utilization with the initial
 parameters the result is `275 * INDEX_PRECISION`.
 
-`u` and `e` are converted to `INDEX_PRECISION` before the call rather than
-written as `utilization / BPS`, which as an integer division would collapse to
-`0` or `1`. Refresh runs after every completed mutation that changes total
-risk units, physical cash, or any non-LP claim affecting cash LP equity.
+`u` is converted to `INDEX_PRECISION` before squaring rather than written as
+`utilization / BPS`, which as an integer division would collapse to `0` or `1`.
+The square is exact at every utilization the curve can reach, so this function
+introduces no approximation at all. Refresh runs after every completed mutation
+that changes total risk units, physical cash, or any non-LP claim affecting
+cash LP equity, which is why its cost matters.
 
 ### 6.15 Evaluate liquidation eligibility
 
@@ -4399,7 +4776,7 @@ function create_market_open_order(owner, request):
         - keeper_reward
         >= ceil(request.size * market.config.initial_margin_bps / BPS)
 
-    commit_price = read_authenticated_stamped_price(request.market_id)
+    commit_price = read_stamped_price(request.market_id)
 
     transfer_cash_from(
         owner,
@@ -4451,7 +4828,7 @@ function settle_market_open(action_id, keeper):
     if now < action.execute_after:
         return NotReady without state change or reward
 
-    fill = read_fresh_uncached_stamped_price(action.market_id)
+    fill = read_stamped_price(action.market_id)
 
     if fill.observed_at <= action.commit_observed_at:
         return NotReady without state change or reward
@@ -4592,7 +4969,7 @@ function create_limit_open_order(owner, request):
     validate and escrow exactly as market-open creation
     require request.trigger_price > 0
 
-    commit_price = read_authenticated_stamped_price(request.market_id)
+    commit_price = read_stamped_price(request.market_id)
 
     trigger_above = request.trigger_price >= commit_price.price
 
@@ -4629,7 +5006,7 @@ function settle_limit_open(action_id, keeper):
     if now < action.execute_after:
         return NotReady without state change or reward
 
-    fill = read_fresh_uncached_stamped_price(action.market_id)
+    fill = read_stamped_price(action.market_id)
 
     if fill.observed_at <= action.commit_observed_at:
         return NotReady without state change or reward
@@ -4759,7 +5136,16 @@ function create_increase(position_id, owner, request):
     require position.owner == owner
     require position.pending_mutation_action_id is None
 
-    commit_price = read_authenticated_stamped_price(position.market_id)
+    commit_price = read_stamped_price(position.market_id)
+
+    require mul_div_floor(
+        request.size_added, PRICE_PRECISION, commit_price.price
+    ) > 0
+    require mul_div_floor(
+        position.size + request.size_added,
+        market.config.market_risk_factor_bps,
+        BPS
+    ) > position.risk_units
 
     if request.collateral_added > 0:
         transfer_cash_from(owner, vault, request.collateral_added)
@@ -4776,6 +5162,24 @@ function create_increase(position_id, owner, request):
 
 Creation does not settle the old borrow window, add exposure, or charge a fee.
 
+The two dust checks are what keep an increase settleable. `derive_added_exposure`
+requires positive added base and positive added risk (§6.13), and those are
+`require`s, so failing them is an unexpected failure under §8.9: the call
+reverts and the action survives. A position mutation has no cancel operation
+and no expiry, so an increase small enough to round either quantity to zero
+would occupy `pending_mutation_action_id` permanently and leave the position
+with no increase, decrease, or close available for the rest of its life — only
+an attached trigger or liquidation could still exit it. A size add of one unit
+on a market priced in the tens of thousands is enough to do it. Rejecting at
+creation, against the commitment price, is what makes the settlement-time
+requires unreachable rather than merely defensive.
+
+The commitment price is the right reference even though settlement prices the
+action at the fill. Base rounds to zero only for a size add near the price
+itself, and no fill inside a market's ordinary movement turns a size that
+cleared this check into one that cannot. The risk-unit check does not depend on
+price at all.
+
 Successful settlement:
 
 ```text
@@ -4786,7 +5190,7 @@ function settle_increase(action_id, keeper):
     if now < action.execute_after:
         return NotReady without state change or reward
 
-    fill = read_fresh_uncached_stamped_price(position.market_id)
+    fill = read_stamped_price(position.market_id)
     if fill.observed_at <= action.commit_observed_at:
         return NotReady without state change or reward
 
@@ -4908,7 +5312,7 @@ function create_decrease(position_id, owner, size_removed, acceptable_price):
     require position.pending_mutation_action_id is None
     require 0 < size_removed < position.size
 
-    commit = read_authenticated_stamped_price(position.market_id)
+    commit = read_stamped_price(position.market_id)
     action_id = consume_next_action_id()
 
     store Decrease action with size_removed, acceptable_price,
@@ -4928,11 +5332,12 @@ function settle_decrease(action_id, keeper):
     if now < position.last_size_increase_at + min_position_lifetime:
         return NotReady without state change or reward
 
-    fill = read_fresh_uncached_stamped_price(position.market_id)
+    fill = read_stamped_price(position.market_id)
     if fill.observed_at <= action.commit_observed_at:
         return NotReady without state change or reward
 
     accrue global borrow and market funding to now
+    evaluate and apply current market risk state
     calculate pending funding and borrow
     if position is liquidatable at this snapshot:
         return RequiresLiquidation without state change or reward
@@ -5059,7 +5464,7 @@ function create_close(position_id, owner, acceptable_price):
     require owner authorization and position ownership
     require position.pending_mutation_action_id is None
 
-    commit = read_authenticated_stamped_price(position.market_id)
+    commit = read_stamped_price(position.market_id)
     create Close action with commit cursor and execute-after timestamp
     set position.pending_mutation_action_id
 ```
@@ -5075,11 +5480,12 @@ function settle_close(action_id, keeper):
     if now < position.last_size_increase_at + min_position_lifetime:
         return NotReady without state change or reward
 
-    fill = read_fresh_uncached_stamped_price(position.market_id)
+    fill = read_stamped_price(position.market_id)
     if fill.observed_at <= action.commit_observed_at:
         return NotReady without state change or reward
 
     accrue global borrow and market funding to now
+    evaluate and apply current market risk state
     calculate pending funding and pending borrow
     calculate raw and payable PnL for the complete position
 
@@ -5132,7 +5538,7 @@ function set_take_profit(position_id, owner, trigger_price, acceptable_price):
     require owner authorization and position ownership
     require trigger_price > 0
 
-    commit = read_authenticated_stamped_price(position.market_id)
+    commit = read_stamped_price(position.market_id)
     position.take_profit = TriggerInstruction {
         trigger_price,
         acceptable_price,
@@ -5157,7 +5563,7 @@ function execute_take_profit(position_id, keeper):
     if now < position.last_size_increase_at + min_position_lifetime:
         return NotReady without state change or reward
 
-    fill = read_fresh_uncached_stamped_price(position.market_id)
+    fill = read_stamped_price(position.market_id)
     if fill.observed_at <= instruction.commit_observed_at:
         return NotReady without state change or reward
 
@@ -5172,7 +5578,8 @@ function execute_take_profit(position_id, keeper):
     if not exit_price_allowed(position.direction, fill.price, acceptable):
         return Pending without state change or reward
 
-    checkpoint and calculate complete-position funding, borrow, and PnL
+    checkpoint, evaluate and apply current market risk state, then calculate
+        complete-position funding, borrow, and PnL
     if position is liquidatable:
         return RequiresLiquidation without state change or reward
     calculate closing fee using keeper_tp_reward
@@ -5206,7 +5613,8 @@ function execute_stop_loss(position_id, keeper):
         return NotReady without state change or reward
     if the exit slippage bound is not satisfied:
         return Pending without state change or reward
-    checkpoint and calculate complete-position funding, borrow, and PnL
+    checkpoint, evaluate and apply current market risk state, then calculate
+        complete-position funding, borrow, and PnL
     if position is liquidatable:
         return RequiresLiquidation without state change or reward
     calculate closing fee using keeper_sl_reward
@@ -5235,7 +5643,7 @@ function liquidate(position_id, keeper):
     accrue_global_borrow(ledger, now)
     accrue_market_funding(ledger, market, now, global_config)
 
-    price = read_authenticated_current_price(position.market_id)
+    price = read_stamped_price(position.market_id)
     evaluate and apply market risk state from this snapshot
 
     assessment = evaluate_liquidation(
@@ -5285,7 +5693,7 @@ function execute_adl(position_id, keeper):
 
     now = authoritative timestamp
     accrue global borrow and market funding
-    price = read_authenticated_current_price(position.market_id)
+    price = read_stamped_price(position.market_id)
 
     side_assessment = evaluate_side_risk_state(
         position.side,
@@ -5534,9 +5942,22 @@ Minting divides by `marked_vault_nav + 1`. As NAV falls toward zero with
 shares still outstanding, that denominator collapses and a deposit of any size
 mints an unbounded number of shares, diluting every existing holder to
 nothing. The virtual offsets `+1` and `+ SHARE_SCALE` keep the arithmetic
-defined, not fair. At the initial `8,000`, deposits stop once recognized
-trader profit reaches a fifth of cash LP equity — far from the regime where
-the conversion degenerates, which is the margin the gate is buying.
+defined, not fair. At the initial `1,000`, deposits stop once recognized trader
+profit reaches nine tenths of cash LP equity, which is the regime where the
+conversion actually degenerates.
+
+The gate is set close to that regime on purpose, because every basis point of
+extra conservatism here is paid for in the worst possible state. A deposit adds
+LP equity and therefore lowers every side's PnL factor — the direction the
+vault wants in exactly the conditions that make this gate bind. A value like
+`8,000` would stop deposits once recognized profit reached a fifth of cash
+equity, which four sides sitting at `4.9%` reach while every one of them is
+merely in `Warning` and nothing is restricted: the vault would refuse rescue
+capital in a state it is not even treating as an emergency, for an arithmetic
+margin it does not need. The depositor is already protected without the gate,
+because marked NAV deducts recognized trader profit before conversion, so
+depositing into a vault under stress is priced rather than subsidized. The gate
+exists to keep the denominator away from zero, and nothing more.
 
 The first deposit into an empty vault is exempt because there are no holders
 to dilute. A vault with shares outstanding and no cash equity accepts no
@@ -5978,24 +6399,24 @@ the trader commits:
 commit_observed_at
 ```
 
-Settlement obtains a fresh uncached aggregate and requires:
+Settlement obtains a fresh aggregate and requires:
 
 ```text
 fill_observed_at > commit_observed_at
 ```
 
-Equality fails. A cache-write timestamp, transaction timestamp, block number,
-or elapsed delay cannot replace the observation cursor because none proves
-that the price contains information created after commitment.
+Equality fails. A transaction timestamp, block number, or elapsed delay cannot
+replace the observation cursor because none proves that the price contains
+information created after commitment.
 
 The observation stamp is the oldest source timestamp contributing to the
 accepted aggregate. This conservative choice ensures every source supporting
 the fill is newer than the commitment cursor.
 
-Both reads bypass the oracle's price cache. §12.7.2 explains why the
-commitment read in particular cannot use it: a cached stamp is backdated by up
-to a full cache window, which satisfies the comparison without any new
-observation having arrived.
+Both reads must be freshly aggregated. A stamp retained from an earlier read is
+backdated by however long it was retained, which satisfies the comparison
+without any new observation having arrived; §12.7.1 states this as a
+requirement on the oracle.
 
 If no qualifying observation exists:
 
@@ -6755,7 +7176,6 @@ Global parameters affect the complete vault.
 | `risk_capacity_limit_bps` | Bps | `8,500` | Maximum admitted risk units relative to cash LP equity |
 | `base_borrow_rate_bps_day` | Bps/day on risk units | `25` | Borrow rate at zero utilization |
 | `max_variable_borrow_bps_day` | Bps/day on risk units | `250` | Maximum utilization-dependent addition to the borrow rate |
-| `borrow_exponent_bps` | Bps exponent | `20,000` | Utilization-curve exponent; `20,000` represents `2.0` |
 
 #### 10.1.2 Revenue policy
 
@@ -6814,7 +7234,7 @@ user-selected execution budget exists.
 | `max_active_markets` | Count | `8` | Maximum active markets included in synchronized vault operations |
 | `global_hard_cap_factor_limit_bps` | Bps | `10,000` | Maximum sum of configured side hard-cap factors across active markets |
 | `max_withdraw_utilization_bps` | Bps | `8,000` | Maximum post-withdrawal utilization |
-| `min_deposit_nav_factor_bps` | Bps | `8,000` | Minimum marked-NAV-to-cash-equity factor for an ordinary LP deposit |
+| `min_deposit_nav_factor_bps` | Bps | `1,000` | Minimum marked-NAV-to-cash-equity factor for an ordinary LP deposit |
 | `lp_request_delay_seconds` | Seconds | Profile-specific | Delay assigning an LP request to a synchronized price round |
 
 The initial LP request delays are operational profiles:
@@ -6908,7 +7328,6 @@ every keeper reward <= min_collateral
 
 0 <= base_borrow_rate_bps_day <= BPS
 0 <= max_variable_borrow_bps_day <= BPS
-0 < borrow_exponent_bps <= 100,000
 
 fee_lp_revenue_share_bps + referral_fee_share_bps <= BPS
 borrow_lp_revenue_share_bps <= BPS
@@ -6989,8 +7408,8 @@ follows these rules:
 5. Refresh any forward-looking derived rate or risk state.
 6. Emit the old and new values with the effective timestamp.
 
-Fields affecting borrow accrual include the base rate, variable rate,
-exponent, and any value that changes cash LP equity or admitted risk. Funding
+Fields affecting borrow accrual include the base rate, variable rate, and any
+value that changes cash LP equity or admitted risk. Funding
 half-life, maximum funding rate, and instant weight require the affected
 funding window to checkpoint before replacement. Threshold changes recompute
 the affected risk state from one authenticated snapshot.
@@ -7036,7 +7455,6 @@ funding_half_life_seconds            = 43,200          # 12 hours
 risk_capacity_limit_bps              = 8,500           # 85%
 base_borrow_rate_bps_day             = 25
 max_variable_borrow_bps_day          = 250
-borrow_exponent_bps                  = 20,000          # exponent 2.0
 fee_lp_revenue_share_bps             = 9,000           # 90%
 borrow_lp_revenue_share_bps          = 9,000           # 90%
 referral_fee_share_bps               = 250             # 2.5%
@@ -7044,7 +7462,7 @@ config_timelock_seconds              = 172,800         # 48 hours
 max_active_markets                   = 8
 global_hard_cap_factor_limit_bps     = 10,000
 max_withdraw_utilization_bps         = 8,000           # 80%
-min_deposit_nav_factor_bps           = 8,000           # 80%
+min_deposit_nav_factor_bps           = 1,000           # 10%
 
 KEEPER REWARDS
 keeper_open_reward                   = 2,500,000        # $0.25
@@ -7561,9 +7979,14 @@ recomputed factor = $59,551.35 / $70,000        =     0.8507336
 A factor recomputed at this point would pay the second trader
 `$8,507.3357142`, against the `$7,500` the first received for an identical
 position — a difference of over `$1,000` decided by nothing but which one a
-keeper reached first. The stored snapshot is what makes both receive `$7,500`,
-and what keeps the total paid across the side bounded by the `$60,000`
-measured when it latched.
+keeper reached first. The stored snapshot is what makes both receive `$7,500`.
+
+It does not keep the side's total payout at the `$60,000` measured when it
+latched. That figure bounds the side only at the instant of latching. If the
+price keeps running while the side stays in `HardCap`, its raw aggregate profit
+grows and every position still pays `0.75` of a larger number; at `$200,000` of
+raw side profit the side pays `$150,000`. Beyond the latch the binding limits
+are the payment-time cash clamp and ADL, not this factor (§6.5).
 
 ADL removes the complete position, pays only the fixed ADL reward from its
 value, charges no closing fee, and clears its pending mutation and triggers.
@@ -7592,6 +8015,104 @@ escrow claim are removed, no exposure or fee revenue is created, and the order
 cannot later execute. A valid later reward increase would use the new active
 expiry reward, bounded by `min_collateral`, with the remainder refunded in the
 same way.
+
+### 11.12 Funding window split at a sign change
+
+This is the conformance case for §6.2.1. Every integer below is the output of
+the specified algorithm and an implementation must reproduce all of them.
+
+A market has `110` base units long and `90` short, so live skew is exactly
+`+0.1`. Its EMA still carries a strongly short-dominated history at `-0.5`. Two
+days elapse with the book unchanged:
+
+```text
+long_base                 = 1,100,000,000
+short_base                =   900,000,000
+skew_ema (E0)             = -50,000,000,000,000      # -0.5
+instant_weight_bps        = 3,000                    # w = 0.3
+funding_half_life_seconds = 43,200                   # H = 12 hours
+max_funding_rate_bps_day  = 80
+elapsed                   = 172,800                  # 2 days = 4 half-lives
+```
+
+The coefficients and endpoints:
+
+```text
+S       =  10,000,000,000,000        # +0.1
+A       =  10,000,000,000,000
+B       = -42,000,000,000,000        # 0.7 * (E0 - S)
+d_end   =   6,250,000,000,000        # 2^-4, exactly
+
+I_start = A + B          = -32,000,000,000,000      # shorts pay
+I_end   = A + B * d_end  =  +7,375,000,000,000      # longs pay
+```
+
+The endpoints disagree in sign, so the window splits. Had the test compared
+`A + B` against `A` instead, it would also have said "split" — but so would it
+for a ten-minute window of this same book, where `I` never changes sign at all
+and `t_star` lands a day beyond the window's end. That is the case §2.1.2
+exists to exclude:
+
+```text
+d_star = 23,809,523,809,524          # -A/B, and d_end < d_star < 1
+t_star = 89,440                      # seconds, inside (0, 172,800)
+```
+
+Segment one, `t = 0` to `89,440`, shorts paying, `d` running from `1` to
+`d_star`:
+
+```text
+j1                 = 4,748,527,677,440,269,774
+j2                 = 2,939,564,752,701,152,030
+quadratic_integral = 20,910,289,747,150,055,707,600,000,000,000
+```
+
+Segment two, `t = 89,440` to `172,800`, longs paying, `d` running from `d_star`
+to `d_end`:
+
+```text
+j1                 = 1,094,387,238,160,076,781
+j2                 =   164,483,796,211,532,077
+quadratic_integral =  2,044,641,364,626,780,877,880,000,000,000
+```
+
+The additivity property of §4.6 holds exactly here. Integrating the window as
+one segment gives `22,954,931,111,776,836,585,480,000,000,000`, and the two
+segments sum to precisely that — a difference of zero, not merely one inside
+`DECAY_TOLERANCE`. Against a high-precision evaluation the three integrals are
+off by `2.8e-14`, `-2.7e-13`, and `1.9e-15` relative. Note that the second is
+*negative*: the composite integral is not one-directional even though each
+primitive inside it is, because `B` is negative and the `2*A*B*j1` term
+inverts the direction of its truncation. A test asserting one-sided error on
+the integral is testing something the specification does not claim.
+
+Carrying segment one into §6.2 with `$1,000,000` of short size paying and
+`$1,100,000` of long size receiving — longs have more base than shorts, so the
+receiver fraction is one whole and nothing goes to LPs:
+
+```text
+receiver_backed_payer_index_short += 19,361,379,395
+    carried remainder                44,004,456,608,000,000,000,000
+
+receiver_backing_scaled = 1,000,000 * 10^7 * 19,361,379,395
+
+liability_delta         = 1,936,137,939          # $193.6137939
+    carried remainder      50,000,000,000,000
+
+receiver_index_long    += 17,601,253,995
+    carried remainder      5,000,000,000,000
+```
+
+And the EMA advances for the whole window regardless of the split:
+
+```text
+ema_after = 7,375,000,000,000            # +0.07375
+```
+
+Two days of a book that is only mildly long-skewed have moved the EMA from
+`-0.5` to `+0.07375`, and along the way the short side paid for the first
+twenty-five hours on the strength of its own history before the long side took
+over. That is the mechanism of §3.4.2 doing exactly what it is for.
 
 ## 12. Operational contract
 
@@ -7932,55 +8453,52 @@ StampedPrice {
     observed_at    # oldest contributing source timestamp
 }
 
-get_stamped_price(symbol)       -> StampedPrice   # may serve the cache
-get_fresh_stamped_price(symbol) -> StampedPrice   # never serves the cache
-latest_round_id()               -> u64
-get_round(round_id)             -> OracleRound
+read_stamped_price(symbol)  -> StampedPrice
+latest_round_id()           -> u64
+get_round(round_id)         -> OracleRound
 ```
 
-The three price primitives named throughout sections 7 and 8 map onto these:
+`read_stamped_price` is the single price primitive named throughout sections 7
+and 8 — at commitment, at settlement, and on the forced paths alike. This
+specification requires one property of it:
 
-| Specification name | Required call |
-|---|---|
-| `read_authenticated_stamped_price` | `get_fresh_stamped_price` |
-| `read_fresh_uncached_stamped_price` | `get_fresh_stamped_price` |
-| `read_authenticated_current_price` | `get_stamped_price` |
+> Every call returns an aggregate computed from source data read during that
+> call, together with a stamp naming the oldest source behind it. No call
+> answers from a value retained by an earlier call.
 
-Only the last may use the cache, because liquidation and ADL compare a price
-against a threshold rather than against an earlier observation.
+How the oracle is built, and whether it caches internally for its other
+consumers, is its own concern and not described here. What it may not do is
+serve one of these reads from a retained value. Two rules in this
+specification depend on that, and on nothing else about the oracle.
 
-Both stamped reads are required. Without them `commit_observed_at` and
+At commitment, a retained stamp is backdated by however long it was retained,
+so `commit_observed_at` is older than the moment the trader committed. A fill
+can then satisfy `fill_observed_at > commit_observed_at` against an observation
+that predates the commitment — the test passing with no new information having
+arrived, which is exactly what §1.13 exists to prevent. If anyone can cause a
+value to be retained, whoever picks that moment picks which observation every
+later commitment is measured against.
+
+On the forced paths, §7.13 and §7.14 use one snapshot for both eligibility and
+settlement, so a retained price is a price the caller chose. A keeper able to
+pin a momentary adverse print can liquidate against it after the market has
+recovered, closing a position that is currently healthy at a price that no
+longer exists, and can latch a side into `HardCap` or admit an ADL the same
+way. That these paths compare a price against a threshold rather than against
+an earlier observation does not make a stale price safe; the caller's ability
+to choose it is what does the damage.
+
+`observed_at` is required on every read. Without it `commit_observed_at` and
 `fill_observed_at` cannot be populated, and every rule built on them — the
 fresh-price requirement, the `NotReady` outcome, the terminal first-attempt
 semantics — has nothing to compare.
 
-#### 12.7.2 Why the commitment cursor may not come from the cache
-
-It is not enough for the fill to bypass the cache. The commitment cursor must
-bypass it too, and this is the subtle half.
-
-A cached entry can be up to `cache_duration` old and still be served. If a
-trader's commitment records that entry's stamp, `commit_observed_at` is
-already backdated by up to a full cache window at the moment it is written. A
-fill then satisfies `fill_observed_at > commit_observed_at` against an
-observation that may itself predate the commitment — the test passes without
-any new information having arrived, which is the exact thing §1.13 exists to
-prevent.
-
-The cache is also permissionless to fill: anyone may call the cached read and
-write the entry, so whoever chooses when that write happens chooses which
-observation later commitments are measured against.
-
-Both reads therefore use the uncached path. Creation is already a
-state-changing transaction, so a fresh aggregation there costs nothing
-structurally.
-
-#### 12.7.3 Rounds
+#### 12.7.2 Rounds
 
 Synchronized rounds are a separate mechanism with a separate purpose: they
 stamp every active market at one timestamp so LP accounting can mark the whole
-vault consistently (§4.9). A round is built from uncached aggregation for each
-active market and records `id`, `timestamp`, `previous_id`,
+vault consistently (§4.9). A round aggregates each active market from source data read at
+publication time and records `id`, `timestamp`, `previous_id`,
 `previous_timestamp`, and one price per symbol.
 
 Round publication is permissioned where everything else in this protocol is
@@ -7992,7 +8510,7 @@ Rounds are also why `max_active_markets` is bounded. A round iterates every
 active market and aggregates each from scratch, so the registry bound of §5.1
 is what keeps that operation inside a transaction budget.
 
-#### 12.7.4 Failure behaviour, and what it costs
+#### 12.7.3 Failure behaviour, and what it costs
 
 Every rejection is a panic, so the calling operation reverts:
 
@@ -8032,7 +8550,7 @@ Whether that is met by a wider bound for liquidation, a documented fallback
 aggregate, or an explicit degraded mode is an oracle-side decision. What is
 not acceptable is one guard governing both directions.
 
-#### 12.7.5 Configuration owned elsewhere
+#### 12.7.4 Configuration owned elsewhere
 
 These values are enforced by the router, not by this protocol, and every
 number in sections 2 and 10 assumes them:
@@ -8043,7 +8561,6 @@ number in sections 2 and 10 assumes them:
 | `min_required_sources` | At least `2` |
 | `max_deviation_bps` | At most `10,000` |
 | Source count | At most `16` |
-| `cache_duration` | Greater than zero and at most `staleness_threshold` |
 
 `staleness_threshold` is the one to choose deliberately. It bounds how old the
 data behind an accepted fill can be, so it is the real width of the window a
@@ -8128,7 +8645,7 @@ receivers rather than a leak.
 #### 12.8.4 The oracle answers, and the token behaves
 
 Liquidation and ADL both require a price and both revert without one, while
-borrow and funding keep accruing (§12.7.4). Nothing here bounds the length of
+borrow and funding keep accruing (§12.7.3). Nothing here bounds the length of
 an outage or the loss it can produce; the mitigations are operational.
 
 The collateral token is trusted not to freeze a participant (§12.1). A frozen
