@@ -273,7 +273,7 @@ pub fn fail_position_action(
 
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
-    risk::evaluate_market_risk(env, ledger, &action.market_id, market, price, equity);
+    risk::evaluate_market_risk(env, ledger, &action.market_id, caller, market, price, equity);
     storage::save_market(env, &action.market_id, market);
     storage::save_position(env, position);
     borrow::refresh_rate(env, ledger, physical);
@@ -300,7 +300,12 @@ pub fn fail_position_action(
 /// reward is paid for it: the caller receives only the forced action's
 /// reward (§8.11). Cleanup inside a forced action is not a second keeper
 /// action.
-pub fn supersede_pending_mutation(env: &Env, ledger: &mut Ledger, position: &mut Position) {
+pub fn supersede_pending_mutation(
+    env: &Env,
+    ledger: &mut Ledger,
+    actor: &Address,
+    position: &mut Position,
+) {
     let Some(action_id) = position.pending_mutation_action_id else {
         return;
     };
@@ -312,7 +317,15 @@ pub fn supersede_pending_mutation(env: &Env, ledger: &mut Ledger, position: &mut
     action.escrowed_collateral = 0;
     ledger::refund_escrow(env, ledger, &action.owner, refund);
     storage::remove_pending_action(env, action_id);
-    events::emit_action_superseded(env, action_id, position.id, &action.owner, refund);
+    events::emit_action_superseded(
+        env,
+        &position.market,
+        actor,
+        action_id,
+        position.id,
+        &action.owner,
+        refund,
+    );
 }
 
 #[cfg(test)]

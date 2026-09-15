@@ -1,3 +1,4 @@
+use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 /// §7.6 — a keeper cleaned an entry at or after its expiry boundary. The
@@ -8,8 +9,8 @@ use soroban_sdk::{contractevent, Address, Env, Symbol};
 pub struct ActionExpired {
     #[topic]
     pub action_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub keeper: Address,
     pub reward: i128,
     pub refund: i128,
@@ -26,8 +27,8 @@ pub fn emit_action_expired(
 ) {
     ActionExpired {
         action_id,
+        header: super::header(env, market, keeper),
         owner: owner.clone(),
-        market: market.clone(),
         keeper: keeper.clone(),
         reward,
         refund,

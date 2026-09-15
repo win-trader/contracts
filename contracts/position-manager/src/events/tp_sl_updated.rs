@@ -1,5 +1,6 @@
+use super::EventHeader;
 use shared::Position;
-use soroban_sdk::{contractevent, Address, Env, Symbol};
+use soroban_sdk::{contractevent, Address, Env};
 
 /// Take-profit / stop-loss triggers changed on an open position. Zero means
 /// no trigger set.
@@ -8,8 +9,8 @@ use soroban_sdk::{contractevent, Address, Env, Symbol};
 pub struct TpSlUpdated {
     #[topic]
     pub position_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub take_profit: i128,
     pub stop_loss: i128,
 }
@@ -17,8 +18,8 @@ pub struct TpSlUpdated {
 pub fn emit_tp_sl_updated(env: &Env, position: &Position) {
     TpSlUpdated {
         position_id: position.id,
+        header: super::header(env, &position.market, &position.owner),
         owner: position.owner.clone(),
-        market: position.market.clone(),
         take_profit: position.take_profit.price(),
         stop_loss: position.stop_loss.price(),
     }

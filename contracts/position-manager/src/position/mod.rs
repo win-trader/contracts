@@ -6,7 +6,7 @@ pub mod liquidate;
 pub mod mutation;
 pub mod trigger;
 
-use soroban_sdk::{panic_with_error, Env};
+use soroban_sdk::{panic_with_error, Address, Env};
 
 use crate::errors::PositionManagerError;
 use crate::events::{self, CloseReason};
@@ -17,9 +17,14 @@ use crate::settle::Settled;
 /// Every terminal path passes the position's full remaining size, so a
 /// `Partial` result here would mean the settlement disagreed with its own
 /// input — an invariant break, not a business outcome.
-pub(crate) fn emit_terminal(env: &Env, settled: &Settled, reason: CloseReason) {
+pub(crate) fn emit_terminal(
+    env: &Env,
+    actor: &Address,
+    settled: &Settled,
+    reason: CloseReason,
+) {
     match settled {
-        Settled::Closed(header, tail) => events::emit_closed(env, header, tail, reason),
+        Settled::Closed(header, tail) => events::emit_closed(env, actor, header, tail, reason),
         Settled::Partial(_) => {
             panic_with_error!(env, PositionManagerError::InvariantViolation)
         }

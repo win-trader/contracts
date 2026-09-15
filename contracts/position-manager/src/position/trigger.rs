@@ -174,13 +174,21 @@ fn execute(
 
     let mut ledger = storage::get_ledger(env);
     let mut market = storage::get_market(env, &position.market);
-    borrow::accrue(env, &mut ledger, now);
-    funding::accrue(env, &mut ledger, &mut market, now);
+    borrow::accrue(env, &mut ledger, Some(&keeper_address), now);
+    funding::accrue(env, &mut ledger, &position.market, Some(&keeper_address), &mut market, now);
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
     // §6.5 — refresh the side risk state from this fill before anything
     // reads a payout factor.
-    risk::evaluate_market_risk(env, &mut ledger, &position.market, &mut market, fill.price, equity);
+    risk::evaluate_market_risk(
+        env,
+        &mut ledger,
+        &position.market,
+        &keeper_address,
+        &mut market,
+        fill.price,
+        equity,
+    );
 
     // §8.12 — liquidation outranks every voluntary exit, triggers included.
     // The instruction stays attached; the liquidation path removes the
@@ -205,11 +213,11 @@ fn execute(
         market,
         size,
         fill.price,
-        Some(settle::Keeper {
+        settle::Keeper {
             recipient: &keeper_address,
             reward,
             liquidation: false,
-        }),
+        },
         // A losing stop-loss pays no closing fee because there is no profit
         // to charge it against, not because the path waives it; a stop-loss
         // moved above entry closes in profit and pays the normal fee.
@@ -218,6 +226,7 @@ fn execute(
     storage::save_ledger(env, &ledger);
     super::emit_terminal(
         env,
+        &keeper_address,
         &settled,
         if take_profit {
             CloseReason::TakeProfit

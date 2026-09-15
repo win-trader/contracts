@@ -5,7 +5,7 @@
 //! PnL, then LP-backed funding, then borrow) so a shortfall lands on the
 //! least-protected claim, then resets the debt baselines.
 
-use soroban_sdk::{panic_with_error, Address, Env};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::BPS;
 use shared::{Market, MarketConfig, Position};
@@ -46,9 +46,12 @@ pub struct CollectedFees {
 ///
 /// The fee must already have been removed from position collateral or action
 /// escrow before this runs.
+#[allow(clippy::too_many_arguments)]
 pub fn distribute_open_close_revenue(
     env: &Env,
     ledger: &mut Ledger,
+    market: &Symbol,
+    actor: &Address,
     collected: i128,
     owner: &Address,
     source: FeeSource,
@@ -64,7 +67,9 @@ pub fn distribute_open_close_revenue(
     let referral = referral::accrue(env, ledger, owner, collected, position_id);
     let protocol = math::sub(env, math::sub(env, collected, lp), referral);
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
-    events::emit_revenue_split(env, position_id, source, collected, lp, protocol, referral);
+    events::emit_revenue_split(
+        env, market, actor, position_id, source, collected, lp, protocol, referral,
+    );
     protocol
 }
 
@@ -74,6 +79,8 @@ pub fn distribute_open_close_revenue(
 pub fn distribute_borrow_revenue(
     env: &Env,
     ledger: &mut Ledger,
+    market: &Symbol,
+    actor: &Address,
     collected: i128,
     position_id: u64,
 ) {
@@ -91,6 +98,8 @@ pub fn distribute_borrow_revenue(
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
     events::emit_revenue_split(
         env,
+        market,
+        actor,
         position_id,
         FeeSource::Borrow,
         collected,
@@ -216,6 +225,8 @@ fn credit_received_funding(env: &Env, ledger: &mut Ledger, market: &mut Market, 
 pub fn capitalize_for_surviving_mutation(
     env: &Env,
     ledger: &mut Ledger,
+    market_id: &Symbol,
+    actor: &Address,
     position: &mut Position,
     market: &mut Market,
 ) -> CollectedFees {
@@ -251,7 +262,7 @@ pub fn capitalize_for_surviving_mutation(
             ledger::collect_stored_collateral(env, ledger, position, side, pending.borrow),
         )
     };
-    distribute_borrow_revenue(env, ledger, borrow_collected, position.id);
+    distribute_borrow_revenue(env, ledger, market_id, actor, borrow_collected, position.id);
     funding::reset_debts(env, position, market);
     CollectedFees {
         receiver_credit: pending.funding_received,
@@ -268,6 +279,8 @@ pub fn capitalize_for_surviving_mutation(
 pub fn capitalize(
     env: &Env,
     ledger: &mut Ledger,
+    market_id: &Symbol,
+    actor: &Address,
     position: &mut Position,
     market: &mut Market,
     negative_pnl: i128,
@@ -308,7 +321,7 @@ pub fn capitalize(
         )
     };
 
-    distribute_borrow_revenue(env, ledger, borrow_collected, position.id);
+    distribute_borrow_revenue(env, ledger, market_id, actor, borrow_collected, position.id);
     funding::reset_debts(env, position, market);
 
     let guaranteed_and_loss = math::add(

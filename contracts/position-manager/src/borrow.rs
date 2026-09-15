@@ -8,7 +8,7 @@
 //! mutation that changed it — so a state change can never reprice time
 //! that already passed (§18.4).
 
-use soroban_sdk::Env;
+use soroban_sdk::{Address, Env};
 
 use shared::constants::{BPS, INDEX_PRECISION, SECONDS_PER_DAY};
 
@@ -17,26 +17,45 @@ use soroban_sdk::panic_with_error;
 
 use crate::errors::PositionManagerError;
 use crate::ledger::Ledger;
-use crate::{math, storage};
+use crate::{events, math, storage};
 
 /// §10.1 — advance the global borrow index with the stored rate. A second
 /// call at the same timestamp has no effect.
-pub fn accrue(env: &Env, ledger: &mut Ledger, now: u64) {
+/// `actor` is `None` for §4.12's read-only quote, which runs this same code
+/// on copies. A quote must write nothing, and an emitted event is a written
+/// thing: passing the actor is how a caller says "this is a real checkpoint
+/// and here is who to credit for it".
+pub fn accrue(env: &Env, ledger: &mut Ledger, actor: Option<&Address>, now: u64) {
     if now <= ledger.last_global_checkpoint {
         return;
     }
-    let elapsed = (now - ledger.last_global_checkpoint) as i128;
+    let elapsed = now - ledger.last_global_checkpoint;
 
     let denominator = BPS * SECONDS_PER_DAY as i128;
     let numerator = math::add(
         env,
-        math::mul(env, ledger.current_borrow_rate, elapsed),
+        math::mul(env, ledger.current_borrow_rate, elapsed as i128),
         ledger.borrow_index_remainder,
     );
-    ledger.borrow_index = math::add(env, ledger.borrow_index, numerator / denominator);
+    let delta = numerator / denominator;
+    ledger.borrow_index = math::add(env, ledger.borrow_index, delta);
     ledger.borrow_index_remainder = numerator % denominator;
 
     ledger.last_global_checkpoint = now;
+    // §12.6 — only when the index actually moved. A sub-unit window carries
+    // entirely in the remainder and changes nothing a consumer could act on,
+    // and every trader action checkpoints, so emitting regardless would put
+    // an empty event on every transaction.
+    if let (Some(actor), true) = (actor, delta != 0) {
+        events::emit_borrow_checkpoint(
+            env,
+            actor,
+            elapsed,
+            delta,
+            ledger.current_borrow_rate,
+            ledger.borrow_index,
+        );
+    }
 }
 
 /// §6.14 — recompute the stored borrow rate from current utilization along

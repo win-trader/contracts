@@ -103,7 +103,7 @@ pub fn claim(env: Env, referrer: Address) {
     require_initialized(&env);
     require_auth(&referrer);
     let mut ledger = storage::get_ledger(&env);
-    borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+    borrow::accrue(&env, &mut ledger, Some(&referrer), env.ledger().timestamp());
     let amount = storage::get_referral_balance(&env, &referrer);
     if amount <= 0 {
         panic_with_error!(&env, PositionManagerError::InvalidAmount);

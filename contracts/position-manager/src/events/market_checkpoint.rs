@@ -1,6 +1,7 @@
 use crate::ledger::Ledger;
 use shared::{Market, PayerSide};
-use soroban_sdk::{contractevent, Env, Symbol};
+use super::EventHeader;
+use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 /// Funding/borrow indices and current rates after a keeper checkpoint
 /// (`update_indices`). The off-chain fee projection and staleness monitors
@@ -12,6 +13,7 @@ use soroban_sdk::{contractevent, Env, Symbol};
 pub struct MarketCheckpoint {
     #[topic]
     pub market: Symbol,
+    pub header: EventHeader,
     pub receiver_backed_index_long: i128,
     pub receiver_backed_index_short: i128,
     pub lp_backed_index_long: i128,
@@ -29,12 +31,14 @@ pub struct MarketCheckpoint {
 pub fn emit_market_checkpoint(
     env: &Env,
     market_symbol: &Symbol,
+    actor: &Address,
     market: &Market,
     ledger: &Ledger,
     timestamp: u64,
 ) {
     MarketCheckpoint {
         market: market_symbol.clone(),
+        header: super::header(env, market_symbol, actor),
         receiver_backed_index_long: market.receiver_backed_index_long,
         receiver_backed_index_short: market.receiver_backed_index_short,
         lp_backed_index_long: market.lp_backed_index_long,

@@ -93,7 +93,12 @@ pub fn take_due_market_proposal(env: &Env, market: &Symbol, now: u64) -> MarketC
 }
 
 /// Store a validated global proposal and announce it.
-pub fn store_global_proposal(env: &Env, config: &GlobalConfig, effective_at: u64) {
+pub fn store_global_proposal(
+    env: &Env,
+    actor: &Address,
+    config: &GlobalConfig,
+    effective_at: u64,
+) {
     storage::save_pending_global_config(
         env,
         &PendingGlobalConfig {
@@ -101,11 +106,17 @@ pub fn store_global_proposal(env: &Env, config: &GlobalConfig, effective_at: u64
             effective_at,
         },
     );
-    events::emit_config_proposed(env, None, effective_at);
+    events::emit_config_proposed(env, actor, None, effective_at);
 }
 
 /// Store a validated market proposal and announce it.
-pub fn store_market_proposal(env: &Env, market: &Symbol, config: &MarketConfig, effective_at: u64) {
+pub fn store_market_proposal(
+    env: &Env,
+    actor: &Address,
+    market: &Symbol,
+    config: &MarketConfig,
+    effective_at: u64,
+) {
     storage::save_pending_market_config(
         env,
         market,
@@ -114,5 +125,5 @@ pub fn store_market_proposal(env: &Env, market: &Symbol, config: &MarketConfig, 
             effective_at,
         },
     );
-    events::emit_config_proposed(env, Some(market.clone()), effective_at);
+    events::emit_config_proposed(env, actor, Some(market.clone()), effective_at);
 }

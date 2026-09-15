@@ -30,8 +30,13 @@ pub struct PositionManagerContract;
 /// silently, so it is rejected at the moment it is wired rather than
 /// discovered at the first settlement.
 fn require_feed_decimals(env: &Env, price_feed: &Address) {
-    if PriceFeedClient::new(env, price_feed).decimals() != PRICE_DECIMALS {
-        panic_with_error!(env, PositionManagerError::PriceUnavailable);
+    // Wrapped for the same reason as the price read (§12.5): a feed that
+    // does not answer at all, or answers with its own error, must surface as
+    // this contract's `PriceUnavailable` rather than as a foreign code that
+    // looks native.
+    match PriceFeedClient::new(env, price_feed).try_decimals() {
+        Ok(Ok(decimals)) if decimals == PRICE_DECIMALS => {}
+        _ => panic_with_error!(env, PositionManagerError::PriceUnavailable),
     }
 }
 
@@ -69,20 +74,20 @@ fn validate_market_against_set(env: &Env, symbol: &Symbol, config: &MarketConfig
 /// value, store, then refresh the forward-looking rate. Accruing after the
 /// store would reprice elapsed time at the new parameter, which §9.6
 /// forbids.
-fn apply_global(env: &Env, config: &GlobalConfig) {
+fn apply_global(env: &Env, actor: &Address, config: &GlobalConfig) {
     let mut ledger = storage::get_ledger(env);
-    borrow::accrue(env, &mut ledger, env.ledger().timestamp());
+    borrow::accrue(env, &mut ledger, Some(actor), env.ledger().timestamp());
     storage::save_global_config(env, config);
     borrow::refresh_rate(env, &mut ledger, ledger::physical_cash(env));
     storage::save_ledger(env, &ledger);
-    events::emit_global_config_updated(env, config);
+    events::emit_global_config_updated(env, actor, config);
 }
 
 /// §10.3.3 for one market, and §5.3's risk-factor rule.
-fn apply_market(env: &Env, symbol: &Symbol, config: &MarketConfig) {
+fn apply_market(env: &Env, actor: &Address, symbol: &Symbol, config: &MarketConfig) {
     let mut ledger = storage::get_ledger(env);
     let now = env.ledger().timestamp();
-    borrow::accrue(env, &mut ledger, now);
+    borrow::accrue(env, &mut ledger, Some(actor), now);
     match storage::try_get_market(env, symbol) {
         Some(mut market) => {
             // §5.3 — `market_risk_factor_bps` may change only while both
@@ -97,10 +102,18 @@ fn apply_market(env: &Env, symbol: &Symbol, config: &MarketConfig) {
             }
             // Checkpoint the funding window under the old half-life,
             // maximum rate, and instant weight before they are replaced.
-            funding::accrue(env, &mut ledger, &mut market, now);
+            funding::accrue(env, &mut ledger, symbol, Some(actor), &mut market, now);
             market.config = config.clone();
             funding::refresh_display(env, &mut ledger, &mut market);
             storage::save_market(env, symbol, &market);
+            // §7.18 — a deregistered market keeps its record, so this is
+            // also the re-registration path. Without this the config would
+            // update and the market would stay out of the registry.
+            if !storage::is_market_registered(env, symbol) {
+                let mut markets = storage::get_active_markets(env);
+                markets.push_back(symbol.clone());
+                storage::save_active_markets(env, &markets);
+            }
         }
         None => {
             let mut markets = storage::get_active_markets(env);
@@ -111,7 +124,7 @@ fn apply_market(env: &Env, symbol: &Symbol, config: &MarketConfig) {
     }
     borrow::refresh_rate(env, &mut ledger, ledger::physical_cash(env));
     storage::save_ledger(env, &ledger);
-    events::emit_market_config_updated(env, symbol, config);
+    events::emit_market_config_updated(env, symbol, actor, config);
 }
 
 /// §5.3 — no open interest and no risk units on either side.
@@ -152,7 +165,7 @@ impl PositionManager for PositionManagerContract {
         require_role(&env, &caller, ROLE_ORACLE);
         require_feed_decimals(&env, &price_feed);
         storage::save_price_feed(&env, &price_feed);
-        events::emit_price_feed_changed(&env, &price_feed);
+        events::emit_price_feed_changed(&env, &caller, &price_feed);
     }
 
     fn price_feed(env: Env) -> Address {
@@ -307,22 +320,23 @@ impl PositionManager for PositionManagerContract {
         storage::get_ledger(&env).referral_claimable_total
     }
 
-    fn update_indices(env: Env, market_symbol: Symbol) {
+    fn update_indices(env: Env, caller: Address, market_symbol: Symbol) {
         // §7.0 — permissionless. A checkpoint pays no reward and moves no
         // value between parties: it only advances the indices to now, which
         // every settlement does anyway. An allowlist here bought nothing and
         // made staleness someone's privilege.
         require_initialized(&env);
+        caller.require_auth();
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
-        borrow::accrue(&env, &mut ledger, now);
+        borrow::accrue(&env, &mut ledger, Some(&caller), now);
         let mut market = storage::get_market(&env, &market_symbol);
-        funding::accrue(&env, &mut ledger, &mut market, now);
+        funding::accrue(&env, &mut ledger, &market_symbol, Some(&caller), &mut market, now);
         storage::save_market(&env, &market_symbol, &market);
         let physical = ledger::physical_cash(&env);
         borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
-        events::emit_market_checkpoint(&env, &market_symbol, &market, &ledger, now);
+        events::emit_market_checkpoint(&env, &market_symbol, &caller, &market, &ledger, now);
     }
 
     fn propose_global_config(env: Env, caller: Address, config: GlobalConfig) {
@@ -332,20 +346,26 @@ impl PositionManager for PositionManagerContract {
         // §12.3 exemption 2 — a purely conservative change applies at once.
         // It still checkpoints under the old value and still emits.
         if governance::global_is_conservative(&storage::get_global_config(&env), &config) {
-            apply_global(&env, &config);
+            apply_global(&env, &caller, &config);
             return;
         }
-        governance::store_global_proposal(&env, &config, governance::effective_at(&env, now));
+        governance::store_global_proposal(&env, &caller, &config, governance::effective_at(&env, now));
     }
 
-    fn apply_global_config(env: Env) {
+    fn apply_global_config(env: Env, caller: Address) {
+        // Permissionless — the authorization happened at proposal and the
+        // delay is the protection — but the caller still names themselves,
+        // the same convention every other permissionless operation follows
+        // (§7.0). §12.6's envelope needs an actor, and "whoever's
+        // transaction this was" is not something the contract can read.
+        caller.require_auth();
         let now = env.ledger().timestamp();
         let config = governance::take_due_global_proposal(&env, now);
         // Re-validated at apply: the active market set may have changed
         // while the proposal waited, and §10.3.1's cross-parameter rules
         // are stated over the set that exists when the value takes effect.
         validate_global_against_markets(&env, &config);
-        apply_global(&env, &config);
+        apply_global(&env, &caller, &config);
     }
 
     fn propose_market_config(env: Env, caller: Address, market_symbol: Symbol, config: MarketConfig) {
@@ -354,41 +374,82 @@ impl PositionManager for PositionManagerContract {
         let existing = storage::try_get_market(&env, &market_symbol);
         // Registering a market creates no obligations to anyone, so it is
         // not a change a timelock protects against. Only a change to a
-        // market that already has live accounting waits.
+        // market that already has live accounting waits — and a deregistered
+        // market has none by construction, since §7.18 required it to be
+        // empty on the way out. Re-registering one is therefore a
+        // registration, not a change, even though its record survives.
         let exempt = match &existing {
             None => true,
+            Some(_) if !storage::is_market_registered(&env, &market_symbol) => true,
             Some(market) => governance::market_is_conservative(&market.config, &config),
         };
         if exempt {
-            apply_market(&env, &market_symbol, &config);
+            apply_market(&env, &caller, &market_symbol, &config);
             return;
         }
         let now = env.ledger().timestamp();
         governance::store_market_proposal(
             &env,
+            &caller,
             &market_symbol,
             &config,
             governance::effective_at(&env, now),
         );
     }
 
-    fn apply_market_config(env: Env, market_symbol: Symbol) {
+    fn apply_market_config(env: Env, caller: Address, market_symbol: Symbol) {
+        caller.require_auth();
         let now = env.ledger().timestamp();
         let config = governance::take_due_market_proposal(&env, &market_symbol, now);
         validate_market_against_set(&env, &market_symbol, &config);
-        apply_market(&env, &market_symbol, &config);
+        apply_market(&env, &caller, &market_symbol, &config);
+    }
+
+    fn deregister_market(env: Env, caller: Address, market_symbol: Symbol) {
+        governance::require_configuration_authority(&env, &caller);
+        let market = storage::get_market(&env, &market_symbol);
+        // §7.18 — nothing may still be owed to or by this market. Open
+        // interest and base exposure cover the positions; the receiver
+        // liability covers funding that accrued to holders who have since
+        // closed; `Normal` on both sides covers a latched payout factor that
+        // a later re-registration would otherwise inherit.
+        let empty = market.long.size_open_interest == 0
+            && market.short.size_open_interest == 0
+            && market.long.base_exposure == 0
+            && market.short.base_exposure == 0
+            && market.long.risk_units == 0
+            && market.short.risk_units == 0
+            && market.pending_receiver_funding == 0
+            && market.long.risk_state == shared::RiskState::Normal
+            && market.short.risk_state == shared::RiskState::Normal;
+        if !empty {
+            panic_with_error!(&env, PositionManagerError::MarketNotEmpty);
+        }
+        let markets = storage::get_active_markets(&env);
+        let mut remaining = Vec::<Symbol>::new(&env);
+        for symbol in markets.iter() {
+            if symbol != market_symbol {
+                remaining.push_back(symbol);
+            }
+        }
+        storage::save_active_markets(&env, &remaining);
+        // The `Market` record itself stays, indices and checkpoint timestamp
+        // included (§7.18). Rewinding an index would let a re-registration
+        // reprice a baseline a historical position was settled against, and
+        // an index is cumulative precisely so that cannot happen.
+        events::emit_market_status_changed(&env, &market_symbol, &caller, true);
     }
 
     fn disable_market(env: Env, caller: Address, market: Symbol) {
         require_role(&env, &caller, ROLE_PAUSER);
         storage::set_market_disabled(&env, &market, true);
-        events::emit_market_status_changed(&env, &market, true);
+        events::emit_market_status_changed(&env, &market, &caller, true);
     }
 
     fn enable_market(env: Env, caller: Address, market: Symbol) {
         require_role(&env, &caller, ROLE_PAUSER);
         storage::set_market_disabled(&env, &market, false);
-        events::emit_market_status_changed(&env, &market, false);
+        events::emit_market_status_changed(&env, &market, &caller, false);
     }
 
     fn is_market_disabled(env: Env, market: Symbol) -> bool {
@@ -399,16 +460,16 @@ impl PositionManager for PositionManagerContract {
         require_vault(&env, &caller);
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
-        borrow::accrue(&env, &mut ledger, now);
+        borrow::accrue(&env, &mut ledger, Some(&caller), now);
         // §8.3 — the receiver liability accrues per-market, so LP pricing
         // checkpoints every active market (bounded by max_active_markets)
         // rather than trusting the keeper sweep's cadence.
         for symbol in storage::get_active_markets(&env).iter() {
             let mut market = storage::get_market(&env, &symbol);
-            funding::accrue(&env, &mut ledger, &mut market, now);
+            funding::accrue(&env, &mut ledger, &symbol, Some(&caller), &mut market, now);
             storage::save_market(&env, &symbol, &market);
         }
-        let result = snapshot::build_snapshot(&env, &mut ledger, physical, true);
+        let result = snapshot::build_snapshot(&env, &mut ledger, &caller, physical, true);
         borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
         result
@@ -417,20 +478,27 @@ impl PositionManager for PositionManagerContract {
     fn refresh_borrow_rate(env: Env, caller: Address, physical: i128) {
         require_vault(&env, &caller);
         let mut ledger = storage::get_ledger(&env);
-        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+        borrow::accrue(&env, &mut ledger, Some(&caller), env.ledger().timestamp());
         borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
     }
 
     fn can_create_lp_request(env: Env, caller: Address, physical: i128) -> bool {
         require_vault(&env, &caller);
+        // §12.2 — creating an LP request is blocked while paused. Resolving
+        // one is handled on the vault side, where a pending request fails
+        // terminally rather than freezing the queue behind an unpause that
+        // may never come.
+        if storage::is_paused(&env) {
+            return false;
+        }
         let mut ledger = storage::get_ledger(&env);
-        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+        borrow::accrue(&env, &mut ledger, Some(&caller), env.ledger().timestamp());
         // The **fresh** evaluation, not the stored counter, and the
         // deleveraging count rather than the restricted one: §7.17's gate is
         // `ADL` or `HardCap`, and `Warning` must not close the queue (the
         // stored counter includes it).
-        let snapshot = snapshot::build_snapshot(&env, &mut ledger, physical, false);
+        let snapshot = snapshot::build_snapshot(&env, &mut ledger, &caller, physical, false);
         borrow::refresh_rate(&env, &mut ledger, physical);
         storage::save_ledger(&env, &ledger);
         snapshot.cash_shortfall == 0 && snapshot.deleveraging_side_count == 0
@@ -438,7 +506,11 @@ impl PositionManager for PositionManagerContract {
 
     fn accounting_snapshot(env: Env, physical: i128) -> AccountingSnapshot {
         let mut ledger = storage::get_ledger(&env);
-        snapshot::build_snapshot(&env, &mut ledger, physical, false)
+        // A read-only quote persists no transition, so the actor it would
+        // credit never reaches an event. The contract names itself rather
+        // than inventing a caller.
+        let reader = env.current_contract_address();
+        snapshot::build_snapshot(&env, &mut ledger, &reader, physical, false)
     }
 
     fn get_position(env: Env, position_id: u64) -> Position {
@@ -485,8 +557,15 @@ impl PositionManager for PositionManagerContract {
 
     fn claim_protocol(env: Env, caller: Address, recipient: Address, amount: i128) {
         require_role(&env, &caller, ROLE_PROTOCOL);
+        // §12.2 — blocked while paused. The same authority can generally
+        // reach both, and leaving this open would create a pause-and-drain
+        // path that costs nothing to close. Referral balances are ordinary
+        // user funds and are deliberately **not** withheld the same way.
+        if storage::is_paused(&env) {
+            panic_with_error!(&env, PositionManagerError::Paused);
+        }
         let mut ledger = storage::get_ledger(&env);
-        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+        borrow::accrue(&env, &mut ledger, Some(&caller), env.ledger().timestamp());
         if amount <= 0 || amount > ledger.protocol_claimable_total {
             panic_with_error!(&env, PositionManagerError::InvalidAmount);
         }
@@ -499,7 +578,7 @@ impl PositionManager for PositionManagerContract {
         );
         borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
         storage::save_ledger(&env, &ledger);
-        events::emit_protocol_claimed(&env, &recipient, amount);
+        events::emit_protocol_claimed(&env, &caller, &recipient, amount);
     }
 
     fn recapitalize(env: Env, contributor: Address, amount: i128) {
@@ -511,7 +590,7 @@ impl PositionManager for PositionManagerContract {
         // LP-equity donation.
         ledger::receive(&env, &contributor, amount);
         let mut ledger = storage::get_ledger(&env);
-        borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+        borrow::accrue(&env, &mut ledger, Some(&contributor), env.ledger().timestamp());
         borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
         storage::save_ledger(&env, &ledger);
         events::emit_recapitalized(&env, &contributor, amount);
@@ -520,13 +599,13 @@ impl PositionManager for PositionManagerContract {
     fn pause(env: Env, caller: Address) {
         require_role(&env, &caller, ROLE_PAUSER);
         storage::save_paused(&env, true);
-        events::emit_pause_changed(&env, true);
+        events::emit_pause_changed(&env, &caller, true);
     }
 
     fn unpause(env: Env, caller: Address) {
         require_role(&env, &caller, ROLE_UNPAUSER);
         storage::save_paused(&env, false);
-        events::emit_pause_changed(&env, false);
+        events::emit_pause_changed(&env, &caller, false);
     }
 
     fn propose_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>) {

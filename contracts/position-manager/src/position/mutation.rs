@@ -58,8 +58,16 @@ pub fn add_collateral(env: Env, position_id: u64, amount: i128) {
     let now = env.ledger().timestamp();
     // The checkpoints run so health is reported against one consistent
     // timestamp, not because this action settles anything.
-    borrow::accrue(&env, &mut ledger, now);
-    funding::accrue(&env, &mut ledger, &mut market, now);
+    let actor = position.owner.clone();
+    borrow::accrue(&env, &mut ledger, Some(&actor), now);
+    funding::accrue(
+        &env,
+        &mut ledger,
+        &position.market,
+        Some(&actor),
+        &mut market,
+        now,
+    );
 
     ledger::receive(&env, &position.owner, amount);
     let is_long = position.is_long;
@@ -100,7 +108,7 @@ fn commit(
     let delay = market.config.order_execution_delay_seconds;
 
     let mut ledger = storage::get_ledger(env);
-    borrow::accrue(env, &mut ledger, now);
+    borrow::accrue(env, &mut ledger, Some(&position.owner), now);
     if escrow > 0 {
         ledger::escrow_in(env, &mut ledger, &position.owner, escrow);
     }
@@ -167,6 +175,17 @@ pub fn create_increase(
     let (mut position, market, commit_price) = claim_slot(&env, position_id);
     if size_added <= 0 || collateral_added < 0 || acceptable_price < 0 {
         panic_with_error!(&env, PositionManagerError::InvalidAmount);
+    }
+    // §12.2 — an increase adds exposure, so a pause closes its *creation*
+    // too, not just its settlement. §9.11's drain rule is about a commitment
+    // made before the pause; letting new ones be made during one would only
+    // queue actions that are certain to fail, each costing the trader a
+    // keeper reward for the privilege.
+    if storage::is_paused(&env) {
+        panic_with_error!(&env, PositionManagerError::Paused);
+    }
+    if !storage::is_market_registered(&env, &position.market) {
+        panic_with_error!(&env, PositionManagerError::MarketNotConfigured);
     }
     let base_added = math::mul_div_floor(&env, size_added, PRICE_PRECISION, commit_price.price);
     let risk_after = math::risk_units_for(
@@ -263,6 +282,7 @@ struct Eligible {
     pending: PendingFees,
     assessment: LiquidationAssessment,
     price: i128,
+    observed_at: u64,
 }
 
 /// The shared front half of `settle_increase`, `settle_decrease`, and
@@ -302,14 +322,29 @@ fn eligible(
 
     let mut ledger = storage::get_ledger(env);
     let mut market = storage::get_market(env, &action.market_id);
-    borrow::accrue(env, &mut ledger, now);
-    funding::accrue(env, &mut ledger, &mut market, now);
+    borrow::accrue(env, &mut ledger, Some(keeper_address), now);
+    funding::accrue(
+        env,
+        &mut ledger,
+        &action.market_id,
+        Some(keeper_address),
+        &mut market,
+        now,
+    );
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
     // §6.5 — the side risk state is refreshed from this fill before anything
     // reads a payout factor. Refreshing afterwards would let the first
     // position out of a newly-crossed side settle unscaled.
-    risk::evaluate_market_risk(env, &mut ledger, &action.market_id, &mut market, fill.price, equity);
+    risk::evaluate_market_risk(
+        env,
+        &mut ledger,
+        &action.market_id,
+        keeper_address,
+        &mut market,
+        fill.price,
+        equity,
+    );
 
     let pending = funding::pending_fees(env, &ledger, &position, &market);
     let assessment = risk::evaluate_liquidation(env, &ledger, &position, &market, fill.price);
@@ -329,6 +364,7 @@ fn eligible(
         pending,
         assessment,
         price: fill.price,
+        observed_at: fill.observed_at,
     })
 }
 
@@ -555,6 +591,8 @@ fn execute_increase(
     let collected = fees::capitalize_for_surviving_mutation(
         env,
         &mut e.ledger,
+        &e.action.market_id,
+        keeper_address,
         &mut e.position,
         &mut e.market,
     );
@@ -585,6 +623,8 @@ fn execute_increase(
         fees::distribute_open_close_revenue(
             env,
             &mut e.ledger,
+            &e.action.market_id,
+            keeper_address,
             charged,
             &owner,
             FeeSource::Opening,
@@ -632,6 +672,7 @@ fn execute_increase(
         env,
         &mut e.ledger,
         &e.action.market_id,
+        keeper_address,
         &mut e.market,
         e.price,
         equity,
@@ -647,8 +688,21 @@ fn execute_increase(
     storage::remove_pending_action(env, e.action.action_id);
     storage::save_position(env, &e.position);
     storage::save_ledger(env, &e.ledger);
+    events::emit_action_settled(
+        env,
+        &e.action.market_id,
+        keeper_address,
+        e.action.action_id,
+        &e.action.owner,
+        e.action.kind,
+        e.position.id,
+        e.price,
+        e.observed_at,
+        reward,
+    );
     events::emit_increased(
         env,
+        keeper_address,
         &e.position,
         payload.size_added,
         exposure.base_added,
@@ -689,6 +743,18 @@ pub fn settle_decrease(env: Env, keeper_address: Address, action_id: u64) -> Act
 
     e.position.pending_mutation_action_id = None;
     storage::remove_pending_action(&env, e.action.action_id);
+    events::emit_action_settled(
+        &env,
+        &e.action.market_id,
+        &keeper_address,
+        e.action.action_id,
+        &e.action.owner,
+        e.action.kind,
+        e.position.id,
+        e.price,
+        e.observed_at,
+        reward,
+    );
     let Eligible {
         position,
         market,
@@ -703,16 +769,18 @@ pub fn settle_decrease(env: Env, keeper_address: Address, action_id: u64) -> Act
         market,
         payload.size_removed,
         price,
-        Some(settle::Keeper {
+        settle::Keeper {
             recipient: &keeper_address,
             reward,
             liquidation: false,
-        }),
+        },
         ClosingFee::Charged,
     );
     storage::save_ledger(&env, &ledger);
     match &settled {
-        settle::Settled::Partial(header) => events::emit_decreased(&env, header),
+        settle::Settled::Partial(header) => {
+            events::emit_decreased(&env, &keeper_address, header)
+        }
         // `create_decrease` requires `size_removed < position.size`, so a
         // decrease can never consume the position.
         settle::Settled::Closed(..) => {
@@ -861,6 +929,18 @@ pub fn settle_close(env: Env, keeper_address: Address, action_id: u64) -> Action
 
     e.position.pending_mutation_action_id = None;
     storage::remove_pending_action(&env, e.action.action_id);
+    events::emit_action_settled(
+        &env,
+        &e.action.market_id,
+        &keeper_address,
+        e.action.action_id,
+        &e.action.owner,
+        e.action.kind,
+        e.position.id,
+        e.price,
+        e.observed_at,
+        reward,
+    );
     let Eligible {
         position,
         market,
@@ -876,14 +956,14 @@ pub fn settle_close(env: Env, keeper_address: Address, action_id: u64) -> Action
         market,
         size,
         price,
-        Some(settle::Keeper {
+        settle::Keeper {
             recipient: &keeper_address,
             reward,
             liquidation: false,
-        }),
+        },
         ClosingFee::Charged,
     );
     storage::save_ledger(&env, &ledger);
-    super::emit_terminal(&env, &settled, CloseReason::VoluntaryClose);
+    super::emit_terminal(&env, &keeper_address, &settled, CloseReason::VoluntaryClose);
     ActionOutcome::Executed
 }

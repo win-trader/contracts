@@ -100,6 +100,16 @@ pub struct SettleHeader {
     /// close, where `ClosedTail::collateral_payout` is the figure that
     /// matters instead.
     pub stored_collateral: i128,
+    /// §12.6's liquidation fields, carried by **every** close rather than by
+    /// a separate `Liquidated` event. They are the numbers that decide
+    /// whether a close *could* have been a liquidation, so reporting them
+    /// only when one happened would make the two paths unreconcilable.
+    pub effective_collateral: i128,
+    pub liquidation_threshold: i128,
+    /// §6.5 — the side's stored hard-cap payout factor as this settlement
+    /// applied it. `INDEX_PRECISION` unless the side is latched, which is
+    /// §12.6's "payout factor applied" for the ADL path.
+    pub payout_factor: i128,
     /// §6.5 — recognized profit the vault could not pay. The events are the
     /// only durable record of it: §5.6 removes the pending record and §5.14
     /// removes the position.
@@ -136,7 +146,7 @@ pub fn settle(
     market: Market,
     size_removed: i128,
     price: i128,
-    keeper: Option<Keeper>,
+    keeper: Keeper,
     closing_fee: ClosingFee,
 ) -> Settled {
     let mut s = Settlement::begin(
@@ -166,6 +176,10 @@ pub fn settle(
 /// Who is paid for this settlement, and how much. `liquidation` selects
 /// §6.12's capped path — the only close whose reward may fall short and
 /// still complete.
+///
+/// Not optional: §6.12 gives every settlement exactly one keeper reward, and
+/// §12.6's envelope needs an actor to credit. A settlement with no one to pay
+/// and no one to name is not a shape this protocol has.
 pub struct Keeper<'a> {
     pub recipient: &'a Address,
     pub reward: i128,
@@ -192,12 +206,15 @@ struct Settlement<'a> {
     market: Market,
     size_removed: i128,
     price: i128,
-    keeper: Option<Keeper<'a>>,
+    keeper: Keeper<'a>,
     closing_fee_policy: ClosingFee,
     /// The obligations as they stood before capitalization consumed them.
     /// §6.9's closing fee is measured against these, not against what was
     /// actually collected.
     pending: crate::funding::PendingFees,
+    effective_collateral: i128,
+    liquidation_threshold: i128,
+    payout_factor: i128,
     keeper_payment: crate::keeper::KeeperPayment,
     removed: RemovedExposure,
     raw_pnl: i128,
@@ -226,12 +243,20 @@ impl<'a> Settlement<'a> {
         mut market: Market,
         size_removed: i128,
         price: i128,
-        keeper: Option<Keeper<'a>>,
+        keeper: Keeper<'a>,
         closing_fee_policy: ClosingFee,
     ) -> Self {
         let physical = ledger::physical_cash(env);
         let equity = ledger.cash_lp_equity(env, physical);
-        risk::evaluate_market_risk(env, ledger, &position.market, &mut market, price, equity);
+        risk::evaluate_market_risk(
+            env,
+            ledger,
+            &position.market,
+            keeper.recipient,
+            &mut market,
+            price,
+            equity,
+        );
 
         let removed = removed_exposure(env, &position, size_removed, &market.config);
         let raw_pnl = math::pnl(
@@ -256,6 +281,16 @@ impl<'a> Settlement<'a> {
         // the closing-fee base and the reported payable figure.
         let negative = core::cmp::max(-raw_pnl, 0);
         let pending = crate::funding::pending_fees(env, ledger, &position, &market);
+        // Measured against the same snapshot everything else here uses, so
+        // the reported health cannot come from a different instant than the
+        // settlement it describes.
+        let effective_collateral =
+            risk::effective_collateral(env, position.stored_collateral, payable, &pending);
+        let liquidation_threshold = core::cmp::max(
+            risk::maintenance_requirement(env, position.size, &market.config),
+            storage::get_global_config(env).keeper_rewards.liquidation,
+        );
+        let payout_factor = market.side(position.is_long).hard_cap_payout_factor;
         Settlement {
             env,
             ledger,
@@ -266,6 +301,9 @@ impl<'a> Settlement<'a> {
             keeper,
             closing_fee_policy,
             pending,
+            effective_collateral,
+            liquidation_threshold,
+            payout_factor,
             keeper_payment: crate::keeper::KeeperPayment::default(),
             removed,
             raw_pnl,
@@ -314,9 +352,12 @@ impl<'a> Settlement<'a> {
     /// close may leave an unpaid remainder (booked as bad debt in the
     /// tail).
     fn capitalize(&mut self) {
+        let (market_id, actor) = (self.position.market.clone(), self.keeper.recipient.clone());
         self.collected = fees::capitalize(
             self.env,
             self.ledger,
+            &market_id,
+            &actor,
             &mut self.position,
             &mut self.market,
             self.negative,
@@ -334,11 +375,11 @@ impl<'a> Settlement<'a> {
     /// §6.12 — the settlement's one keeper reward, paid before the closing
     /// fee so the fee is measured against what is left.
     fn pay_keeper(&mut self) {
-        let Some(keeper) = self.keeper.as_ref() else {
-            return;
-        };
-        let (recipient, reward, liquidation) =
-            (keeper.recipient.clone(), keeper.reward, keeper.liquidation);
+        let (recipient, reward, liquidation) = (
+            self.keeper.recipient.clone(),
+            self.keeper.reward,
+            self.keeper.liquidation,
+        );
         let is_long = self.position.is_long;
         self.keeper_payment = if liquidation {
             let physical = ledger::physical_cash(self.env);
@@ -401,9 +442,12 @@ impl<'a> Settlement<'a> {
             fee.collectible,
         );
         let owner = self.position.owner.clone();
+        let (market_id, actor) = (self.position.market.clone(), self.keeper.recipient.clone());
         fees::distribute_open_close_revenue(
             self.env,
             self.ledger,
+            &market_id,
+            &actor,
             self.closing_fee,
             &owner,
             FeeSource::Closing,
@@ -433,7 +477,15 @@ impl<'a> Settlement<'a> {
         let mut tail = ClosedTail::default();
         if self.collected.unpaid > 0 {
             tail.bad_debt = self.collected.unpaid;
-            events::emit_bad_debt(self.env, self.position.id, tail.bad_debt);
+            let (market_id, actor) =
+                (self.position.market.clone(), self.keeper.recipient.clone());
+            events::emit_bad_debt(
+                self.env,
+                &market_id,
+                &actor,
+                self.position.id,
+                tail.bad_debt,
+            );
         }
         {
             let is_long = self.position.is_long;
@@ -452,7 +504,13 @@ impl<'a> Settlement<'a> {
         // voluntary mutation is superseded and its complete added-collateral
         // escrow goes back to the owner. It pays no reward of its own: a
         // terminal settlement is one keeper action (§8.14).
-        crate::action::supersede_pending_mutation(self.env, self.ledger, &mut self.position);
+        let actor = self.keeper.recipient.clone();
+        crate::action::supersede_pending_mutation(
+            self.env,
+            self.ledger,
+            &actor,
+            &mut self.position,
+        );
         storage::remove_position(self.env, self.position.id);
         risk::release_position(self.env, self.ledger);
         tail
@@ -521,10 +579,12 @@ impl<'a> Settlement<'a> {
         funding::refresh_display(self.env, self.ledger, &mut self.market);
         let physical_after = ledger::physical_cash(self.env);
         let equity_after = self.ledger.cash_lp_equity(self.env, physical_after);
+        let actor = self.keeper.recipient.clone();
         risk::evaluate_market_risk(
             self.env,
             self.ledger,
             &self.position.market,
+            &actor,
             &mut self.market,
             self.price,
             equity_after,
@@ -556,6 +616,9 @@ impl<'a> Settlement<'a> {
             keeper_from_lp_backstop: self.keeper_payment.from_lp_backstop,
             keeper_unpaid: self.keeper_payment.unpaid,
             stored_collateral: self.position.stored_collateral,
+            effective_collateral: self.effective_collateral,
+            liquidation_threshold: self.liquidation_threshold,
+            payout_factor: self.payout_factor,
             unpaid_profit: self.unpaid_profit,
         }
     }

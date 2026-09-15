@@ -175,6 +175,16 @@ pub fn get_active_markets(env: &Env) -> Vec<Symbol> {
         .unwrap_or(Vec::new(env))
 }
 
+/// §7.18 — is this symbol in the active registry?
+///
+/// Deregistration removes a market from the registry but **keeps** its
+/// `Market` record, so "the record exists" and "the market is open for
+/// business" are different questions and this is the second one. The scan is
+/// bounded by `max_active_markets`.
+pub fn is_market_registered(env: &Env, market: &Symbol) -> bool {
+    get_active_markets(env).iter().any(|s| s == *market)
+}
+
 pub fn save_active_markets(env: &Env, markets: &Vec<Symbol>) {
     env.storage()
         .instance()

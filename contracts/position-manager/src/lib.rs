@@ -22,3 +22,4 @@ mod validation;
 mod window;
 
 pub use contract::PositionManagerContract;
+pub use errors::PositionManagerError;

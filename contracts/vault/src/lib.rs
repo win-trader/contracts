@@ -6,3 +6,4 @@ mod events;
 mod storage;
 
 pub use contract::VaultContract;
+pub use errors::VaultError;

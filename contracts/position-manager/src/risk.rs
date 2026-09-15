@@ -6,7 +6,7 @@
 //! side risk-state machine split into pure `assess` and effectful `apply`,
 //! and the §14 hard-cap payout factor.
 
-use soroban_sdk::{panic_with_error, Env, Symbol, Vec};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol, Vec};
 
 use shared::constants::{BPS, INDEX_PRECISION};
 use shared::{Market, MarketConfig, MarketSide, Position, RiskState};
@@ -203,10 +203,12 @@ fn update_restricted_count(env: &Env, ledger: &mut Ledger, old: RiskState, new: 
 
 /// §6.16 — apply one side's transition, including the two that move the
 /// payout factor.
+#[allow(clippy::too_many_arguments)]
 fn apply_side(
     env: &Env,
     ledger: &mut Ledger,
     symbol: &Symbol,
+    actor: &Address,
     side: &mut MarketSide,
     is_long: bool,
     config: &MarketConfig,
@@ -254,7 +256,18 @@ fn apply_side(
     }
 
     if next != previous {
-        events::emit_risk_state_changed(env, symbol, is_long, next);
+        // §12.6 wants both ends of the transition and the factor it was
+        // decided by. A consumer watching for "this side became
+        // deleveraging-eligible" cannot infer it from the new state alone,
+        // and cannot check the decision without the number.
+        let factor = if assessment.positive_pnl == 0 {
+            0
+        } else if cash_lp_equity == 0 {
+            BPS
+        } else {
+            math::mul_div_floor(env, assessment.positive_pnl, BPS, cash_lp_equity)
+        };
+        events::emit_risk_state_changed(env, symbol, actor, is_long, previous, next, factor);
     }
     side.risk_state = next;
 }
@@ -314,6 +327,7 @@ pub fn apply(
     env: &Env,
     ledger: &mut Ledger,
     symbol: &Symbol,
+    actor: &Address,
     market: &mut Market,
     assessment: &RiskAssessment,
 ) {
@@ -324,6 +338,7 @@ pub fn apply(
         env,
         ledger,
         symbol,
+        actor,
         &mut market.long,
         true,
         &config,
@@ -336,6 +351,7 @@ pub fn apply(
         env,
         ledger,
         symbol,
+        actor,
         &mut market.short,
         false,
         &config,
@@ -352,12 +368,13 @@ pub fn evaluate_market_risk(
     env: &Env,
     ledger: &mut Ledger,
     symbol: &Symbol,
+    actor: &Address,
     market: &mut Market,
     price: i128,
     equity: i128,
 ) {
     let assessment = assess(env, market, price, equity);
-    apply(env, ledger, symbol, market, &assessment);
+    apply(env, ledger, symbol, actor, market, &assessment);
 }
 
 /// §14 — the sum of every market's hard-cap factor contribution, with an

@@ -87,6 +87,12 @@ fn create_entry(
     require_initialized(env);
     owner.require_auth();
     require_market_active(env, &market_symbol);
+    // §7.18 — a deregistered market keeps its record so its indices survive,
+    // which means `get_market` still answers. "Open for business" is the
+    // registry, and that is the question creation is asking.
+    if !storage::is_market_registered(env, &market_symbol) {
+        panic_with_error!(env, PositionManagerError::MarketNotConfigured);
+    }
     if request.size <= 0 || request.submitted_collateral <= 0 {
         panic_with_error!(env, PositionManagerError::InvalidAmount);
     }
@@ -96,10 +102,19 @@ fn create_entry(
     let now = env.ledger().timestamp();
     let commit = snapshot::read_stamped_price(env, &market_symbol);
 
-    // §7.1 — the side must be able to take new exposure *now*. The pause
-    // folds into this predicate (§6.16.1), so a paused vault accepts no new
-    // commitments rather than accumulating a queue for an unpause that may
-    // never come.
+    // §7.1 — the side must be able to take new exposure *now*. A paused
+    // vault accepts no new commitments rather than accumulating a queue for
+    // an unpause that may never come.
+    //
+    // The two conditions are reported separately even though one predicate
+    // decides both (§6.16.1). §12.5 puts them in the same class but they are
+    // not the same fact: a pause is a vault-wide decision by an authority
+    // and clears when that authority says so, a risk state is a consequence
+    // of the book and clears when the book changes. A caller told only
+    // "blocked" cannot tell the trader which.
+    if storage::is_paused(env) {
+        panic_with_error!(env, PositionManagerError::Paused);
+    }
     if !risk::side_accepts_new_exposure(env, market.side(request.is_long)) {
         panic_with_error!(env, PositionManagerError::RiskStateBlocked);
     }
@@ -165,7 +180,7 @@ fn create_entry(
     }
 
     let mut ledger = storage::get_ledger(env);
-    borrow::accrue(env, &mut ledger, now);
+    borrow::accrue(env, &mut ledger, Some(&owner), now);
     ledger::escrow_in(env, &mut ledger, &owner, request.submitted_collateral);
 
     let payload = if entry.resting {
@@ -259,13 +274,28 @@ fn settle_entry(
 
     let mut ledger = storage::get_ledger(env);
     let mut market = storage::get_market(env, &action.market_id);
-    borrow::accrue(env, &mut ledger, now);
-    funding::accrue(env, &mut ledger, &mut market, now);
+    borrow::accrue(env, &mut ledger, Some(&keeper_address), now);
+    funding::accrue(
+        env,
+        &mut ledger,
+        &action.market_id,
+        Some(&keeper_address),
+        &mut market,
+        now,
+    );
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
     // §6.5 — the side risk state is refreshed from this fill before anything
     // reads a payout factor or asks whether the side accepts exposure.
-    risk::evaluate_market_risk(env, &mut ledger, &action.market_id, &mut market, fill.price, equity);
+    risk::evaluate_market_risk(
+        env,
+        &mut ledger,
+        &action.market_id,
+        &keeper_address,
+        &mut market,
+        fill.price,
+        equity,
+    );
 
     let config = storage::get_global_config(env);
     let reward = keeper::reward_for(&config, entry.reward);
@@ -360,7 +390,12 @@ fn preflight(
     }
     // §9.11 — a market disabled while the entry waited is not a reason to
     // hold the escrow. The action drains: it terminates, pays, and refunds.
-    if storage::is_market_disabled(env, market_symbol) {
+    // A market disabled or deregistered while the entry waited is not a
+    // reason to hold the escrow. The action drains: it terminates, pays, and
+    // refunds. Reverting instead would strand the escrow until expiry.
+    if storage::is_market_disabled(env, market_symbol)
+        || !storage::is_market_registered(env, market_symbol)
+    {
         return Some(FailureReason::MarketPaused);
     }
     let side = market.side(open.is_long);
@@ -467,6 +502,8 @@ fn execute(
         fees::distribute_open_close_revenue(
             env,
             ledger,
+            &action.market_id,
+            keeper_address,
             opening_fee,
             &action.owner,
             FeeSource::Opening,
@@ -542,7 +579,15 @@ fn execute(
     // before the preflight.
     let physical_after = ledger::physical_cash(env);
     let equity_after = ledger.cash_lp_equity(env, physical_after);
-    risk::evaluate_market_risk(env, ledger, &action.market_id, market, price, equity_after);
+    risk::evaluate_market_risk(
+        env,
+        ledger,
+        &action.market_id,
+        keeper_address,
+        market,
+        price,
+        equity_after,
+    );
     storage::save_market(env, &action.market_id, market);
     // §4.9 step 9, then §4.10 — the rate is refreshed from the resulting
     // risk units and claims, and only then is the borrow window quoted.
@@ -551,7 +596,21 @@ fn execute(
     storage::save_position(env, &position);
     storage::remove_pending_action(env, action.action_id);
     storage::save_ledger(env, ledger);
-    events::emit_opened(env, &position, price);
+    events::emit_opened(env, keeper_address, &position, price);
+    // §12.6 — what ties the commitment to its outcome. The action record is
+    // gone by now (§5.6), so without this an indexer cannot connect the two.
+    events::emit_action_settled(
+        env,
+        &action.market_id,
+        keeper_address,
+        action.action_id,
+        &action.owner,
+        action.kind,
+        position_id,
+        price,
+        observed_at,
+        reward,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +635,12 @@ pub fn cancel_limit_open(env: Env, action_id: u64) -> i128 {
     }
 
     let mut ledger = storage::get_ledger(&env);
-    borrow::accrue(&env, &mut ledger, env.ledger().timestamp());
+    borrow::accrue(
+        &env,
+        &mut ledger,
+        Some(&action.owner),
+        env.ledger().timestamp(),
+    );
     let refund = action.escrowed_collateral;
     action.escrowed_collateral = 0;
     ledger::refund_escrow(&env, &mut ledger, &action.owner, refund);
@@ -601,7 +665,7 @@ pub fn clean_expired_entry(env: Env, keeper_address: Address, action_id: u64) {
     }
 
     let mut ledger = storage::get_ledger(&env);
-    borrow::accrue(&env, &mut ledger, now);
+    borrow::accrue(&env, &mut ledger, Some(&keeper_address), now);
     let reward = keeper::reward_for(&storage::get_global_config(&env), keeper::RewardKind::Expiry);
     keeper::pay_from_escrow(
         &env,

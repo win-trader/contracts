@@ -13,7 +13,7 @@
 //! The loop is over the bounded active-market registry — never over
 //! positions (§17).
 
-use soroban_sdk::{panic_with_error, Env, Symbol};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::{BPS, PRICE_PRECISION};
 use shared::{AccountingSnapshot, PriceFeedClient, StampedPrice};
@@ -36,9 +36,16 @@ use crate::{math, storage};
 /// than a constant.
 pub fn read_stamped_price(env: &Env, symbol: &Symbol) -> StampedPrice {
     let feed = storage::get_price_feed(env);
-    let data = PriceFeedClient::new(env, &feed)
-        .lastprice(symbol)
-        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::PriceUnavailable));
+    // §12.5 — the feed is the one counterparty whose error codes this
+    // protocol does not control. After P9-01 every contract here numbers in
+    // a disjoint range, so a propagated code is unambiguous; a third-party
+    // feed numbering from `1` could return something that reads exactly like
+    // a native position-manager code. Its failures are caught and re-raised
+    // as this contract's own.
+    let data = match PriceFeedClient::new(env, &feed).try_lastprice(symbol) {
+        Ok(Ok(Some(data))) => data,
+        _ => panic_with_error!(env, PositionManagerError::PriceUnavailable),
+    };
     if data.price <= 0 {
         panic_with_error!(env, PositionManagerError::PriceUnavailable);
     }
@@ -62,6 +69,7 @@ pub fn read_stamped_price(env: &Env, symbol: &Symbol) -> StampedPrice {
 pub fn build_snapshot(
     env: &Env,
     ledger: &mut Ledger,
+    actor: &Address,
     physical: i128,
     mutate_risk: bool,
 ) -> AccountingSnapshot {
@@ -112,7 +120,7 @@ pub fn build_snapshot(
         // persists it, the reporting path only counts it.
         let assessment = risk::assess(env, &market, price, equity);
         if mutate_risk {
-            risk::apply(env, ledger, &symbol, &mut market, &assessment);
+            risk::apply(env, ledger, &symbol, actor, &mut market, &assessment);
             storage::save_market(env, &symbol, &market);
         }
         restricted_side_count += assessment.restricted_sides();

@@ -1,5 +1,6 @@
 use crate::settle::SettleHeader;
-use soroban_sdk::{contractevent, Address, Env, Symbol};
+use super::EventHeader;
+use soroban_sdk::{contractevent, Address, Env};
 
 /// A partial close (§12.2). Fee fields are the amounts actually collected in
 /// this settlement; `funding_received` is the credit capitalized from the
@@ -9,8 +10,8 @@ use soroban_sdk::{contractevent, Address, Env, Symbol};
 pub struct PositionDecreased {
     #[topic]
     pub position_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub size_removed: i128,
     pub price: i128,
     pub raw_pnl: i128,
@@ -28,11 +29,11 @@ pub struct PositionDecreased {
     pub loss_collected: i128,
 }
 
-pub fn emit_decreased(env: &Env, s: &SettleHeader) {
+pub fn emit_decreased(env: &Env, actor: &Address, s: &SettleHeader) {
     PositionDecreased {
         position_id: s.position_id,
+        header: super::header(env, &s.market, actor),
         owner: s.owner.clone(),
-        market: s.market.clone(),
         size_removed: s.size_removed,
         price: s.price,
         raw_pnl: s.raw_pnl,

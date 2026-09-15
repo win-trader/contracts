@@ -38,8 +38,8 @@ pub fn execute_adl(env: Env, keeper_address: Address, position_id: u64) -> Actio
     let mut ledger = storage::get_ledger(&env);
 
     let now = env.ledger().timestamp();
-    borrow::accrue(&env, &mut ledger, now);
-    funding::accrue(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, Some(&keeper_address), now);
+    funding::accrue(&env, &mut ledger, &position.market, Some(&keeper_address), &mut market, now);
 
     let price = snapshot::read_stamped_price(&env, &position.market).price;
     let physical = ledger::physical_cash(&env);
@@ -73,7 +73,14 @@ pub fn execute_adl(env: Env, keeper_address: Address, position_id: u64) -> Actio
 
     // Apply the transition before anything reads a payout factor (§6.5),
     // then assess liquidation against the applied state.
-    risk::apply(&env, &mut ledger, &position.market, &mut market, &assessment);
+    risk::apply(
+        &env,
+        &mut ledger,
+        &position.market,
+        &keeper_address,
+        &mut market,
+        &assessment,
+    );
 
     // §8.12 — liquidation outranks ADL. A liquidatable position is left for
     // the liquidation path; this returns non-terminally and pays nothing.
@@ -89,20 +96,20 @@ pub fn execute_adl(env: Env, keeper_address: Address, position_id: u64) -> Actio
         market,
         size,
         price,
-        Some(settle::Keeper {
+        settle::Keeper {
             recipient: &keeper_address,
             reward: keeper::reward_for(
                 &storage::get_global_config(&env),
                 keeper::RewardKind::Adl,
             ),
             liquidation: false,
-        }),
+        },
         // §7.14 — no closing fee, and no liquidation or close reward on top
         // of the fixed ADL reward.
         ClosingFee::Waived,
     );
 
     storage::save_ledger(&env, &ledger);
-    super::emit_terminal(&env, &settled, CloseReason::Adl);
+    super::emit_terminal(&env, &keeper_address, &settled, CloseReason::Adl);
     ActionOutcome::Executed
 }

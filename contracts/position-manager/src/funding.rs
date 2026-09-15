@@ -17,7 +17,7 @@
 //! the book empties. The market's funding fields (indices, remainders, EMA,
 //! display, clock) are written only here.
 
-use soroban_sdk::{panic_with_error, Env, U256};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol, U256};
 
 use shared::constants::{BPS, INDEX_PRECISION, SECONDS_PER_DAY};
 use shared::{Market, PayerSide, Position, RemainderGroup};
@@ -25,7 +25,7 @@ use shared::{Market, PayerSide, Position, RemainderGroup};
 use crate::errors::PositionManagerError;
 use crate::ledger::{Bucket, Ledger};
 use crate::window::{self, Segment};
-use crate::{math, storage};
+use crate::{events, math, storage};
 
 /// §6.2 — advance the market's funding indices and the receiver liability
 /// over the elapsed window, then advance the EMA itself.
@@ -37,7 +37,15 @@ use crate::{math, storage};
 /// crossing to the other.
 ///
 /// A second call at the same timestamp has no effect.
-pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
+pub fn accrue(
+    env: &Env,
+    ledger: &mut Ledger,
+    market_id: &Symbol,
+    // `None` for §4.12's read-only quote — see `borrow::accrue`.
+    actor: Option<&Address>,
+    market: &mut Market,
+    now: u64,
+) {
     if now <= market.last_funding_checkpoint {
         return;
     }
@@ -56,8 +64,30 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
 
     // Chronological order. It does not change the arithmetic, but it does
     // change which carried remainder each division sees.
-    for segment in window.segments() {
-        accrue_segment(env, ledger, market, segment);
+    for (index, segment) in window.segments().enumerate() {
+        let accrued = accrue_segment(env, ledger, market, segment);
+        // §12.6 — one event per segment. A window split at a sign change has
+        // two payers, and a single event could not say which funding
+        // belonged to which.
+        if let (Some(a), Some(actor)) = (accrued, actor) {
+            events::emit_funding_checkpoint(
+                env,
+                market_id,
+                actor,
+                index as u32,
+                if segment.long_pays() {
+                    PayerSide::Long
+                } else {
+                    PayerSide::Short
+                },
+                a.receiver_backed_delta,
+                a.lp_backed_delta,
+                a.receiver_delta,
+                a.liability_delta,
+                window.ema_after,
+                elapsed,
+            );
+        }
     }
 
     // Advanced in **every** branch, including when no payer side has
@@ -70,7 +100,19 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
 
 /// §6.2 — one constant-payer segment: advance both payer indices, create the
 /// guaranteed receiver liability, and distribute the receiver credit.
-fn accrue_segment(env: &Env, ledger: &mut Ledger, market: &mut Market, segment: &Segment) {
+struct SegmentAccrual {
+    receiver_backed_delta: i128,
+    lp_backed_delta: i128,
+    receiver_delta: i128,
+    liability_delta: i128,
+}
+
+fn accrue_segment(
+    env: &Env,
+    ledger: &mut Ledger,
+    market: &mut Market,
+    segment: &Segment,
+) -> Option<SegmentAccrual> {
     let long_pays = segment.long_pays();
     let (payer_size, payer_base, receiver_size, receiver_base) = if long_pays {
         (
@@ -92,7 +134,7 @@ fn accrue_segment(env: &Env, ledger: &mut Ledger, market: &mut Market, segment: 
     // weight moves no index; skip the index and liability changes. The EMA
     // and timestamp still advance, in the caller.
     if payer_size == 0 || segment.funding_weight == zero {
-        return;
+        return None;
     }
 
     // Every carry below belongs to *this* payer direction's stream (§4.5).
@@ -171,6 +213,13 @@ fn accrue_segment(env: &Env, ledger: &mut Ledger, market: &mut Market, segment: 
     carries.lp_payer_remainder = lp_payer_rem;
     carries.receiver_liability_remainder = liability_rem;
     carries.distribution_remainder = distribution_rem;
+
+    Some(SegmentAccrual {
+        receiver_backed_delta: receiver_payer_delta,
+        lp_backed_delta: lp_payer_delta,
+        receiver_delta: credit_delta,
+        liability_delta,
+    })
 }
 
 /// §4.5.1 / §6.13 — zero the **opposite** payer stream's
@@ -358,7 +407,15 @@ pub fn preview_pending_fees(
 ) -> PendingFees {
     let mut ledger_copy = ledger.clone();
     let mut market_copy = market.clone();
-    crate::borrow::accrue(env, &mut ledger_copy, now);
-    accrue(env, &mut ledger_copy, &mut market_copy, now);
+    // No actor: §4.12's quote writes nothing, and that includes events.
+    crate::borrow::accrue(env, &mut ledger_copy, None, now);
+    accrue(
+        env,
+        &mut ledger_copy,
+        &position.market,
+        None,
+        &mut market_copy,
+        now,
+    );
     pending_fees(env, &ledger_copy, position, &market_copy)
 }

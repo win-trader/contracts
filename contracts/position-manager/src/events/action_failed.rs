@@ -1,4 +1,5 @@
 use shared::{ActionKind, FailureReason};
+use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 /// §8.9 — an eligible market-style attempt failed an expected deterministic
@@ -13,8 +14,8 @@ use soroban_sdk::{contractevent, Address, Env, Symbol};
 pub struct ActionFailed {
     #[topic]
     pub action_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub kind: ActionKind,
     pub reason: FailureReason,
     pub keeper: Address,
@@ -36,8 +37,8 @@ pub fn emit_action_failed(
 ) {
     ActionFailed {
         action_id,
+        header: super::header(env, market, keeper),
         owner: owner.clone(),
-        market: market.clone(),
         kind,
         reason,
         keeper: keeper.clone(),

@@ -1,5 +1,6 @@
 use shared::{ActionKind, PendingAction};
-use soroban_sdk::{contractevent, Address, Env, Symbol};
+use super::EventHeader;
+use soroban_sdk::{contractevent, Address, Env};
 
 /// §12.6 — a trader committed a price-sensitive action. Nothing economic
 /// has happened yet: no capacity is reserved, no price is chosen, no fee is
@@ -9,8 +10,8 @@ use soroban_sdk::{contractevent, Address, Env, Symbol};
 pub struct ActionCommitted {
     #[topic]
     pub action_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub kind: ActionKind,
     pub created_at: u64,
     pub execute_after: u64,
@@ -24,8 +25,9 @@ pub struct ActionCommitted {
 pub fn emit_action_committed(env: &Env, action: &PendingAction) {
     ActionCommitted {
         action_id: action.action_id,
+        // The owner is the actor: a commitment is theirs, not a keeper's.
+        header: super::header(env, &action.market_id, &action.owner),
         owner: action.owner.clone(),
-        market: action.market_id.clone(),
         kind: action.kind,
         created_at: action.created_at,
         execute_after: action.execute_after,

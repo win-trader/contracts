@@ -1,3 +1,4 @@
+use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 /// §7.5 — the owner cancelled a pending limit entry before its expiry. No
@@ -7,8 +8,8 @@ use soroban_sdk::{contractevent, Address, Env, Symbol};
 pub struct ActionCancelled {
     #[topic]
     pub action_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub refund: i128,
 }
 
@@ -21,8 +22,8 @@ pub fn emit_action_cancelled(
 ) {
     ActionCancelled {
         action_id,
+        header: super::header(env, market, owner),
         owner: owner.clone(),
-        market: market.clone(),
         refund,
     }
     .publish(env);

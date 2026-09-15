@@ -1000,7 +1000,7 @@ should be recorded rather than discovered.
 
 ### 9a. Error taxonomy (§12.5)
 
-- [ ] **P9-01** Renumber to disjoint ranges: position manager `1–99`, vault
+- [x] **P9-01** Renumber to disjoint ranges: position manager `1–99`, vault
       `100–199`, oracle router `200–299`, config manager `300–399`. Today every
       one of the four numbers from `1`, and **code `9` is currently owned by
       four different contracts at once** — `SlippageExceeded` (PM),
@@ -1008,78 +1008,177 @@ should be recorded rather than discovered.
       `UpgradeTimelockNotElapsed` (request router). The first two of those have
       opposite remedies, which is why the app currently blames slippage for
       oracle outages.
-- [ ] **P9-01b** **Spec gap: §12.5 assigns no range to `request-router`.** It
+      **Done, and two codes disappeared rather than moved.**
+      `SlippageExceeded` and `CapacityExceeded` are not in the enum at all
+      any more: Phase 6 made both `FailureReason`s, and §12.5 is explicit
+      that expected terminal failures are results, not errors. The four
+      `Reserved*` placeholders held for this renumbering are gone with them.
+      Within each range the codes are grouped by §12.5's classes with gaps
+      between groups, so a new member lands next to its kin instead of at the
+      end.
+- [x] **P9-01b** **Spec gap: §12.5 assigns no range to `request-router`.** It
       lists four owners and the protocol has five contracts. Decide and record
       it: either fold the request router into the vault's `100–199` (they are
       two halves of one LP path and never both in a caller's stack) or open
       `400–499`. Do not leave it numbering from `1`.
-- [ ] **P9-02** **Wrap cross-contract errors, never pass them through.** When
+      **Decision: `400–499`, and `200–299` stays vacant.**
+      The plan's argument for folding into the vault's range — "never both in
+      a caller's stack" — does not hold: `resolve_next` calls straight into
+      the vault, so a code coming back from it could have come from either
+      half of the LP path. That is precisely the ambiguity disjoint ranges
+      exist to prevent, and relying on §12.5's wrapping rule instead would
+      make correctness depend on every call site remembering to wrap. The
+      oracle router's `200–299` is left empty rather than recycled: a code
+      from a decommissioned deployment must not come back looking like a live
+      one. A test pins all four properties.
+- [x] **P9-02** **Wrap cross-contract errors, never pass them through.** When
       the position manager's call into the router fails, it returns its own
       error carrying the underlying one.
-- [ ] **P9-03** Group codes by cause: Authorization, Not found, State,
+      **Scoped deliberately.** Wrapping is applied to the **external price
+      feed** and nowhere else. §12.5's stated reason for the rule is that
+      "propagating the inner code unchanged is what makes a foreign code look
+      native" — and after P9-01 an inner code from the vault, config manager,
+      or request router cannot look native, because its range says otherwise.
+      The feed is the one counterparty whose numbering this protocol does not
+      control, and a third-party feed numbering from `1` could return
+      something indistinguishable from a native code. `try_lastprice` and
+      `try_decimals` catch it; everything else keeps its own range.
+- [x] **P9-03** Group codes by cause: Authorization, Not found, State,
       Validation, Oracle, Accounting, Arithmetic. `Accounting` and `Arithmetic`
       must be unreachable through ordinary use; if a well-formed call can
       trigger either, that is a defect, not a user error.
-- [ ] **P9-04** Expected terminal failures are **not errors** — slippage,
+- [x] **P9-04** Expected terminal failures are **not errors** — slippage,
       capacity, exposure cap, and a blocked side all complete successfully and
       record `Failed` with a reason. They appear in results, not in error codes.
 
 ### 9b. Events (§12.6)
 
-- [ ] **P9-05** Common `EventHeader { event_version, ledger_timestamp,
+- [x] **P9-05** Common `EventHeader { event_version, ledger_timestamp,
       market_id, actor }` on every event.
-- [ ] **P9-06** The fifteen required events of §12.6 with their required
+      **Done, and it had a prerequisite.** The envelope's `actor` is "the
+      caller credited with the action", which several entry points could not
+      name: `apply_global_config`, `apply_market_config`, and
+      `update_indices` were permissionless *and* anonymous. They now take a
+      `caller` that authenticates itself — the same convention every other
+      permissionless operation follows (§7.0) — because "whoever's
+      transaction this was" is not something a contract can read.
+      `settle::Keeper` became required rather than `Option` for the same
+      reason: §6.12 gives every settlement exactly one reward, so a
+      settlement with nobody to credit is not a shape this protocol has.
+      §4.12's read-only quote passes `None` and emits nothing, since an
+      emitted event is a written thing and a quote must write none.
+- [x] **P9-06** The fifteen required events of §12.6 with their required
       fields. Notable additions: `ActionCommitted`, `ActionFailed`,
       `ActionCancelled`/`ActionExpired`, `RiskStateChanged` with the PnL
       factor, `FundingCheckpoint` **per segment**, `RevenueDistributed` with
       all three shares, `ConfigurationProposed`/`ConfigurationApplied`.
-- [ ] **P9-07** Amounts are emitted as **collected**, never nominal. A waived
+      **Done.** Added `ActionSettled` (what ties an action id to the position
+      it produced — §5.6 removes the pending record, so nothing else can),
+      `FundingCheckpoint` **per segment**, and `BorrowCheckpoint`.
+      `Liquidated` and `Deleveraged` are not separate events: their required
+      fields — effective collateral, threshold, reward by source, unpaid
+      reward, bad debt, payout factor applied — are carried by **every**
+      `PositionClosed`, because those are the numbers that decide whether a
+      close *could* have been a liquidation, and reporting them only when one
+      happened would leave the two paths unreconcilable.
+      **Deviation (omitted):** `BorrowCheckpoint` does not carry §12.6's
+      "rate after". At checkpoint time it is not yet known —
+      `refresh_borrow_rate` runs at the end of the same transaction, from the
+      post-mutation risk units — so a value emitted there would be the old
+      rate wearing the new rate's name, which §9.6 is the whole reason to
+      avoid. `MarketCheckpoint` carries the post-refresh figure.
+      **Cost noted:** the two checkpoint events fire on every action that
+      moves an index. Both are suppressed when nothing moved — a sub-unit
+      borrow window carries entirely in the remainder, and an empty book
+      accrues no funding segment — so the common idle case emits neither.
+- [x] **P9-07** Amounts are emitted as **collected**, never nominal. A waived
       closing fee and an uncollected borrow are reported as zero collected,
       with the waived amount separate. An indexer that sums nominal fees will
       not reconcile against the ledger.
-- [ ] **P9-08** `PositionClosed` must carry **profit the vault could not pay**
+- [x] **P9-08** `PositionClosed` must carry **profit the vault could not pay**
       (§6.5). A trader receiving less than their recognized profit is the
       single outcome most likely to be mistaken for an accounting error, and
       events are the only durable record — §5.6 removes the pending record and
       §5.14 removes the position.
-- [ ] **P9-09** Every event that changes cash ownership carries enough to
+- [x] **P9-09** Every event that changes cash ownership carries enough to
       reproduce the change, so §9.1 is checkable from the event stream alone.
 
 ### 9c. Pause (§12.2)
 
-- [ ] **P9-10** **A pause stops the vault taking on risk. It never stops anyone
+- [x] **P9-10** **A pause stops the vault taking on risk. It never stops anyone
       shedding it.** Implemented through `side_accepts_new_exposure` (P5-24),
       not scattered `require_not_paused` calls.
-- [ ] **P9-11** A pending entry or increase that becomes eligible during a
+      **Done, with one addition the predicate could not cover.** A pause and
+      a restricted side are reported as **different** errors (`Paused` vs
+      `RiskStateBlocked`) even though one predicate decides both. §12.5 puts
+      them in the same class, but they are not the same fact: a pause is a
+      vault-wide decision by an authority and clears when that authority says
+      so, a risk state is a consequence of the book and clears when the book
+      changes. A caller told only "blocked" cannot tell the trader which.
+- [x] **P9-11** A pending entry or increase that becomes eligible during a
       pause takes the ordinary expected-failure route: it terminates, pays its
       reward, refunds escrow, charges no opening fee. A pause **drains** the
       risk-adding queue rather than freezing it, so no order waits for an
       unpause that may never come.
-- [ ] **P9-12** Allowed while paused: cancel, expiry cleanup, add collateral,
+      **Covered by test.** `a_pause_drains_the_entry_queue_and_leaves_exits_open`
+      in `tests/lifecycle.rs`.
+- [x] **P9-12** Allowed while paused: cancel, expiry cleanup, add collateral,
       decrease, close, TP, SL, liquidation, ADL, referral claims, and all
       checkpoints. Blocked: creating or settling anything that adds exposure,
       creating or resolving LP requests, and **claiming protocol revenue** (the
       same authority can generally pause; leaving both open creates a
       pause-and-drain path that costs nothing to close). Referral balances are
       ordinary user funds and are not withheld.
-- [ ] **P9-13** Accrual never pauses. Both checkpoint clocks advance across a
+      **Two gaps, both found by writing the test rather than by reading the
+      code.** `create_increase` accepted new commitments while paused — §7.8
+      states no pause check and the settlement preflight would have drained
+      them, but each drain costs the trader a keeper reward for a commitment
+      that was certain to fail. And `claim_protocol` had no pause check at
+      all, which is exactly the pause-and-drain path this item names. Both
+      closed; `can_create_lp_request` now reports `false` while paused.
+- [x] **P9-13** Accrual never pauses. Both checkpoint clocks advance across a
       pause exactly as they would otherwise — which is only fair because exits
       stay open.
 
 ### 9d. Storage lifetime and market lifecycle
 
-- [ ] **P9-14** `register_market` / `deregister_market` (§7.18). Deregistration
+- [x] **P9-14** `register_market` / `deregister_market` (§7.18). Deregistration
       requires zero open interest, zero base exposure, zero
       `pending_receiver_funding`, both sides `Normal`, and no pending action
       referencing the market. Indices and checkpoint timestamps are **retained,
       not reset**, so a later re-registration cannot rewind an index a
       historical position was priced against.
-- [ ] **P9-15** `initialize_vault` (§7.18): the borrow clock starts at
+      **Done, plus a bug the item implies but does not state.**
+      Deregistration removes the symbol from the registry and **keeps** the
+      `Market` record, indices and checkpoint timestamp included. That makes
+      "the record exists" and "the market is open" different questions, so
+      `is_market_registered` is what creation and settlement now ask.
+      Re-registration was broken as a consequence: `propose_market_config` on
+      a market whose record survives took the *change* path and sat in the
+      timelock instead of returning the market to the registry. A
+      deregistered market has no live accounting by construction — §7.18
+      required it to be empty on the way out — so re-registering one is a
+      registration, and exempt.
+      **Bounded gap, accepted:** the "no pending action referencing the
+      market" precondition is not checked. A pending *mutation* is impossible
+      (deregistration requires zero open interest), and a pending *entry* now
+      drains terminally on its next settlement attempt, returning the escrow
+      immediately rather than at expiry. Checking it exactly would need a
+      per-market pending-action counter maintained across eight paths, whose
+      drift risk is worse than the condition it would catch.
+- [x] **P9-15** `initialize_vault` (§7.18): the borrow clock starts at
       initialization and the rate starts at the base rate, so the first position
       does not inherit index growth from an epoch that had no positions.
-- [ ] **P9-16** §5.14 cleanup on every terminal transition, and §12.4's rule
+      **Verified, no change needed:** the constructor starts the borrow clock
+      at the initialization timestamp and the rate at
+      `base_borrow_rate_bps_day`, so the first position inherits no index
+      growth from an epoch that had no positions.
+- [x] **P9-16** §5.14 cleanup on every terminal transition, and §12.4's rule
       that nothing economic is stored as temporary and every persistent entry is
       permissionlessly extendable.
+      **Verified:** every terminal transition removes its record and clears
+      its reverse reference in the same transaction (Phase 6), and every
+      persistent entry has a permissionless `bump_*`.
 
 ---
 

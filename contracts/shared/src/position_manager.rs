@@ -194,7 +194,7 @@ pub trait PositionManager {
     /// now. Fee accrual is lazy; this bounds staleness. Permissionless
     /// (§7.0): a checkpoint pays no reward and moves no value between
     /// parties, so there is nothing for an allowlist to protect.
-    fn update_indices(env: Env, market: Symbol);
+    fn update_indices(env: Env, caller: Address, market: Symbol);
 
     /// Propose a global configuration change (configuration authority,
     /// §12.3). Validated immediately and stored with
@@ -206,7 +206,7 @@ pub trait PositionManager {
     /// Apply a global proposal whose timelock has elapsed. Permissionless:
     /// the authorization happened at proposal and the delay is the
     /// protection. Checkpoints under the old values before storing (§10.3.3).
-    fn apply_global_config(env: Env);
+    fn apply_global_config(env: Env, caller: Address);
 
     /// Register a market, or propose a change to an existing one
     /// (configuration authority, §12.3). Registration and conservative
@@ -215,7 +215,19 @@ pub trait PositionManager {
     fn propose_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
 
     /// Apply a market proposal whose timelock has elapsed. Permissionless.
-    fn apply_market_config(env: Env, market: Symbol);
+    fn apply_market_config(env: Env, caller: Address, market: Symbol);
+
+    /// §7.18 — remove a market from the active registry (configuration
+    /// authority). Requires both sides empty of open interest, base
+    /// exposure, and risk units, no pending receiver-funding liability, and
+    /// both sides in `Normal`.
+    ///
+    /// The market's accounting record is **kept**: indices and the
+    /// checkpoint timestamp are retained, never reset, so a later
+    /// re-registration cannot rewind an index a historical position was
+    /// priced against. Re-registering is `propose_market_config` on the same
+    /// symbol.
+    fn deregister_market(env: Env, caller: Address, market: Symbol);
 
     /// Block new opens/increases on one market (PAUSER). Existing positions
     /// keep accruing and can always decrease, close, or be liquidated.

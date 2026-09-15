@@ -25,8 +25,8 @@ pub fn liquidate_position(env: Env, keeper_address: Address, position_id: u64) {
     let mut ledger = storage::get_ledger(&env);
 
     let now = env.ledger().timestamp();
-    borrow::accrue(&env, &mut ledger, now);
-    funding::accrue(&env, &mut ledger, &mut market, now);
+    borrow::accrue(&env, &mut ledger, Some(&keeper_address), now);
+    funding::accrue(&env, &mut ledger, &position.market, Some(&keeper_address), &mut market, now);
 
     let price = snapshot::read_stamped_price(&env, &position.market).price;
     let physical = ledger::physical_cash(&env);
@@ -36,7 +36,15 @@ pub fn liquidate_position(env: Env, keeper_address: Address, position_id: u64) {
     // anything reads a payout factor. Refreshing afterwards would let the
     // first position out of a newly-crossed side settle unscaled and latch
     // the side on its way out.
-    risk::evaluate_market_risk(&env, &mut ledger, &position.market, &mut market, price, equity);
+    risk::evaluate_market_risk(
+        &env,
+        &mut ledger,
+        &position.market,
+        &keeper_address,
+        &mut market,
+        price,
+        equity,
+    );
 
     let assessment = risk::evaluate_liquidation(&env, &ledger, &position, &market, price);
     if !assessment.liquidatable {
@@ -51,7 +59,7 @@ pub fn liquidate_position(env: Env, keeper_address: Address, position_id: u64) {
         market,
         size,
         price,
-        Some(settle::Keeper {
+        settle::Keeper {
             recipient: &keeper_address,
             // §6.12 — the one payment that may fall short and still
             // complete. A position nobody will liquidate because the reward
@@ -62,11 +70,11 @@ pub fn liquidate_position(env: Env, keeper_address: Address, position_id: u64) {
                 keeper::RewardKind::Liquidation,
             ),
             liquidation: true,
-        }),
+        },
         // §7.13 — no closing fee. The trader did not choose this exit.
         ClosingFee::Waived,
     );
 
     storage::save_ledger(&env, &ledger);
-    super::emit_terminal(&env, &settled, CloseReason::Liquidation);
+    super::emit_terminal(&env, &keeper_address, &settled, CloseReason::Liquidation);
 }

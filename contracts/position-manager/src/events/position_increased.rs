@@ -1,14 +1,15 @@
 use crate::fees::CollectedFees;
+use super::EventHeader;
 use shared::Position;
-use soroban_sdk::{contractevent, Address, Env, Symbol};
+use soroban_sdk::{contractevent, Address, Env};
 
 #[contractevent(topics = ["posinc"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PositionIncreased {
     #[topic]
     pub position_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub size_added: i128,
     pub base_added: i128,
     pub collateral_added: i128,
@@ -25,6 +26,7 @@ pub struct PositionIncreased {
 
 pub fn emit_increased(
     env: &Env,
+    actor: &Address,
     position: &Position,
     size_added: i128,
     base_added: i128,
@@ -34,8 +36,8 @@ pub fn emit_increased(
 ) {
     PositionIncreased {
         position_id: position.id,
+        header: super::header(env, &position.market, actor),
         owner: position.owner.clone(),
-        market: position.market.clone(),
         size_added,
         base_added,
         collateral_added,
