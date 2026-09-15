@@ -643,20 +643,20 @@ place.
 
 ### 6a. Common machinery (§7.0, §8.1)
 
-- [ ] **P6-01** Predicates: `fresh_for_commit = fill_observed_at >
+- [x] **P6-01** Predicates: `fresh_for_commit = fill_observed_at >
       commit_observed_at` (**equality fails**), `delay_satisfied = now >=
       execute_after`, `entry_price_allowed`, `exit_price_allowed`. An
       `acceptable_price` of zero disables the bound.
-- [ ] **P6-02** Outcome enum: `Executed`, `Failed(reason)`, `Cancelled`,
+- [x] **P6-02** Outcome enum: `Executed`, `Failed(reason)`, `Cancelled`,
       `Expired`, `Superseded` as terminal results; `NotReady`, `Pending`,
       `RequiresLiquidation` as non-terminal returns that change no state and
       pay nothing. **These return, they do not panic.** Today slippage and
       capacity failures panic — which reverts, hands the trader a free retry,
       and pays no keeper.
-- [ ] **P6-03** `fail_entry_action` (§7.0): pay the action reward from escrow,
+- [x] **P6-03** `fail_entry_action` (§7.0): pay the action reward from escrow,
       refund the remainder to the **owner frozen in the action**, remove the
       record, charge no opening fee, emit the terminal failure.
-- [ ] **P6-04** `fail_position_action` (§7.0): `payable_reward = min(reward,
+- [x] **P6-04** `fail_position_action` (§7.0): `payable_reward = min(reward,
       max(0, stored_collateral - min_collateral), max(0, effective_collateral -
       liquidation_threshold - 1))`. **The reward is variable; the finality is
       not.** An eligible attempt on a non-liquidatable position always
@@ -664,18 +664,18 @@ place.
       `pending_mutation_action_id` occupied forever (position mutations have
       neither cancel nor expiry) and would turn a survived attempt into a free
       retry.
-- [ ] **P6-05** A liquidatable position returns `RequiresLiquidation` without
+- [x] **P6-05** A liquidatable position returns `RequiresLiquidation` without
       consuming the action or paying a reward. That is the only non-terminal
       safety exception for position mutations.
-- [ ] **P6-06** Action IDs are monotonic, never reused, and consumed
+- [x] **P6-06** Action IDs are monotonic, never reused, and consumed
       permanently on removal (§8.13). A second call with a consumed ID fails
       before any transfer or reward.
-- [ ] **P6-07** One action per settlement call (§8.14). No array input, no
+- [x] **P6-07** One action per settlement call (§8.14). No array input, no
       batch dispatcher.
 
 ### 6b. Entries (§7.1–7.6)
 
-- [ ] **P6-08** `create_market_open_order` (§7.1): validate, check
+- [x] **P6-08** `create_market_open_order` (§7.1): validate, check
       `side_accepts_new_exposure`, bound `expires_at` by
       `max_market_order_lifetime_seconds`, require escrow covers opening fee +
       keeper reward + `min_collateral`, require escrow covers
@@ -684,42 +684,57 @@ place.
       pending action. **No capacity is reserved, no price is chosen, no fee is
       collected, no position is created.** Market orders are binding — no
       cancel.
-- [ ] **P6-09** `settle_market_open` (§7.2): expiry check → delay check →
+      **Deviation (added):** creation also rejects a size whose base or risk
+      units round to zero at the commitment price — the §7.8 dust check, one
+      step weaker. §7.1 does not state it, and §7.1's collateral rules do not
+      bound size from below, so a dust entry would reach
+      `derive_added_exposure` at settlement and revert. A revert leaves the
+      entry pending rather than bricking a position, but it still hands the
+      trader a free retry against every observation until expiry, which is
+      the option the phase exists to remove.
+- [x] **P6-09** `settle_market_open` (§7.2): expiry check → delay check →
       fresh-observation check → checkpoints → **refresh risk state** →
       preflight against the hypothetical post-settlement state → succeed or
       `fail_entry_action`. The first eligible attempt is terminal.
-- [ ] **P6-10** `projected_minimum_borrow` in the preflight (§7.2). Without it
+      **Measured:** the projected cash LP equity is `equity + LP share of the
+      opening fee`, not `equity + opening_fee`. Only the LP share reaches
+      equity (§6.11) — the protocol and referral slices become claims of
+      their own, and the keeper reward leaves the vault against the escrow
+      claim that funded it, so it moves equity not at all. The increase's
+      projection adds collected payer funding in full plus the LP share of
+      collected borrow, for the same reason.
+- [x] **P6-10** `projected_minimum_borrow` in the preflight (§7.2). Without it
       a position can be admitted exactly at initial margin and be below it the
       moment its borrow window is quoted, because the minimum-borrow floor is
       part of pending borrow from the window's first second. Every input is
       known at preflight. The same term belongs in the increase preflight,
       evaluated against the **full resulting** risk units.
-- [ ] **P6-11** `create_limit_open_order` (§7.3): as market-open, but bounded by
+- [x] **P6-11** `create_limit_open_order` (§7.3): as market-open, but bounded by
       `max_order_lifetime_seconds`, requiring a positive trigger, and freezing
       `trigger_above` against the authenticated commit price. Cancellable by
       the owner.
-- [ ] **P6-12** `settle_limit_open` (§7.4): an untriggered observation returns
+- [x] **P6-12** `settle_limit_open` (§7.4): an untriggered observation returns
       `Pending` and does **not** consume the order. Once triggered, the attempt
       is terminal and settles exactly like a market open with
       `keeper_limit_order_reward`.
-- [ ] **P6-13** `cancel_limit_open` (§7.5): owner only, before expiry, full
+- [x] **P6-13** `cancel_limit_open` (§7.5): owner only, before expiry, full
       refund, no fee, no keeper reward.
-- [ ] **P6-14** `clean_expired_entry` (§7.6): permissionless, pays
+- [x] **P6-14** `clean_expired_entry` (§7.6): permissionless, pays
       `keeper_expiry_reward` from escrow, refunds the remainder. At exactly
       `expires_at` execution is forbidden and cleanup is allowed — there is no
       timestamp at which both succeed.
-- [ ] **P6-15** Attached TP/SL from an entry fill take **that fill's
+- [x] **P6-15** Attached TP/SL from an entry fill take **that fill's
       observation** as their commitment cursor, so they cannot close the
       position on the same observation that opened it.
 
 ### 6c. Position mutations (§7.7–7.10)
 
-- [ ] **P6-16** `add_collateral` (§7.7) stays **immediate** — it adds no price
+- [x] **P6-16** `add_collateral` (§7.7) stays **immediate** — it adds no price
       exposure. It charges no fee or reward, settles nothing, resets no
       baseline, does not change `stored_minimum_borrow_fee`, and does **not**
       restart the minimum-lifetime clock. A liquidatable owner may use it to
       rescue the position.
-- [ ] **P6-17** `create_increase` (§7.8) with the two dust checks against the
+- [x] **P6-17** `create_increase` (§7.8) with the two dust checks against the
       **commitment** price: added base `> 0` and resulting risk units strictly
       greater than current. These are `require`s at settlement (§6.13), so
       failing them would revert and leave the action occupying
@@ -727,36 +742,54 @@ place.
       market priced in the tens of thousands is enough to brick the position.
       Rejecting at creation is what makes the settlement-time requires
       unreachable.
-- [ ] **P6-18** `settle_increase` (§7.8): capitalize the old window first, then
+- [x] **P6-18** `settle_increase` (§7.8): capitalize the old window first, then
       move escrowed collateral in, then the opening fee, then the keeper
       reward, then add exposure, then the health/capacity/cap checks, then
       reset baselines and open the new borrow window. The completed old window
       is paid from **pre-existing** collateral, before added collateral joins.
-- [ ] **P6-19** `create_decrease` / `settle_decrease` (§7.9). The three guards
+- [x] **P6-19** `create_decrease` / `settle_decrease` (§7.9). The three guards
       that keep this path and the terminal path from diverging:
       `uncollectible_loss == 0`, `unpaid_profit == 0`, and the preflight check
       that cash LP equity covers the payable profit to be credited.
-- [ ] **P6-20** `create_close` / `settle_close` (§7.10). Always targets the
+      **Deviation (removed):** §7.9's decrease has **no collateral-withdrawal
+      leg and no payout at all** — "realized residual profit remains position
+      collateral". That deletes `pay_partial_realized`, `PartialTail`, and
+      `payout_collateral_checked`, and it is what makes the three guards
+      local: a survivor cannot realize value the vault could not pay because
+      it never receives cash. The surviving health check is now §7.9's pair
+      (`stored >= min_collateral`, `effective > liquidation_threshold`)
+      rather than the old `required_margin`, and the threshold is
+      `max(maintenance, keeper_liquidation_reward)` so a survivor is never
+      left exactly at the point of liquidation.
+- [x] **P6-20** `create_close` / `settle_close` (§7.10). Always targets the
       complete remaining exposure at settlement; no size is stored.
-- [ ] **P6-21** `pending_mutation_action_id` — at most one ordinary pending
+- [x] **P6-21** `pending_mutation_action_id` — at most one ordinary pending
       mutation per position (§8.4). Creation fails if occupied. Cleared only by
       execution, terminal failure, or forced-position cleanup.
 
 ### 6d. Triggers and forced actions (§7.11–7.14)
 
-- [ ] **P6-22** `set_take_profit` / `clear_take_profit` and the stop-loss
+- [x] **P6-22** `set_take_profit` / `clear_take_profit` and the stop-loss
       mirror (§7.11, §7.12), each recording a fresh `commit_observed_at` and
       `execute_after` when attached or replaced.
-- [ ] **P6-23** `execute_take_profit` / `execute_stop_loss`: both close the
+      **Deviation (removed):** §7.11 requires only `trigger_price > 0` when
+      attaching. The superseded directional validation — a long's take-profit
+      must sit above the current price — is dropped, because a trigger's
+      meaning is its direction of crossing, not where it sits relative to
+      today's price, and the owner has signed for it. Triggers attached
+      *during an entry fill* are still validated directionally at creation,
+      against the commit price for a market entry and the trigger price for a
+      limit entry.
+- [x] **P6-23** `execute_take_profit` / `execute_stop_loss`: both close the
       position **in full** — no partial take-profit, neither takes a size. Both
       pay only their own reward (`keeper_tp_reward` / `keeper_sl_reward`), not
       a close or decrease reward in addition. Delete the current
       `execute_order.rs` requirement that `execution_budget > 0`.
-- [ ] **P6-24** TP/SL slippage behaves differently from a market-style action:
+- [x] **P6-24** TP/SL slippage behaves differently from a market-style action:
       a crossed trigger whose exit bound fails leaves the instruction
       **attached** and pays nothing (§8.7). It may execute on a later
       qualifying observation.
-- [ ] **P6-25** **`min_position_lifetime` gates all four exits** — decrease,
+- [x] **P6-25** **`min_position_lifetime` gates all four exits** — decrease,
       close, take-profit, and stop-loss — measured from `last_size_increase_at`
       and read at settlement, not frozen at creation (§8.5). Today it is
       enforced only on `decrease`, and it panics with `TooEarly`; it must
@@ -764,24 +797,24 @@ place.
       stop-loss; that exposure is bounded by `min_position_lifetime` and
       covered by liquidation, and exempting stop-loss alone makes take-profit
       the obvious churn bypass.
-- [ ] **P6-26** `liquidate` (§7.13): one snapshot for eligibility **and**
+- [x] **P6-26** `liquidate` (§7.13): one snapshot for eligibility **and**
       settlement — the function cannot reassess with a later price midway
       through. Pays `keeper_liquidation_reward` from position value, then LP
       residual for the gap, capped at what exists; the liquidation completes
       either way. No closing fee.
-- [ ] **P6-27** `execute_adl` (§7.14): gate on `next_state is ADL or HardCap`
+- [x] **P6-27** `execute_adl` (§7.14): gate on `next_state is ADL or HardCap`
       re-evaluated from the current book on every call, plus `position_raw_pnl >
       0`. Candidate selection stays **unranked** — the state gate is what bounds
       the mechanism, not the selection order. Fixed `keeper_adl_reward`, no
       closing fee.
-- [ ] **P6-28** Forced-action cleanup (§8.12): remove exposure, clear both
+- [x] **P6-28** Forced-action cleanup (§8.12): remove exposure, clear both
       triggers, remove the ordinary pending mutation, refund its complete
       added-collateral escrow, clear the reverse reference, pay **only** the
       forced action's reward.
-- [ ] **P6-29** Precedence (§8.12): liquidatable → liquidation before every
+- [x] **P6-29** Precedence (§8.12): liquidatable → liquidation before every
       voluntary mutation, TP, SL, or ADL; not liquidatable and side needs
       deleveraging → ADL may supersede; otherwise the voluntary action settles.
-- [ ] **P6-31** **Drop the keeper allowlist from ADL.** §7.0: "`require keeper
+- [x] **P6-31** **Drop the keeper allowlist from ADL.** §7.0: "`require keeper
       authorization` means the caller authenticates the address that will
       receive the reward. It does not require membership in a privileged keeper
       allowlist; execution remains permissionless." Today
@@ -791,12 +824,38 @@ place.
       **`publish_round` stays permissioned**: §12.7.2 keeps round publication
       as the one permissioned operation and names the liveness dependency that
       follows.
+      **Superseded in part:** `publish_round` does not stay permissioned
+      because it no longer exists — rounds went with the oracle in Phase 7.
+      With ADL and `update_indices` both permissionless there is no
+      permissioned keeper operation left anywhere in the protocol, so
+      `ROLE_KEEPER` is deleted outright rather than left as an unused
+      constant inviting a future allowlist. `scripts/grant-keepers.sh` now
+      grants a role nothing checks (tracked in Phase 10).
 
 ### 6e. Referrals (§7.15, §7.16)
 
-- [ ] **P6-30** Mostly present and correct. Verify: code owner immutable,
+- [x] **P6-30** Verified, no change needed: code owner immutable,
       self-referral rejected, trader may re-point, changing the mapping affects
       only fees collected afterward, and the claim debits before the transfer.
+
+### 6f. Test coverage
+
+- [x] **P6-32** **Gap found, not in the original plan: `test-suites` has not
+      compiled since P1-01.** Its 4.9k lines target the pre-2026-08 design —
+      `open_position`, `place_entry_order`, execution budgets, wire-format
+      copies of `OracleConfig` and the old `MarketConfig` — and Phase 1
+      deleted the oracle router out from under it without touching it. So
+      "the workspace compiles" has been true only of the members that do.
+      Removed from the workspace (`exclude`) rather than left as a member
+      that cannot build, because a build that silently reports on a subset is
+      worse than an acknowledged gap. Replaced for the lifecycle itself by
+      `contracts/position-manager/tests/lifecycle.rs`: 15 integration tests
+      over the real wired stack covering escrow at commitment, both timing
+      gates, terminal slippage and capacity failure, expiry versus execution
+      at the same instant, limit resting and cancellation, the one-mutation
+      slot, the non-terminal TP bound, liquidation superseding a pending
+      increase, and the pause draining the entry queue. Rewriting the old
+      suite against the two-phase API is its own piece of work.
 
 ---
 
@@ -992,6 +1051,10 @@ should be recorded rather than discovered.
 
 These are not part of the contract work but they gate the redeploy. Track them
 here so they are not discovered at rotation time.
+
+- [ ] **P10-00** `scripts/grant-keepers.sh` grants a `KEEPER` role no contract
+      checks any more (P6-31). Delete it, and drop the grant from the rotation
+      ritual; any existing on-chain grant is inert but misleading.
 
 - [ ] **P10-01** Regenerate `packages/bindings/*` for every changed contract.
 - [ ] **P10-02** **`packages/protocol-math` must mirror the new arithmetic

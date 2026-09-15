@@ -1,4 +1,4 @@
-use crate::settle::{PartialTail, SettleHeader};
+use crate::settle::SettleHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 /// A partial close (§12.2). Fee fields are the amounts actually collected in
@@ -15,10 +15,12 @@ pub struct PositionDecreased {
     pub price: i128,
     pub raw_pnl: i128,
     pub payable_pnl: i128,
-    pub realized_payout: i128,
-    pub collateral_withdrawn: i128,
+    /// §7.9 — realized profit stays in the position as stored collateral;
+    /// there is no withdrawal leg. This is the resulting balance.
+    pub stored_collateral: i128,
     /// §11.1 closing fee collected out of the realized winnings.
     pub closing_fee: i128,
+    pub keeper_reward: i128,
     pub receiver_funding_paid: i128,
     pub lp_funding_paid: i128,
     pub borrow_paid: i128,
@@ -26,7 +28,7 @@ pub struct PositionDecreased {
     pub loss_collected: i128,
 }
 
-pub fn emit_decreased(env: &Env, s: &SettleHeader, tail: &PartialTail) {
+pub fn emit_decreased(env: &Env, s: &SettleHeader) {
     PositionDecreased {
         position_id: s.position_id,
         owner: s.owner.clone(),
@@ -35,9 +37,9 @@ pub fn emit_decreased(env: &Env, s: &SettleHeader, tail: &PartialTail) {
         price: s.price,
         raw_pnl: s.raw_pnl,
         payable_pnl: s.payable_pnl,
-        realized_payout: tail.realized_payout,
-        collateral_withdrawn: tail.collateral_withdrawn,
+        stored_collateral: s.stored_collateral,
         closing_fee: s.closing_fee,
+        keeper_reward: s.keeper_reward,
         receiver_funding_paid: s.fees.receiver_funding_paid,
         lp_funding_paid: s.fees.lp_funding_paid,
         borrow_paid: s.fees.borrow_paid,

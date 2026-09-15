@@ -7,8 +7,13 @@
 //! offchain indexer keys on the topic literals. Wide settlement events use
 //! `data_format = "map"` so fields are self-describing and can grow.
 
-mod adl_reward_paid;
+mod action_cancelled;
+mod action_committed;
+mod action_expired;
+mod action_failed;
+mod action_superseded;
 mod bad_debt;
+mod collateral_added;
 mod close_reason;
 mod config_proposed;
 mod fee_source;
@@ -16,10 +21,6 @@ mod global_config_updated;
 mod market_checkpoint;
 mod market_config_updated;
 mod market_status_changed;
-mod order_cancelled;
-mod order_executed;
-mod order_filled;
-mod order_placed;
 mod pause_changed;
 mod price_feed_changed;
 mod position_closed;
@@ -36,10 +37,13 @@ mod revenue_split;
 mod risk_state_changed;
 mod tp_sl_updated;
 
-/// Callerless between P1-05 and P6-27's fixed `keeper_adl_reward`.
-#[allow(unused_imports)]
-pub use adl_reward_paid::*;
+pub use action_cancelled::*;
+pub use action_committed::*;
+pub use action_expired::*;
+pub use action_failed::*;
+pub use action_superseded::*;
 pub use bad_debt::*;
+pub use collateral_added::*;
 pub use close_reason::*;
 pub use config_proposed::*;
 pub use fee_source::*;
@@ -47,10 +51,6 @@ pub use global_config_updated::*;
 pub use market_checkpoint::*;
 pub use market_config_updated::*;
 pub use market_status_changed::*;
-pub use order_cancelled::*;
-pub use order_executed::*;
-pub use order_filled::*;
-pub use order_placed::*;
 pub use pause_changed::*;
 pub use price_feed_changed::*;
 pub use position_closed::*;

@@ -39,10 +39,13 @@ pub enum PositionManagerError {
     UpgradeTimelockNotElapsed = 24,
     /// `upgrade` called with a hash that differs from the proposal.
     UpgradeHashMismatch = 25,
-    /// No entry order exists for the given id.
-    OrderNotFound = 26,
-    /// `execute_entry_order` called before the trigger price was crossed.
-    OrderNotTriggered = 27,
+    /// Reserved. Entry orders became `PendingAction`s in Phase 6; absence
+    /// is `ActionNotFound`.
+    Reserved26 = 26,
+    /// Reserved. An untriggered observation is now the non-terminal
+    /// `Pending` outcome (§7.4), not an error; P9-01 renumbers the enum, so
+    /// the code is not reused before then.
+    Reserved27 = 27,
     /// `register_referral_code` for a code that is already owned.
     ReferralCodeTaken = 28,
     /// A referral code failed the length/format bounds.
@@ -72,4 +75,13 @@ pub enum PositionManagerError {
     /// Distinct from `PriceUnavailable`: the feed answered, the answer is
     /// just too old to act on.
     StalePrice = 38,
+    /// §8.9 — a settlement call named an action of a different kind. An
+    /// unexpected condition: it reverts and leaves the action untouched.
+    WrongActionKind = 39,
+    /// §8.4 — the position already has a pending increase, decrease, or
+    /// close. At most one ordinary mutation may be committed against a
+    /// given pre-action state.
+    MutationPending = 40,
+    /// The named trigger is not attached to the position.
+    TriggerNotAttached = 41,
 }

@@ -16,8 +16,6 @@ use crate::math;
 
 /// The settlement kinds that pay a reward. Exactly one reward per settlement
 /// call (§6.12); internal cleanup adds none.
-/// The entry and mutation variants have no caller until the two-phase
-/// lifecycle lands (Phase 6); the forced-action variants are wired already.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum RewardKind {
@@ -57,10 +55,6 @@ pub fn reward_for(config: &GlobalConfig, kind: RewardKind) -> i128 {
 /// entry creation guarantees the escrow can cover the applicable reward
 /// (§10.3.1), so a shortfall here is a broken invariant, not a business
 /// outcome.
-///
-/// Its caller is the two-phase entry lifecycle; nothing calls it until that
-/// lands.
-#[allow(dead_code)]
 pub fn pay_from_escrow(
     env: &Env,
     ledger: &mut Ledger,
@@ -104,13 +98,12 @@ pub fn pay_from_position(
 /// What a liquidation reward actually came from.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KeeperPayment {
-    #[allow(dead_code)]
     pub from_position: i128,
-    #[allow(dead_code)]
+    /// LP residual cash used to cover a price-gap shortfall. Liquidation is
+    /// the only path that may draw on it (§8.11).
     pub from_lp_backstop: i128,
     /// The part of a liquidation reward neither the position nor LP
     /// residual could cover. Reported by §12.6's liquidation event.
-    #[allow(dead_code)]
     pub unpaid: i128,
 }
 

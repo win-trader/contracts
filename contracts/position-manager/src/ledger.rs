@@ -191,8 +191,6 @@ impl Ledger {
 
 /// Boundary move out: debit `bucket` and transfer the same cash to
 /// `recipient`, one atomic call (the safety-claim path). No-op at zero.
-/// Callerless between P1-01/P1-05 and P5-16's keeper payment verbs.
-#[allow(dead_code)]
 pub fn payout(env: &Env, ledger: &mut Ledger, bucket: Bucket, recipient: &Address, amount: i128) {
     if amount <= 0 {
         return;
@@ -241,30 +239,6 @@ pub fn payout_collateral(
     collected
 }
 
-/// `payout_collateral` on the conservation-checked vault path (pure
-/// collateral withdrawal): collect first, then hand the vault the
-/// post-collect claim total.
-pub fn payout_collateral_checked(
-    env: &Env,
-    ledger: &mut Ledger,
-    position: &mut Position,
-    side: &mut MarketSide,
-    recipient: &Address,
-    amount: i128,
-) -> i128 {
-    let collected = collect_stored_collateral(env, ledger, position, side, amount);
-    if collected > 0 {
-        let claims_after = ledger.non_lp_claims(env);
-        vault(env).transfer_claim(
-            &env.current_contract_address(),
-            recipient,
-            &collected,
-            &claims_after,
-        );
-    }
-    collected
-}
-
 /// Boundary move out of LP residual equity, which carries no claim label:
 /// nothing is debited because nothing was labelled. Used only by §6.12's
 /// liquidation backstop, where the caller has already capped the amount at
@@ -276,19 +250,72 @@ pub fn payout_lp_residual(env: &Env, recipient: &Address, amount: i128) {
     vault(env).transfer_safety_claim(&env.current_contract_address(), recipient, &amount);
 }
 
+// ---------------------------------------------------------------------------
+// Action escrow (§5.7).
+//
+// Escrow is trader-owned cash sitting in the vault under its own claim
+// label. It is not LP equity, not position collateral, not risk backing, and
+// it earns nothing (§9.11). Every terminal transition distributes it through
+// exactly one combination of the four verbs below, and §9.11's identities
+// are checkable by reading which of them a path calls.
+// ---------------------------------------------------------------------------
+
+/// Boundary move in: pull `amount` from `owner` and label it action escrow.
+pub fn escrow_in(env: &Env, ledger: &mut Ledger, owner: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    receive(env, owner, amount);
+    ledger.credit(env, Bucket::ActionEscrow, amount);
+}
+
+/// Boundary move out: refund escrow to the owner frozen in the action.
+///
+/// The safety path, deliberately: a refund returns cash the trader put in
+/// and the protocol never spent, so physical cash and the claim fall by the
+/// same amount and the refund cannot create or deepen a shortfall. Routing
+/// it through the conservation check would let a shortfall someone else
+/// caused strand a trader's own money.
+pub fn refund_escrow(env: &Env, ledger: &mut Ledger, owner: &Address, amount: i128) {
+    payout(env, ledger, Bucket::ActionEscrow, owner, amount);
+}
+
+/// Label move escrow → position collateral: the cash is already in the
+/// vault, only its owner label changes.
+pub fn escrow_to_collateral(
+    env: &Env,
+    ledger: &mut Ledger,
+    position: &mut Position,
+    side: &mut MarketSide,
+    amount: i128,
+) {
+    if amount <= 0 {
+        return;
+    }
+    ledger.debit(env, Bucket::ActionEscrow, amount);
+    // The three collateral legs move together; the escrow debit above is
+    // the fourth leg of the same transition.
+    position.stored_collateral = math::add(env, position.stored_collateral, amount);
+    side.stored_collateral_total = math::add(env, side.stored_collateral_total, amount);
+    ledger.position_collateral_total = math::add(env, ledger.position_collateral_total, amount);
+}
+
+/// Label move escrow → LP residual, in full or not at all. The opening-fee
+/// leg of a successful entry: `distribute_open_close_revenue` then carves
+/// the protocol and referral shares out of the residual, which is what
+/// leaves the LP share behind.
+pub fn spend_escrow(env: &Env, ledger: &mut Ledger, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    ledger.debit(env, Bucket::ActionEscrow, amount);
+}
+
 /// Boundary move in: pull `amount` from `from` into the vault. Labeling
 /// stays with the caller — open pulls the collateral, and recapitalize
 /// deliberately labels nothing (a pure LP-equity donation).
 pub fn receive(env: &Env, from: &Address, amount: i128) {
     vault(env).receive_collateral(&env.current_contract_address(), from, &amount);
-}
-
-/// Boundary move in via `from`'s pre-granted token allowance (entry-order
-/// fills). Returns `false` without panicking if the pull fails, so the
-/// caller can drop the dead order and commit. Labeling stays with the
-/// caller, as with `receive`.
-pub fn receive_via_allowance(env: &Env, from: &Address, amount: i128) -> bool {
-    vault(env).pull_from_allowance(&env.current_contract_address(), from, &amount)
 }
 
 // ---------------------------------------------------------------------------

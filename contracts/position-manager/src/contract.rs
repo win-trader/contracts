@@ -10,24 +10,15 @@ use crate::ledger::{self, Ledger};
 use crate::{
     borrow, funding, governance, math, position, referral, risk, snapshot, storage, validation,
 };
-use position::{
-    decrease::decrease_position,
-    deleverage::deleverage_position,
-    entry_order::{cancel_entry_order, execute_entry_order, place_entry_order},
-    execute_order::execute_order,
-    increase::increase_position,
-    liquidate::liquidate_position,
-    open::open_position,
-    set_tp_sl::set_tp_sl,
-};
+use position::{adl, entry, liquidate, mutation, trigger};
 use shared::constants::{
-    INDEX_PRECISION, PRICE_DECIMALS, ROLE_ADMIN, ROLE_KEEPER, ROLE_ORACLE, ROLE_PAUSER,
-    ROLE_PROTOCOL, ROLE_UNPAUSER, ROLE_UPGRADER,
+    INDEX_PRECISION, PRICE_DECIMALS, ROLE_ADMIN, ROLE_ORACLE, ROLE_PAUSER, ROLE_PROTOCOL,
+    ROLE_UNPAUSER, ROLE_UPGRADER,
 };
 use shared::{
-    AccountingSnapshot, ConfigManagerClient, EntryOrderParams, GlobalConfig, Market, MarketConfig,
-    MigrationData, Position, PositionManager, PriceFeedClient, TimelockedUpgradeable,
-    UpgradeFailure,
+    AccountingSnapshot, ActionOutcome, ConfigManagerClient, GlobalConfig, Market, MarketConfig,
+    MigrationData, OpenPayload, PendingAction, Position, PositionManager, PriceFeedClient,
+    TimelockedUpgradeable, UpgradeFailure,
 };
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
@@ -177,38 +168,48 @@ impl PositionManager for PositionManagerContract {
         storage::save_vault(&env, &vault);
     }
 
-    fn open_position(
-        env: Env,
-        owner: Address,
-        market_symbol: Symbol,
-        is_long: bool,
-        size: i128,
-        collateral: i128,
-        take_profit: i128,
-        stop_loss: i128,
-        acceptable_price: i128,
-    ) -> u64 {
-        open_position(
-            env,
-            owner,
-            market_symbol,
-            is_long,
-            size,
-            collateral,
-            take_profit,
-            stop_loss,
-            acceptable_price,
-        )
+    fn create_market_open(env: Env, owner: Address, market: Symbol, request: OpenPayload) -> u64 {
+        entry::create_market_open(env, owner, market, request)
     }
 
-    fn increase_position(
+    fn create_limit_open(
+        env: Env,
+        owner: Address,
+        market: Symbol,
+        request: OpenPayload,
+        trigger_price: i128,
+    ) -> u64 {
+        entry::create_limit_open(env, owner, market, request, trigger_price)
+    }
+
+    fn settle_market_open(env: Env, keeper: Address, action_id: u64) -> ActionOutcome {
+        entry::settle_market_open(env, keeper, action_id)
+    }
+
+    fn settle_limit_open(env: Env, keeper: Address, action_id: u64) -> ActionOutcome {
+        entry::settle_limit_open(env, keeper, action_id)
+    }
+
+    fn cancel_limit_open(env: Env, action_id: u64) -> i128 {
+        entry::cancel_limit_open(env, action_id)
+    }
+
+    fn clean_expired_entry(env: Env, keeper: Address, action_id: u64) {
+        entry::clean_expired_entry(env, keeper, action_id)
+    }
+
+    fn add_collateral(env: Env, position_id: u64, amount: i128) {
+        mutation::add_collateral(env, position_id, amount)
+    }
+
+    fn create_increase(
         env: Env,
         position_id: u64,
         size_added: i128,
         collateral_added: i128,
         acceptable_price: i128,
-    ) {
-        increase_position(
+    ) -> u64 {
+        mutation::create_increase(
             env,
             position_id,
             size_added,
@@ -217,57 +218,65 @@ impl PositionManager for PositionManagerContract {
         )
     }
 
-    fn decrease_position(
+    fn create_decrease(
         env: Env,
         position_id: u64,
         size_removed: i128,
-        collateral_withdrawn: i128,
         acceptable_price: i128,
-    ) {
-        decrease_position(
-            env,
-            position_id,
-            size_removed,
-            collateral_withdrawn,
-            acceptable_price,
-        )
-    }
-
-    fn liquidate_position(env: Env, caller: Address, position_id: u64) {
-        liquidate_position(env, caller, position_id)
-    }
-
-    fn deleverage_position(env: Env, caller: Address, position_id: u64) {
-        deleverage_position(env, caller, position_id)
-    }
-
-    fn execute_order(env: Env, caller: Address, position_id: u64) {
-        execute_order(env, caller, position_id)
-    }
-
-    fn set_tp_sl(env: Env, position_id: u64, take_profit: i128, stop_loss: i128) {
-        set_tp_sl(env, position_id, take_profit, stop_loss)
-    }
-
-    fn place_entry_order(
-        env: Env,
-        owner: Address,
-        market: Symbol,
-        params: EntryOrderParams,
     ) -> u64 {
-        place_entry_order(env, owner, market, params)
+        mutation::create_decrease(env, position_id, size_removed, acceptable_price)
     }
 
-    fn execute_entry_order(env: Env, caller: Address, order_id: u64) {
-        execute_entry_order(env, caller, order_id)
+    fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64 {
+        mutation::create_close(env, position_id, acceptable_price)
     }
 
-    fn cancel_entry_order(env: Env, order_id: u64) {
-        cancel_entry_order(env, order_id)
+    fn settle_increase(env: Env, keeper: Address, action_id: u64) -> ActionOutcome {
+        mutation::settle_increase(env, keeper, action_id)
     }
 
-    fn get_entry_order(env: Env, order_id: u64) -> shared::EntryOrder {
-        storage::get_entry_order(&env, order_id)
+    fn settle_decrease(env: Env, keeper: Address, action_id: u64) -> ActionOutcome {
+        mutation::settle_decrease(env, keeper, action_id)
+    }
+
+    fn settle_close(env: Env, keeper: Address, action_id: u64) -> ActionOutcome {
+        mutation::settle_close(env, keeper, action_id)
+    }
+
+    fn set_take_profit(env: Env, position_id: u64, trigger_price: i128, acceptable_price: i128) {
+        trigger::set_take_profit(env, position_id, trigger_price, acceptable_price)
+    }
+
+    fn clear_take_profit(env: Env, position_id: u64) {
+        trigger::clear_take_profit(env, position_id)
+    }
+
+    fn set_stop_loss(env: Env, position_id: u64, trigger_price: i128, acceptable_price: i128) {
+        trigger::set_stop_loss(env, position_id, trigger_price, acceptable_price)
+    }
+
+    fn clear_stop_loss(env: Env, position_id: u64) {
+        trigger::clear_stop_loss(env, position_id)
+    }
+
+    fn execute_take_profit(env: Env, keeper: Address, position_id: u64) -> ActionOutcome {
+        trigger::execute_take_profit(env, keeper, position_id)
+    }
+
+    fn execute_stop_loss(env: Env, keeper: Address, position_id: u64) -> ActionOutcome {
+        trigger::execute_stop_loss(env, keeper, position_id)
+    }
+
+    fn liquidate_position(env: Env, keeper: Address, position_id: u64) {
+        liquidate::liquidate_position(env, keeper, position_id)
+    }
+
+    fn execute_adl(env: Env, keeper: Address, position_id: u64) -> ActionOutcome {
+        adl::execute_adl(env, keeper, position_id)
+    }
+
+    fn get_pending_action(env: Env, action_id: u64) -> PendingAction {
+        storage::get_pending_action(&env, action_id)
     }
 
     fn register_referral_code(env: Env, owner: Address, code: Symbol) {
@@ -298,8 +307,12 @@ impl PositionManager for PositionManagerContract {
         storage::get_ledger(&env).referral_claimable_total
     }
 
-    fn update_indices(env: Env, caller: Address, market_symbol: Symbol) {
-        require_role(&env, &caller, ROLE_KEEPER);
+    fn update_indices(env: Env, market_symbol: Symbol) {
+        // §7.0 — permissionless. A checkpoint pays no reward and moves no
+        // value between parties: it only advances the indices to now, which
+        // every settlement does anyway. An allowlist here bought nothing and
+        // made staleness someone's privilege.
+        require_initialized(&env);
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
         borrow::accrue(&env, &mut ledger, now);

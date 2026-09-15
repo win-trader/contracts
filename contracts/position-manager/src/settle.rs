@@ -1,15 +1,19 @@
 //! Position settlement — doc §12 (decrease, close, liquidation, ADL,
 //! triggered orders).
 //!
-//! `settle_close` runs the §12.2 procedure as a pipeline of named phases on
-//! one `Settlement` context — the function itself reads as the table of
-//! contents. Available value is distributed in the §12.2 waterfall order —
+//! `settle` runs the §6.10 procedure as a pipeline of named phases on one
+//! `Settlement` context — the function itself reads as the table of
+//! contents. Available value is distributed in the §11.4 waterfall order —
 //! receiver-backed funding, negative price PnL, LP-backed funding, borrow
-//! (all inside `fees::capitalize`), then residual trader equity. The
-//! closing fee and the keeper reward were deleted with their old schedules
-//! (P1-05, P1-06) and return in Phases 5 and 6. Every money move is a
-//! ledger verb, so the side aggregates and claim totals stay conserved
-//! (§18.2) without a reconciliation step.
+//! (all inside `fees::capitalize`), then residual trader equity. Every money
+//! move is a ledger verb, so the side aggregates and claim totals stay
+//! conserved (§18.2) without a reconciliation step.
+//!
+//! A surviving decrease leaves realized profit in the position as stored
+//! collateral (§7.9). There is no collateral-withdrawal operation: the ways
+//! out of a position are to shrink it or to close it, and that is what makes
+//! "a surviving position never realizes value the vault could not pay" a
+//! property of one path rather than two.
 
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
@@ -25,13 +29,13 @@ use crate::risk;
 use crate::{events, math, storage};
 
 /// §6.13 — the exposure a decrease removes.
-struct RemovedExposure {
-    full: bool,
-    new_size: i128,
-    base_after: i128,
-    risk_after: i128,
-    base_removed: i128,
-    risk_removed: i128,
+pub struct RemovedExposure {
+    pub full: bool,
+    pub new_size: i128,
+    pub base_after: i128,
+    pub risk_after: i128,
+    pub base_removed: i128,
+    pub risk_removed: i128,
 }
 
 /// §6.13 `derive_partial_removal` — remaining base **floors** and the
@@ -45,7 +49,12 @@ struct RemovedExposure {
 ///
 /// A full close removes the exact remainder with no proportional rounding at
 /// all.
-fn removed_exposure(env: &Env, position: &Position, size_removed: i128, config: &MarketConfig) -> RemovedExposure {
+pub fn removed_exposure(
+    env: &Env,
+    position: &Position,
+    size_removed: i128,
+    config: &MarketConfig,
+) -> RemovedExposure {
     let full = size_removed == position.size;
     let new_size = math::sub(env, position.size, size_removed);
     let (base_after, risk_after) = if full {
@@ -81,19 +90,20 @@ pub struct SettleHeader {
     pub fees: CollectedFees,
     /// Closing fee collected out of the realized winnings.
     pub closing_fee: i128,
+    /// §6.12 — what the settlement's one keeper was actually paid, and from
+    /// where. Only liquidation can draw on the LP backstop or fall short
+    /// (§8.11), so on every other path the last two are zero.
+    pub keeper_reward: i128,
+    pub keeper_from_lp_backstop: i128,
+    pub keeper_unpaid: i128,
+    /// Stored collateral the position is left holding. Zero on a full
+    /// close, where `ClosedTail::collateral_payout` is the figure that
+    /// matters instead.
+    pub stored_collateral: i128,
     /// §6.5 — recognized profit the vault could not pay. The events are the
     /// only durable record of it: §5.6 removes the pending record and §5.14
     /// removes the position.
     pub unpaid_profit: i128,
-}
-
-/// What only a partial close produces.
-#[derive(Clone, Debug, Default)]
-pub struct PartialTail {
-    /// Realized profit transferred to the owner.
-    pub realized_payout: i128,
-    /// Explicit collateral withdrawal transferred.
-    pub collateral_withdrawn: i128,
 }
 
 /// What only a full close produces.
@@ -110,38 +120,46 @@ pub struct ClosedTail {
 /// versa) are unrepresentable.
 #[derive(Clone, Debug)]
 pub enum Settled {
-    Partial(SettleHeader, PartialTail),
+    Partial(SettleHeader),
     Closed(SettleHeader, ClosedTail),
 }
 
-/// §12.2 — settle a decrease, close, liquidation, ADL, or triggered order.
+/// §6.10 — settle a decrease, close, liquidation, ADL, or triggered exit.
 /// The caller must have accrued the borrow clock and the market's funding
 /// to `now`. Saves the market and position storage; the caller saves the
 /// ledger.
 #[allow(clippy::too_many_arguments)]
-pub fn settle_close(
+pub fn settle(
     env: &Env,
     ledger: &mut Ledger,
     position: Position,
     market: Market,
     size_removed: i128,
-    collateral_withdrawn: i128,
     price: i128,
     keeper: Option<Keeper>,
+    closing_fee: ClosingFee,
 ) -> Settled {
-    let mut s = Settlement::begin(env, ledger, position, market, size_removed, price, keeper);
+    let mut s = Settlement::begin(
+        env,
+        ledger,
+        position,
+        market,
+        size_removed,
+        price,
+        keeper,
+        closing_fee,
+    );
     s.credit_payable();
     s.capitalize();
     s.pay_keeper();
     s.charge_closing_fee();
-    s.pay_partial_realized();
     s.reduce_exposure();
     if s.removed.full {
         let tail = s.finalize_close();
         Settled::Closed(s.finish(), tail)
     } else {
-        let tail = s.finalize_partial(collateral_withdrawn);
-        Settled::Partial(s.finish(), tail)
+        s.finalize_partial();
+        Settled::Partial(s.finish())
     }
 }
 
@@ -154,6 +172,18 @@ pub struct Keeper<'a> {
     pub liquidation: bool,
 }
 
+/// §9.13 — which settlements may charge a closing fee.
+///
+/// A voluntary decrease, a voluntary close, a take-profit, and a stop-loss
+/// do. Liquidation and ADL do not: both are forced on the trader, and
+/// charging a fee for an exit they did not choose would take value from the
+/// side the protocol is already penalising.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClosingFee {
+    Charged,
+    Waived,
+}
+
 /// The working state one settlement threads through its phases.
 struct Settlement<'a> {
     env: &'a Env,
@@ -163,11 +193,12 @@ struct Settlement<'a> {
     size_removed: i128,
     price: i128,
     keeper: Option<Keeper<'a>>,
+    closing_fee_policy: ClosingFee,
     /// The obligations as they stood before capitalization consumed them.
     /// §6.9's closing fee is measured against these, not against what was
     /// actually collected.
     pending: crate::funding::PendingFees,
-    keeper_paid: i128,
+    keeper_payment: crate::keeper::KeeperPayment,
     removed: RemovedExposure,
     raw_pnl: i128,
     /// Positive PnL after the §14 payout factor; zero for losers.
@@ -176,7 +207,6 @@ struct Settlement<'a> {
     negative: i128,
     collected: CollectedFees,
     closing_fee: i128,
-    realized_payout: i128,
     /// §6.5 — recognized profit the vault had no cash to pay.
     unpaid_profit: i128,
     /// Set by `finalize_partial`: the position lives on and needs a
@@ -197,6 +227,7 @@ impl<'a> Settlement<'a> {
         size_removed: i128,
         price: i128,
         keeper: Option<Keeper<'a>>,
+        closing_fee_policy: ClosingFee,
     ) -> Self {
         let physical = ledger::physical_cash(env);
         let equity = ledger.cash_lp_equity(env, physical);
@@ -233,15 +264,15 @@ impl<'a> Settlement<'a> {
             size_removed,
             price,
             keeper,
+            closing_fee_policy,
             pending,
-            keeper_paid: 0,
+            keeper_payment: crate::keeper::KeeperPayment::default(),
             removed,
             raw_pnl,
             payable,
             negative,
             collected: CollectedFees::default(),
             closing_fee: 0,
-            realized_payout: 0,
             unpaid_profit: 0,
             survives: false,
         }
@@ -309,7 +340,7 @@ impl<'a> Settlement<'a> {
         let (recipient, reward, liquidation) =
             (keeper.recipient.clone(), keeper.reward, keeper.liquidation);
         let is_long = self.position.is_long;
-        self.keeper_paid = if liquidation {
+        self.keeper_payment = if liquidation {
             let physical = ledger::physical_cash(self.env);
             crate::keeper::pay_liquidation(
                 self.env,
@@ -320,16 +351,19 @@ impl<'a> Settlement<'a> {
                 &recipient,
                 reward,
             )
-            .paid()
         } else {
-            crate::keeper::pay_from_position(
-                self.env,
-                self.ledger,
-                &mut self.position,
-                self.market.side_mut(is_long),
-                &recipient,
-                reward,
-            )
+            crate::keeper::KeeperPayment {
+                from_position: crate::keeper::pay_from_position(
+                    self.env,
+                    self.ledger,
+                    &mut self.position,
+                    self.market.side_mut(is_long),
+                    &recipient,
+                    reward,
+                ),
+                from_lp_backstop: 0,
+                unpaid: 0,
+            }
         };
     }
 
@@ -341,9 +375,9 @@ impl<'a> Settlement<'a> {
     /// junior to everything above it, so a settlement that cannot pay it
     /// simply does not.
     ///
-    /// Liquidation pays no closing fee at all (§7.13).
+    /// Liquidation and ADL pay no closing fee at all (§7.13, §7.14).
     fn charge_closing_fee(&mut self) {
-        if self.keeper.as_ref().is_some_and(|k| k.liquidation) {
+        if self.closing_fee_policy == ClosingFee::Waived {
             return;
         }
         let fee = fees::calculate_closing_fee(
@@ -352,7 +386,7 @@ impl<'a> Settlement<'a> {
             self.payable,
             &self.pending,
             self.pending.borrow,
-            self.keeper_paid,
+            self.keeper_payment.paid(),
             &self.market.config,
         );
         if fee.collectible <= 0 {
@@ -377,25 +411,6 @@ impl<'a> Settlement<'a> {
         );
     }
 
-    /// Partial close only: transfer the remaining realized profit to the
-    /// trader.
-    fn pay_partial_realized(&mut self) {
-        if self.removed.full || self.payable <= self.closing_fee {
-            return;
-        }
-        let is_long = self.position.is_long;
-        let owner = self.position.owner.clone();
-        let amount = math::sub(self.env, self.payable, self.closing_fee);
-        self.realized_payout = ledger::payout_collateral(
-            self.env,
-            self.ledger,
-            &mut self.position,
-            self.market.side_mut(is_long),
-            &owner,
-            amount,
-        );
-    }
-
     /// §12.2 step 12 — reduce the side exposure aggregates and the global
     /// risk register (collateral aggregates were kept in sync by the choke
     /// point above).
@@ -411,10 +426,9 @@ impl<'a> Settlement<'a> {
         risk::release_exposure(self.env, self.ledger, self.removed.risk_removed);
     }
 
-    /// §12.2 full-close waterfall tail: bad debt, then residual trader
-    /// equity; the position leaves storage. The keeper reward that used to
-    /// sit between them is deleted with the bps schedule (P1-05) and comes
-    /// back as a fixed cash amount in Phase 6.
+    /// §11.4 full-close waterfall tail: bad debt, then residual trader
+    /// equity; the position leaves storage, taking both attached triggers
+    /// and any pending voluntary mutation with it (§5.14).
     fn finalize_close(&mut self) -> ClosedTail {
         let mut tail = ClosedTail::default();
         if self.collected.unpaid > 0 {
@@ -434,41 +448,43 @@ impl<'a> Settlement<'a> {
                 residual,
             );
         }
+        // §8.12 steps 4-6 — the position is leaving, so any pending
+        // voluntary mutation is superseded and its complete added-collateral
+        // escrow goes back to the owner. It pays no reward of its own: a
+        // terminal settlement is one keeper action (§8.14).
+        crate::action::supersede_pending_mutation(self.env, self.ledger, &mut self.position);
         storage::remove_position(self.env, self.position.id);
         risk::release_position(self.env, self.ledger);
         tail
     }
 
-    /// §12.2 partial close: explicit withdrawal, resize, health check,
-    /// baseline reset (§11.5: no historical debt carries forward); the
-    /// position is saved back.
-    fn finalize_partial(&mut self, collateral_withdrawn: i128) -> PartialTail {
-        if collateral_withdrawn > self.position.stored_collateral {
-            panic_with_error!(self.env, PositionManagerError::InsufficientCollateral);
-        }
-        if collateral_withdrawn > 0 {
-            let is_long = self.position.is_long;
-            let owner = self.position.owner.clone();
-            // An explicit withdrawal is an outflow, not close proceeds, so
-            // it always takes the conservation-checked path — it can never
-            // create or deepen a shortfall, whether or not a size decrease
-            // rides along. (Realized close profit still takes the safety
-            // path in `pay_partial_realized`, as a risk-reduction proceed.)
-            ledger::payout_collateral_checked(
-                self.env,
-                self.ledger,
-                &mut self.position,
-                self.market.side_mut(is_long),
-                &owner,
-                collateral_withdrawn,
-            );
-        }
+    /// §7.9 — the surviving tail: resize, then the two requirements a
+    /// survivor must meet, then the baseline reset (§11.5: no historical
+    /// debt carries forward). The position is saved in `finish`.
+    ///
+    /// Realized profit is **not** paid out. It stays as stored collateral,
+    /// which is what makes the §7.9 guards local: a survivor may not carry a
+    /// loss its collateral could not absorb, and may not realize profit the
+    /// vault could not pay, because unlike a terminal settlement it has no
+    /// result in which to report the shortfall.
+    ///
+    /// Both checks are `require`s rather than outcomes: the decrease
+    /// preflight has already evaluated them against this same snapshot, so
+    /// reaching one here would mean the projection and the settlement
+    /// disagree — a defect, not a business outcome.
+    fn finalize_partial(&mut self) {
         self.position.size = self.removed.new_size;
         self.position.base_exposure = self.removed.base_after;
         self.position.risk_units = self.removed.risk_after;
-        let health = math::add(
+        let config = storage::get_global_config(self.env);
+        if self.position.stored_collateral < config.min_collateral {
+            panic_with_error!(self.env, PositionManagerError::InsufficientCollateral);
+        }
+        // Pending obligations are all settled at this point, so effective
+        // collateral is stored collateral plus the payable PnL still riding
+        // on the remaining exposure.
+        let remaining_pnl = risk::payable_pnl(
             self.env,
-            self.position.stored_collateral,
             math::pnl(
                 self.env,
                 self.position.is_long,
@@ -476,19 +492,17 @@ impl<'a> Settlement<'a> {
                 self.removed.base_after,
                 self.price,
             ),
+            self.market.side(self.position.is_long),
         );
-        // Any explicit collateral withdrawal raises leverage and
-        // re-underwrites the remaining position at the initial margin — a
-        // dust size decrease must not downgrade the floor to maintenance.
-        // A pure shrink (no withdrawal) de-risks and keeps the maintenance
-        // floor. `require_valid_input` forbids both being zero.
-        let required = risk::required_margin(
-            self.env,
-            self.removed.new_size,
-            &self.market.config,
-            collateral_withdrawn > 0,
+        let effective = math::add(self.env, self.position.stored_collateral, remaining_pnl);
+        // §7.9 — strictly above the threshold. Liquidation eligibility is
+        // `effective <= threshold`, so a survivor left exactly at it would
+        // be liquidatable the instant the decrease committed.
+        let threshold = core::cmp::max(
+            risk::maintenance_requirement(self.env, self.removed.new_size, &self.market.config),
+            config.keeper_rewards.liquidation,
         );
-        if health < required {
+        if effective <= threshold {
             panic_with_error!(self.env, PositionManagerError::InsufficientCollateral);
         }
         funding::reset_debts(self.env, &mut self.position, &self.market);
@@ -497,10 +511,6 @@ impl<'a> Settlement<'a> {
         // happens in `finish`; saving now would store a position whose
         // window minimum was quoted at the pre-mutation utilization.
         self.survives = true;
-        PartialTail {
-            realized_payout: self.realized_payout,
-            collateral_withdrawn,
-        }
     }
 
     /// §4.9 steps 8-10 — refresh the market display and risk state from the
@@ -542,6 +552,10 @@ impl<'a> Settlement<'a> {
             payable_pnl: self.payable,
             fees: self.collected,
             closing_fee: self.closing_fee,
+            keeper_reward: self.keeper_payment.paid(),
+            keeper_from_lp_backstop: self.keeper_payment.from_lp_backstop,
+            keeper_unpaid: self.keeper_payment.unpaid,
+            stored_collateral: self.position.stored_collateral,
             unpaid_profit: self.unpaid_profit,
         }
     }

@@ -26,6 +26,12 @@ pub struct PositionClosed {
     pub unpaid_profit: i128,
     /// Closing fee collected out of the realized winnings.
     pub closing_fee: i128,
+    /// §6.12 — the settlement's one keeper reward, split by source. Only a
+    /// liquidation can draw on LP residual for a price-gap shortfall or
+    /// leave part of the reward unpaid (§8.11).
+    pub keeper_reward: i128,
+    pub keeper_from_lp_backstop: i128,
+    pub keeper_unpaid: i128,
     pub receiver_funding_paid: i128,
     pub lp_funding_paid: i128,
     pub borrow_paid: i128,
@@ -49,6 +55,9 @@ pub fn emit_closed(env: &Env, s: &SettleHeader, tail: &ClosedTail, reason: Close
         bad_debt: tail.bad_debt,
         unpaid_profit: s.unpaid_profit,
         closing_fee: s.closing_fee,
+        keeper_reward: s.keeper_reward,
+        keeper_from_lp_backstop: s.keeper_from_lp_backstop,
+        keeper_unpaid: s.keeper_unpaid,
         receiver_funding_paid: s.fees.receiver_funding_paid,
         lp_funding_paid: s.fees.lp_funding_paid,
         borrow_paid: s.fees.borrow_paid,

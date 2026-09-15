@@ -1,5 +1,6 @@
 #![no_std]
 
+mod action;
 mod auth;
 mod borrow;
 mod contract;

@@ -27,12 +27,6 @@ pub fn require_vault(env: &Env, caller: &Address) {
     }
 }
 
-pub fn require_not_paused(env: &Env) {
-    if storage::is_paused(env) {
-        panic_with_error!(env, PositionManagerError::Paused);
-    }
-}
-
 pub fn require_market_active(env: &Env, market_symbol: &Symbol) {
     if storage::is_market_disabled(&env, &market_symbol) {
         panic_with_error!(&env, PositionManagerError::MarketDisabled);

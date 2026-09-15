@@ -1,5 +1,10 @@
-//! Input validation: governance config bounds, slippage guards, and
-//! conditional-order sanity checks.
+//! Input validation: governance config bounds and conditional-order sanity
+//! checks.
+//!
+//! The price-bound guards moved to `action`: §8.7's predicates are shared by
+//! commitment and settlement and must **return** rather than panic, because
+//! a slipped market-style attempt is a terminal business outcome, not an
+//! error (§8.9).
 //!
 //! §10.3 is the normative list and this file is its whole implementation.
 //! The declared widths of §2.1.1 make "fits its formulas" checkable rather
@@ -137,29 +142,6 @@ pub fn validate_market(env: &Env, c: &MarketConfig) {
         || c.order_execution_delay_seconds > 30
     {
         panic_with_error!(env, PositionManagerError::InvalidConfig);
-    }
-}
-
-/// Slippage guard. `acceptable == 0` means no bound. Opening a long (or
-/// closing a short) tolerates prices at or below the bound; the mirror
-/// directions tolerate prices at or above it.
-pub fn check_slippage(env: &Env, is_long: bool, opening: bool, price: i128, acceptable: i128) {
-    if acceptable == 0 {
-        return;
-    }
-    let bad = if opening {
-        if is_long {
-            price > acceptable
-        } else {
-            price < acceptable
-        }
-    } else if is_long {
-        price < acceptable
-    } else {
-        price > acceptable
-    };
-    if bad {
-        panic_with_error!(env, PositionManagerError::SlippageExceeded);
     }
 }
 

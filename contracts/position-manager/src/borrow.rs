@@ -55,16 +55,28 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, now: u64) {
 /// multiple of `1e10` and its square a multiple of `1e6` — so this function
 /// introduces no approximation at all.
 pub fn refresh_rate(env: &Env, ledger: &mut Ledger, physical_cash: i128) {
-    let config = storage::get_global_config(env);
     let equity = ledger.cash_lp_equity(env, physical_cash);
-    let utilization = math::utilization_bps(env, ledger.total_risk_units, equity);
+    ledger.current_borrow_rate = rate_at(env, ledger.total_risk_units, equity);
+}
+
+/// §6.14 — the curve itself, as a pure function of the risk units and cash
+/// LP equity it is measured at.
+///
+/// Split out of `refresh_rate` because §7.2's `projected_minimum_borrow`
+/// must quote the **post-settlement** rate: the position's borrow window
+/// opens after the health checks, and quoting it from the pre-action
+/// utilization would let a position be admitted exactly at initial margin
+/// and be below it the moment its window exists.
+pub fn rate_at(env: &Env, total_risk_units: i128, cash_lp_equity: i128) -> i128 {
+    let config = storage::get_global_config(env);
+    let utilization = math::utilization_bps(env, total_risk_units, cash_lp_equity);
     let u = math::mul_div_floor(env, utilization, INDEX_PRECISION, BPS);
     let variable_factor = math::mul_div_floor(env, u, u, INDEX_PRECISION);
-    ledger.current_borrow_rate = math::add(
+    math::add(
         env,
         math::mul(env, config.base_borrow_rate_bps_day, INDEX_PRECISION),
         math::mul(env, config.max_variable_borrow_bps_day, variable_factor),
-    );
+    )
 }
 
 /// §6.3 — what a position owes for its active borrow window.
@@ -139,21 +151,24 @@ pub fn initialize_window(env: &Env, ledger: &Ledger, position: &mut Position) {
     );
 }
 
-/// §7.2 / §7.8 — the minimum a position of `risk_units` would be quoted if
-/// its window opened at the current rate. Its caller is P6-10's admission
-/// preflight; nothing calls it until the two-phase lifecycle lands.
-#[allow(dead_code)]
+/// §7.2 / §7.8 — the monetary minimum `initialize_window` will quote for a
+/// window of `risk_units` opened at `rate`.
 ///
 /// Admission needs this before the window exists: the floor is part of
-/// pending borrow from the window's first second, so a position admitted
-/// exactly at initial margin would be below it the moment its window is
-/// quoted. Every input is known at preflight.
-pub fn projected_minimum(env: &Env, ledger: &Ledger, risk_units: i128) -> i128 {
+/// pending borrow from the window's first second (§2.9), so a position
+/// admitted exactly at initial margin would be below it the moment its
+/// window is quoted. Every input is known at preflight — the caller pairs
+/// it with `rate_at` evaluated on the projected post-settlement book.
+///
+/// The same expression as `initialize_window`'s, deliberately: if the two
+/// could disagree the preflight would be checking a different number from
+/// the one the position is charged.
+pub fn projected_minimum(env: &Env, rate: i128, risk_units: i128) -> i128 {
     let config = storage::get_global_config(env);
     math::mul_mul_div_ceil(
         env,
         risk_units,
-        ledger.current_borrow_rate,
+        rate,
         config.min_borrow_fee_seconds as i128,
         math::mul(env, INDEX_PRECISION, BPS * SECONDS_PER_DAY as i128),
     )

@@ -73,10 +73,13 @@ pub const ROLE_PAUSER: &str = "PAUSER";
 /// §12.3 `unpause_authority` — may clear `paused`. Unpausing re-admits risk,
 /// so it belongs with the slower authority alongside configuration.
 pub const ROLE_UNPAUSER: &str = "UNPAUSER";
-/// Whitelisted keeper bot network. §7.0 removes the allowlist from ADL and
-/// index checkpoints — both become permissionless — so this now covers only
-/// operations the specification still keeps permissioned.
-pub const ROLE_KEEPER: &str = "KEEPER";
+// There is deliberately no keeper role. §7.0 defines keeper authorization as
+// the caller authenticating the address that will receive the reward, and
+// nothing more: ADL is bounded by its state gate and a checkpoint pays no
+// reward and moves no value, so neither has anything for an allowlist to
+// protect. The last genuinely permissioned keeper operation was round
+// publication, and rounds went with the oracle.
+
 /// §12.3 `oracle_authority` — names the contract that supplies
 /// authenticated prices. Its own role because pointing the protocol at a
 /// different feed is neither a parameter change nor a safety action.

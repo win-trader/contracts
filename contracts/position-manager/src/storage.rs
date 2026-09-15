@@ -8,8 +8,7 @@
 
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
 use shared::{
-    EntryOrder, GlobalConfig, Market, PendingAction, PendingGlobalConfig, PendingMarketConfig,
-    Position,
+    GlobalConfig, Market, PendingAction, PendingGlobalConfig, PendingMarketConfig, Position,
 };
 use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol, Vec};
 
@@ -35,8 +34,6 @@ pub enum StorageKey {
     Position(u64),
     Market(Symbol),
     MarketDisabled(Symbol),
-    EntryOrder(u64),
-    NextEntryOrderId,
     /// §5.6 pending trader action. Persistent: it owns escrowed cash.
     PendingAction(u64),
     NextActionId,
@@ -82,46 +79,6 @@ pub fn save_position(env: &Env, position: &Position) {
 
 pub fn remove_position(env: &Env, id: u64) {
     env.storage().persistent().remove(&StorageKey::Position(id));
-}
-
-// ENTRY ORDER
-
-pub fn get_entry_order(env: &Env, id: u64) -> EntryOrder {
-    env.storage()
-        .persistent()
-        .get(&StorageKey::EntryOrder(id))
-        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::OrderNotFound))
-}
-
-pub fn save_entry_order(env: &Env, order: &EntryOrder) {
-    let key = StorageKey::EntryOrder(order.id);
-    env.storage().persistent().set(&key, order);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
-}
-
-pub fn remove_entry_order(env: &Env, id: u64) {
-    env.storage()
-        .persistent()
-        .remove(&StorageKey::EntryOrder(id));
-}
-
-pub fn get_next_entry_order_id(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&StorageKey::NextEntryOrderId)
-        .unwrap_or(1)
-}
-
-pub fn save_next_entry_order_id(env: &Env, id: u64) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::NextEntryOrderId, &id);
-}
-
-pub fn update_entry_order_id(env: &Env) {
-    save_next_entry_order_id(env, get_next_entry_order_id(env) + 1);
 }
 
 // REFERRAL
@@ -340,9 +297,6 @@ pub fn update_position_id(env: &Env) {
 }
 
 // PENDING ACTION (§5.6)
-//
-// The record and its verbs land here with the type; Phase 6 moves the
-// lifecycle onto them. Until then nothing calls these.
 
 #[allow(dead_code)]
 pub fn try_get_pending_action(env: &Env, id: u64) -> Option<PendingAction> {
@@ -351,13 +305,11 @@ pub fn try_get_pending_action(env: &Env, id: u64) -> Option<PendingAction> {
         .get(&StorageKey::PendingAction(id))
 }
 
-#[allow(dead_code)]
 pub fn get_pending_action(env: &Env, id: u64) -> PendingAction {
     try_get_pending_action(env, id)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::ActionNotFound))
 }
 
-#[allow(dead_code)]
 pub fn save_pending_action(env: &Env, action: &PendingAction) {
     let key = StorageKey::PendingAction(action.action_id);
     env.storage().persistent().set(&key, action);
@@ -368,14 +320,12 @@ pub fn save_pending_action(env: &Env, action: &PendingAction) {
 
 /// §8.13 — removal consumes the ID permanently. A later call with it fails
 /// as nonexistent and cannot replay the transfer or the keeper payment.
-#[allow(dead_code)]
 pub fn remove_pending_action(env: &Env, id: u64) {
     env.storage()
         .persistent()
         .remove(&StorageKey::PendingAction(id));
 }
 
-#[allow(dead_code)]
 pub fn get_next_action_id(env: &Env) -> u64 {
     env.storage()
         .instance()
@@ -384,7 +334,6 @@ pub fn get_next_action_id(env: &Env) -> u64 {
 }
 
 /// Reserve the next action ID. Monotonic and never reused (§5.6).
-#[allow(dead_code)]
 pub fn take_next_action_id(env: &Env) -> u64 {
     let id = get_next_action_id(env);
     env.storage()
@@ -413,21 +362,18 @@ pub fn clear_pending_global_config(env: &Env) {
         .remove(&StorageKey::PendingGlobalConfig);
 }
 
-#[allow(dead_code)]
 pub fn try_get_pending_market_config(env: &Env, market: &Symbol) -> Option<PendingMarketConfig> {
     env.storage()
         .instance()
         .get(&StorageKey::PendingMarketConfig(market.clone()))
 }
 
-#[allow(dead_code)]
 pub fn save_pending_market_config(env: &Env, market: &Symbol, pending: &PendingMarketConfig) {
     env.storage()
         .instance()
         .set(&StorageKey::PendingMarketConfig(market.clone()), pending);
 }
 
-#[allow(dead_code)]
 pub fn clear_pending_market_config(env: &Env, market: &Symbol) {
     env.storage()
         .instance()
@@ -447,27 +393,22 @@ fn extend(env: &Env, key: &StorageKey) {
         .extend_ttl(key, SHARED_THRESHOLD, SHARED_BUMP);
 }
 
-#[allow(dead_code)]
 pub fn bump_pending_action(env: &Env, id: u64) {
     extend(env, &StorageKey::PendingAction(id));
 }
 
-#[allow(dead_code)]
 pub fn bump_market(env: &Env, market: &Symbol) {
     extend(env, &StorageKey::Market(market.clone()));
 }
 
-#[allow(dead_code)]
 pub fn bump_referral_code(env: &Env, code: &Symbol) {
     extend(env, &StorageKey::ReferralCode(code.clone()));
 }
 
-#[allow(dead_code)]
 pub fn bump_referrer(env: &Env, trader: &Address) {
     extend(env, &StorageKey::Referrer(trader.clone()));
 }
 
-#[allow(dead_code)]
 pub fn bump_referral_balance(env: &Env, referrer: &Address) {
     extend(env, &StorageKey::ReferralBalance(referrer.clone()));
 }

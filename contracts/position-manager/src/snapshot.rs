@@ -52,11 +52,6 @@ pub fn read_stamped_price(env: &Env, symbol: &Symbol) -> StampedPrice {
     }
 }
 
-/// The price alone, for the paths that do not yet carry a cursor.
-pub fn authenticated_price(env: &Env, symbol: &Symbol) -> i128 {
-    read_stamped_price(env, symbol).price
-}
-
 /// Build the full accounting snapshot for one synchronized oracle round.
 ///
 /// With `mutate_risk` set (LP settlement path, §13.5/§13.6 step 3) each

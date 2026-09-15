@@ -17,8 +17,8 @@
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
 use crate::types::{
-    AccountingSnapshot, EntryOrder, EntryOrderParams, GlobalConfig, Market, MarketConfig,
-    PendingFeesView, Position,
+    AccountingSnapshot, ActionOutcome, GlobalConfig, Market, MarketConfig, OpenPayload,
+    PendingAction, PendingFeesView, Position,
 };
 
 #[contractclient(name = "PositionManagerClient")]
@@ -40,86 +40,130 @@ pub trait PositionManager {
     /// The external price feed currently in use.
     fn price_feed(env: Env) -> Address;
 
-    /// Open a leveraged position (§12.1). Transfers `collateral` from
-    /// `owner` — nothing is charged at open (§11.1) — and enforces the
-    /// initial margin, capacity, and market-side limits.
-    /// `acceptable_price` bounds the execution price (max for longs, min
-    /// for shorts; `0` = no bound). Returns the new position id.
-    #[allow(clippy::too_many_arguments)]
-    fn open_position(
+    // -----------------------------------------------------------------
+    // §7.1–7.6 Entries.
+    //
+    // Every price-sensitive trader action is two calls: a commitment that
+    // freezes the economic inputs and the observation cursor, and a
+    // settlement against a **strictly newer** observation. The settlement
+    // functions return an `ActionOutcome` rather than panicking on an
+    // expected business failure: a revert would undo the keeper payment and
+    // the escrow refund, and hand the trader a free retry after they have
+    // seen the price (§8.9).
+    // -----------------------------------------------------------------
+
+    /// §7.1 — commit a market open. Transfers `request.submitted_collateral`
+    /// into action escrow, records the commit observation, and reserves
+    /// nothing: no capacity, no price, no fee, no position. Binding — a
+    /// market entry has no cancel. Returns the action id.
+    fn create_market_open(env: Env, owner: Address, market: Symbol, request: OpenPayload) -> u64;
+
+    /// §7.3 — commit a limit open. As `create_market_open`, but bounded by
+    /// `max_order_lifetime_seconds`, requiring `trigger_price > 0`, and
+    /// freezing the trigger direction against the authenticated commit
+    /// price. Cancellable by the owner until expiry.
+    fn create_limit_open(
         env: Env,
         owner: Address,
         market: Symbol,
-        is_long: bool,
-        size: i128,
-        collateral: i128,
-        take_profit: i128,
-        stop_loss: i128,
-        acceptable_price: i128,
+        request: OpenPayload,
+        trigger_price: i128,
     ) -> u64;
 
-    /// Add size and/or collateral to an open position (§12.1). Capitalizes
-    /// all accrued fees first; added size is held to the initial margin and
-    /// must pass the same risk gates as an open.
-    fn increase_position(
+    /// §7.2 — settle a committed market open against a strictly newer
+    /// observation. The first eligible attempt is terminal: it either opens
+    /// the position or fails, pays `keeper_open_reward` from escrow, refunds
+    /// the remainder, and charges no opening fee.
+    fn settle_market_open(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
+
+    /// §7.4 — settle a committed limit open. An untriggered observation
+    /// returns `Pending` and does **not** consume the order; once triggered
+    /// the attempt is terminal and pays `keeper_limit_order_reward`.
+    fn settle_limit_open(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
+
+    /// §7.5 — owner cancellation of a pending limit entry before expiry.
+    /// Full refund, no fee, no keeper reward. Returns the refund.
+    fn cancel_limit_open(env: Env, action_id: u64) -> i128;
+
+    /// §7.6 — permissionless cleanup at or after an entry's expiry. Pays
+    /// `keeper_expiry_reward` from escrow and refunds the remainder. At
+    /// exactly `expires_at` execution is closed and only this succeeds.
+    fn clean_expired_entry(env: Env, keeper: Address, action_id: u64);
+
+    // -----------------------------------------------------------------
+    // §7.7–7.10 Position mutations.
+    // -----------------------------------------------------------------
+
+    /// §7.7 — add collateral immediately. It adds no price exposure, so it
+    /// needs no commitment: no fee, no reward, no baseline reset, and it
+    /// does **not** restart the minimum-lifetime clock. A liquidatable owner
+    /// may use it to rescue the position.
+    fn add_collateral(env: Env, position_id: u64, amount: i128);
+
+    /// §7.8 — commit an increase. Escrows `collateral_added`, rejects a dust
+    /// add against the commitment price, and occupies the position's one
+    /// pending-mutation slot. Returns the action id.
+    fn create_increase(
         env: Env,
         position_id: u64,
         size_added: i128,
         collateral_added: i128,
         acceptable_price: i128,
-    );
+    ) -> u64;
 
-    /// Remove size and/or withdraw collateral (§12.2). `size_removed` equal
-    /// to the position size is a full close and settles through the close
-    /// waterfall; a partial close capitalizes accrued fees and must leave
-    /// the position at or above maintenance margin. Rejected before
-    /// `min_position_lifetime` has elapsed since the last increase.
-    fn decrease_position(
-        env: Env,
-        position_id: u64,
-        size_removed: i128,
-        collateral_withdrawn: i128,
-        acceptable_price: i128,
-    );
-
-    /// Close a position whose effective collateral (including pending fees
-    /// and payable PnL) is below maintenance margin (§12.3). Open to any
-    /// authenticated caller. Pays no keeper reward until the fixed
-    /// `keeper_liquidation_reward` lands.
-    fn liquidate_position(env: Env, caller: Address, position_id: u64);
-
-    /// Close a profitable position on a side in the ADL or hard-cap state
-    /// (KEEPER, §14). Pays no keeper reward until the fixed
-    /// `keeper_adl_reward` lands.
-    fn deleverage_position(env: Env, caller: Address, position_id: u64);
-
-    /// Execute a triggered take-profit/stop-loss close (§12.4). Open to any
-    /// authenticated caller. Panics `InvalidOrder` if no trigger price is
-    /// crossed.
-    fn execute_order(env: Env, caller: Address, position_id: u64);
-
-    /// Set the conditional-order trigger prices (owner). `0` clears a
-    /// trigger; a nonzero trigger must be on the correct side of the
-    /// current price.
-    fn set_tp_sl(env: Env, position_id: u64, take_profit: i128, stop_loss: i128);
-
-    /// Place a limit/stop entry order (owner, §12.4). Storage-only — no
-    /// funds move; the owner must grant the vault a token allowance covering
-    /// `collateral` for the keeper to pull at fill. Returns the order id.
-    fn place_entry_order(env: Env, owner: Address, market: Symbol, params: EntryOrderParams)
+    /// §7.9 — commit a partial decrease of `size_removed`.
+    fn create_decrease(env: Env, position_id: u64, size_removed: i128, acceptable_price: i128)
         -> u64;
 
-    /// Fill an entry order whose trigger has crossed (any caller). Pulls the
-    /// collateral via the owner's allowance and opens the position as a
-    /// market order would. Removes the order if it is expired or unfundable;
-    /// reverts (order stays) if not yet triggered, slipped, or open-blocked.
-    fn execute_entry_order(env: Env, caller: Address, order_id: u64);
+    /// §7.10 — commit a full close. No size is stored: it always targets the
+    /// complete remaining exposure at settlement.
+    fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64;
 
-    /// Cancel a pending entry order (owner; permissionless once expired).
-    fn cancel_entry_order(env: Env, order_id: u64);
+    /// §7.8 — settle a committed increase.
+    fn settle_increase(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
 
-    /// Read a pending entry order (panics `OrderNotFound` if absent).
-    fn get_entry_order(env: Env, order_id: u64) -> EntryOrder;
+    /// §7.9 — settle a committed decrease.
+    fn settle_decrease(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
+
+    /// §7.10 — settle a committed close.
+    fn settle_close(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
+
+    // -----------------------------------------------------------------
+    // §7.11–7.14 Triggers and forced actions.
+    // -----------------------------------------------------------------
+
+    /// §7.11 — attach or replace a take-profit. Records a fresh commitment
+    /// cursor, so the instruction cannot execute on the observation that
+    /// armed it.
+    fn set_take_profit(env: Env, position_id: u64, trigger_price: i128, acceptable_price: i128);
+    fn clear_take_profit(env: Env, position_id: u64);
+    /// §7.12 — the stop-loss mirror.
+    fn set_stop_loss(env: Env, position_id: u64, trigger_price: i128, acceptable_price: i128);
+    fn clear_stop_loss(env: Env, position_id: u64);
+
+    /// §7.11 — execute a crossed take-profit. Closes the position in full
+    /// and pays only `keeper_tp_reward`. A crossed trigger whose exit bound
+    /// fails leaves the instruction attached and pays nothing (§8.7).
+    fn execute_take_profit(env: Env, keeper: Address, position_id: u64) -> ActionOutcome;
+
+    /// §7.12 — execute a crossed stop-loss. Pays only `keeper_sl_reward`.
+    fn execute_stop_loss(env: Env, keeper: Address, position_id: u64) -> ActionOutcome;
+
+    /// §7.13 — liquidate a position whose effective collateral has fallen to
+    /// its threshold. Permissionless. One snapshot serves eligibility and
+    /// settlement. Pays `keeper_liquidation_reward` from position value,
+    /// then LP residual for the gap, capped at what exists; no closing fee.
+    fn liquidate_position(env: Env, keeper: Address, position_id: u64);
+
+    /// §7.14 — deleverage one profitable position on a side the current book
+    /// puts in `ADL` or `HardCap`. Permissionless: the state gate bounds the
+    /// mechanism, not an allowlist. Fixed `keeper_adl_reward`, no closing
+    /// fee.
+    fn execute_adl(env: Env, keeper: Address, position_id: u64) -> ActionOutcome;
+
+    /// Read a pending action (panics `ActionNotFound` if absent or
+    /// consumed).
+    fn get_pending_action(env: Env, action_id: u64) -> PendingAction;
 
     /// Register a referral code (owner). First-come; the code owner is
     /// immutable, and one address may own several codes. Panics
@@ -147,8 +191,10 @@ pub trait PositionManager {
     fn referral_claimable_total(env: Env) -> i128;
 
     /// Checkpoint the global indices and one market's funding indices to
-    /// now (KEEPER, §10). Fee accrual is lazy; this bounds staleness.
-    fn update_indices(env: Env, caller: Address, market: Symbol);
+    /// now. Fee accrual is lazy; this bounds staleness. Permissionless
+    /// (§7.0): a checkpoint pays no reward and moves no value between
+    /// parties, so there is nothing for an allowlist to protect.
+    fn update_indices(env: Env, market: Symbol);
 
     /// Propose a global configuration change (configuration authority,
     /// §12.3). Validated immediately and stored with

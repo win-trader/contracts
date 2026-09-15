@@ -50,40 +50,6 @@ pub fn release_position(env: &Env, ledger: &mut Ledger) {
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::InvariantViolation));
 }
 
-/// §9.1 — the global capacity gate: new total risk must stay within the
-/// configured share of cash LP equity.
-pub fn enforce_capacity(env: &Env, ledger: &Ledger, physical_cash: i128, risk_after: i128) {
-    let config = storage::get_global_config(env);
-    let limit = math::mul_div_floor(
-        env,
-        ledger.cash_lp_equity(env, physical_cash),
-        config.risk_capacity_limit_bps as i128,
-        BPS,
-    );
-    if risk_after > limit {
-        panic_with_error!(env, PositionManagerError::CapacityExceeded);
-    }
-}
-
-/// §9.1 — hard per-side size and base-exposure caps.
-pub fn enforce_market_limits(env: &Env, market: &Market, is_long: bool) {
-    let side = market.side(is_long);
-    let (size_cap, base_cap) = if is_long {
-        (
-            market.config.max_long_size_open_interest,
-            market.config.max_long_base_exposure,
-        )
-    } else {
-        (
-            market.config.max_short_size_open_interest,
-            market.config.max_short_base_exposure,
-        )
-    };
-    if side.size_open_interest > size_cap || side.base_exposure > base_cap {
-        panic_with_error!(env, PositionManagerError::MarketLimitExceeded);
-    }
-}
-
 /// §12.3 — margin requirement for a position of `size` at `margin_bps`.
 pub fn margin_requirement(env: &Env, size: i128, margin_bps: u32) -> i128 {
     math::mul_div_ceil(env, size, margin_bps as i128, BPS)
@@ -97,19 +63,6 @@ pub fn maintenance_requirement(env: &Env, size: i128, config: &MarketConfig) -> 
 /// §12.3 — the margin a position of `size` needs to open or add risk.
 pub fn initial_requirement(env: &Env, size: i128, config: &MarketConfig) -> i128 {
     margin_requirement(env, size, config.initial_margin_bps)
-}
-
-/// §12.3 — the margin floor a position of `size` must clear after an
-/// action: anything that adds risk (new size, or a pure collateral
-/// withdrawal raising leverage) re-underwrites at the initial margin;
-/// pure de-risking (shrinking, or topping up collateral) needs only the
-/// maintenance floor.
-pub fn required_margin(env: &Env, size: i128, config: &MarketConfig, adds_risk: bool) -> i128 {
-    if adds_risk {
-        initial_requirement(env, size, config)
-    } else {
-        maintenance_requirement(env, size, config)
-    }
 }
 
 /// §6.5 — positive raw PnL after the side's **stored** payout factor, and
@@ -455,9 +408,10 @@ pub struct LiquidationAssessment {
     /// whether the close books bad debt.
     #[allow(dead_code)]
     pub insolvent: bool,
-    #[allow(dead_code)]
+    /// §7.0 reads both of these to size a failing mutation's keeper reward:
+    /// the headroom above the threshold is what the position can pay without
+    /// becoming liquidatable.
     pub effective_collateral: i128,
-    #[allow(dead_code)]
     pub threshold: i128,
     #[allow(dead_code)]
     pub payable_pnl: i128,
