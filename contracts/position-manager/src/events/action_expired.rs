@@ -1,9 +1,6 @@
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
-/// §7.6 — a keeper cleaned an entry at or after its expiry boundary. The
-/// expiry reward comes out of escrow and the remainder goes back to the
-/// owner frozen in the action.
 #[contractevent(topics = ["actexpire"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionExpired {

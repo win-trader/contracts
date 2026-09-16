@@ -14,7 +14,6 @@ pub struct PositionOpened {
     pub base_exposure: i128,
     pub stored_collateral: i128,
     pub price: i128,
-    /// Zero means no trigger set.
     pub take_profit: i128,
     pub stop_loss: i128,
 }

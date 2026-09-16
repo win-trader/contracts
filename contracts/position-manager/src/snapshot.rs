@@ -1,18 +1,3 @@
-//! Accounting snapshot, marked NAV, and the external price read.
-//!
-//! The protocol owns no oracle. Prices come from a third-party feed through
-//! `read_stamped_price`; aggregation across sources is the provider's
-//! concern, and what stays here is the staleness bound and the
-//! non-positive-price rejection.
-//!
-//! NAV recognition (§2.3): trader profit in full, trader loss not at all.
-//! Marked NAV is `max(cash_lp_equity - Σ max(raw_side_pnl, 0), 0)`, so LP
-//! share price understates while traders are collectively winning-on-paper
-//! and steps up only as losses are actually realized. That asymmetry is the
-//! point: an LP never buys in against a loss the vault has not collected.
-//! The loop is over the bounded active-market registry — never over
-//! positions (§17).
-
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::{BPS, PRICE_PRECISION};
@@ -23,34 +8,18 @@ use crate::ledger::Ledger;
 use crate::risk;
 use crate::{math, storage};
 
-/// Read `symbol`'s price from the external feed, with its observation
-/// cursor (§7.0).
-///
-/// Two checks are this protocol's own and stay here. The feed decides what
-/// the price *is*; only this protocol can decide how old a price may be
-/// before an action refuses it, and that a non-positive price is never a
-/// price.
-///
-/// The staleness bound is the one parameter that silently widens the window
-/// a trader commits against, which is why it is a governed §10 value rather
-/// than a constant.
 pub fn read_stamped_price(env: &Env, symbol: &Symbol) -> StampedPrice {
     let feed = storage::get_price_feed(env);
-    // §12.5 — the feed is the one counterparty whose error codes this
-    // protocol does not control. After P9-01 every contract here numbers in
-    // a disjoint range, so a propagated code is unambiguous; a third-party
-    // feed numbering from `1` could return something that reads exactly like
-    // a native position-manager code. Its failures are caught and re-raised
-    // as this contract's own.
     let data = match PriceFeedClient::new(env, &feed).try_lastprice(symbol) {
         Ok(Ok(Some(data))) => data,
         _ => panic_with_error!(env, PositionManagerError::PriceUnavailable),
     };
-    if data.price <= 0 {
+    let now = env.ledger().timestamp();
+    if data.price <= 0 || data.timestamp > now {
         panic_with_error!(env, PositionManagerError::PriceUnavailable);
     }
     let max_age = storage::get_global_config(env).max_price_age_seconds;
-    if env.ledger().timestamp() > data.timestamp.saturating_add(max_age) {
+    if now > data.timestamp.saturating_add(max_age) {
         panic_with_error!(env, PositionManagerError::StalePrice);
     }
     StampedPrice {
@@ -59,13 +28,6 @@ pub fn read_stamped_price(env: &Env, symbol: &Symbol) -> StampedPrice {
     }
 }
 
-/// Build the full accounting snapshot for one synchronized oracle round.
-///
-/// With `mutate_risk` set (LP settlement path, §13.5/§13.6 step 3) each
-/// market's risk states are transitioned and persisted; otherwise the states
-/// are evaluated hypothetically and only reported. The reported
-/// `restricted_side_count` is always the fresh evaluation, not the stored
-/// counter.
 pub fn build_snapshot(
     env: &Env,
     ledger: &mut Ledger,
@@ -80,22 +42,14 @@ pub fn build_snapshot(
     let mut aggregate_pnl_numerator = 0i128;
     let mut restricted_side_count = 0u32;
     let mut deleveraging_side_count = 0u32;
+    let mut min_equity_clear_of_adl = 0i128;
 
     let mut i = 0u32;
     while i < markets.len() {
         let symbol = markets.get(i).unwrap();
-        // Read inside the loop, inside one transaction: every market is
-        // priced at the same ledger timestamp, which is the synchronized
-        // snapshot LP accounting needs. `max_active_markets` is what keeps
-        // the read count bounded.
         let price = read_stamped_price(env, &symbol).price;
         let mut market = storage::get_market(env, &symbol);
 
-        // §7.2 raw side PnL numerators (one extra PRICE_PRECISION factor),
-        // §2.3 recognition: `max(raw_side_pnl, 0)` per side. Unrealized
-        // trader loss is not recognized at all — it is not cash the vault
-        // holds, and marking it would let an LP deposit buy into profit
-        // that has not been collected.
         let long_num = math::sub(
             env,
             math::mul(env, market.long.base_exposure, price),
@@ -116,8 +70,6 @@ pub fn build_snapshot(
             ),
         );
 
-        // One pure assessment serves both modes: the LP settlement path
-        // persists it, the reporting path only counts it.
         let assessment = risk::assess(env, &market, price, equity);
         if mutate_risk {
             risk::apply(env, ledger, &symbol, actor, &mut market, &assessment);
@@ -125,11 +77,15 @@ pub fn build_snapshot(
         }
         restricted_side_count += assessment.restricted_sides();
         deleveraging_side_count += assessment.deleveraging_sides();
+        for side_pnl in [assessment.long.positive_pnl, assessment.short.positive_pnl] {
+            min_equity_clear_of_adl = core::cmp::max(
+                min_equity_clear_of_adl,
+                equity_clear_of_adl(env, side_pnl, market.config.adl_pnl_factor_bps),
+            );
+        }
         i += 1;
     }
 
-    // §2.3 marked NAV = max(cash LP equity − recognized trader profit, 0),
-    // converted to cash exactly once.
     let nav_num = math::sub(
         env,
         math::mul(env, equity, PRICE_PRECISION),
@@ -166,5 +122,17 @@ pub fn build_snapshot(
         open_position_count: ledger.open_position_count,
         restricted_side_count,
         deleveraging_side_count,
+        min_equity_clear_of_adl,
     }
+}
+
+fn equity_clear_of_adl(env: &Env, positive_pnl: i128, adl_pnl_factor_bps: u32) -> i128 {
+    if positive_pnl <= 0 {
+        return 0;
+    }
+    math::add(
+        env,
+        math::mul_div_floor(env, positive_pnl, BPS, adl_pnl_factor_bps as i128),
+        1,
+    )
 }

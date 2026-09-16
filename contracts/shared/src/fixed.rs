@@ -1,30 +1,8 @@
-//! Fixed-point transcendental primitives — §2.1.2 and §2.1.3.
-//!
-//! Funding integration needs `2^-x`; locating a funding sign change needs
-//! `log2`. Both are evaluated at `INDEX_PRECISION` and both are fully
-//! deterministic. Nothing else in the protocol needs a transcendental — the
-//! borrow curve is a plain square (§6.14), so there is no `pow` and `log2`
-//! is called once per funding window rather than on every action that moves
-//! the borrow rate.
-//!
-//! Every rounding here truncates, so the error is one-directional and a
-//! decay factor is never overstated. Each of the at most 48 multiplications
-//! truncates by less than one unit in `1e14`, so the accumulated relative
-//! error stays below `48 / 1e14` — comfortably inside `DECAY_TOLERANCE`.
-
 use soroban_sdk::Env;
 
 use crate::constants::INDEX_PRECISION;
 use crate::math;
 
-/// §2.1.3 — `floor(INDEX_PRECISION * 2^(-2^-i))` for `i = 1..=48`, indexed
-/// from zero here so `HALF_POW[i - 1]` is the spec's `HALF_POW[i]`.
-///
-/// This is **reference data, not a derivation to redo at a different
-/// precision**. Entries 46 through 48 are identical because `ln(2) / 2^i`
-/// drops below one unit in `1e14` at `i = 47`; they are kept so the loop
-/// bound matches the 46.5 bits of fraction `INDEX_PRECISION` can represent,
-/// and so the table is indexable without a special case.
 pub const HALF_POW: [i128; 48] = [
     70_710_678_118_654,
     84_089_641_525_371,
@@ -76,29 +54,10 @@ pub const HALF_POW: [i128; 48] = [
     99_999_999_999_999,
 ];
 
-/// §2.1.2 — `ln(2) * INDEX_PRECISION`, truncated. Required by the §4.6
-/// window integral. Replaces the `1/ln 2` ratio the superseded closed form
-/// carried.
 pub const LN2: i128 = 69_314_718_055_994;
 
-/// §2.1.2 — the declared accuracy bound for the decay primitives, as a
-/// relative error: `1e-12`. Expressed as a reciprocal because the contract
-/// does no floating point. Used by QA, never by the contract itself.
 pub const DECAY_TOLERANCE_RECIPROCAL: i128 = 1_000_000_000_000;
 
-/// §2.1.2 — `2^-x` for `x >= 0`, with `x` and the result scaled by
-/// `INDEX_PRECISION`. `None` for a negative `x` or on an arithmetic failure.
-///
-/// `x` splits into a whole part `n` and a fractional part `f`, where `f` is
-/// an `INDEX_PRECISION`-scaled integer representing the fraction `f / 1e14`
-/// in `[0, 1)`. The binary digits of *that fraction* — not bits of the
-/// integer `f` — come out by repeated doubling, and each set digit folds in
-/// one `HALF_POW` entry.
-///
-/// **The shift is applied last**, after the fractional product, so the
-/// multiplications keep full precision and only one truncation is taken at
-/// the end. Shifting first would discard `n` bits of the mantissa before any
-/// of them were used.
 pub fn exp2_neg(env: &Env, x: i128) -> Option<i128> {
     if x < 0 {
         return None;
@@ -121,14 +80,6 @@ pub fn exp2_neg(env: &Env, x: i128) -> Option<i128> {
     Some(result >> (n as u32))
 }
 
-/// §2.1.2 — `log2(y)` at `INDEX_PRECISION` for `y >= INDEX_PRECISION`, by
-/// the mirror construction to `exp2_neg`: the integer part from the bit
-/// length, then one fraction bit at a time by repeated squaring of the
-/// normalized mantissa, for 48 iterations. `None` below the domain.
-///
-/// One caller: locating the funding sign change `t_star` in §6.2.1. This is
-/// a different function from the deleted `neg_log2`, with a different
-/// domain; the borrow curve no longer needs a logarithm at all.
 pub fn log2(env: &Env, y: i128) -> Option<i128> {
     if y < INDEX_PRECISION {
         return None;
@@ -147,18 +98,6 @@ pub fn log2(env: &Env, y: i128) -> Option<i128> {
     Some(result)
 }
 
-// ---------------------------------------------------------------------------
-// §2.1.3 conformance vectors.
-//
-// These are the output of the algorithms exactly as specified, not the
-// mathematically exact values. Where they differ the truncating algorithm is
-// normative and an implementation must reproduce these integers bit for bit.
-// They live here as data so the QA phase asserts them without re-deriving
-// them at a different precision.
-// ---------------------------------------------------------------------------
-
-/// `(x, exp2_neg(x))`. The `0.5` and `3.25` rows happen to agree with the
-/// exact values to all 14 places; the others do not, and that is expected.
 pub const EXP2_NEG_VECTORS: [(i128, i128); 7] = [
     (0, 100_000_000_000_000),
     (50_000_000_000_000, 70_710_678_118_654),
@@ -169,9 +108,6 @@ pub const EXP2_NEG_VECTORS: [(i128, i128); 7] = [
     (12_700_000_000_000_000, 0),
 ];
 
-/// `(y, log2(y))`. `log2(3)` is expected to return `158_496_250_072_105`
-/// against an exact `158_496_250_072_115` — low by ten units in `1.6e14`, or
-/// `6e-14` relative, inside `DECAY_TOLERANCE` and in the safe direction.
 pub const LOG2_VECTORS: [(i128, i128); 6] = [
     (100_000_000_000_000, 0),
     (200_000_000_000_000, 100_000_000_000_000),
@@ -181,11 +117,6 @@ pub const LOG2_VECTORS: [(i128, i128); 6] = [
     (1_000_000_000_000_000, 332_192_809_488_729),
 ];
 
-/// `(utilization_bps, u, u_squared, current_borrow_rate)` for the §6.14
-/// curve at the initial rate parameters (base 25, max variable 250 bps/day).
-/// Every entry is exact: `u` is a multiple of `1e10` and its square a
-/// multiple of `1e6`, so the division by `INDEX_PRECISION` has no remainder
-/// at any reachable utilization. A test may assert these exactly.
 pub const BORROW_CURVE_VECTORS: [(i128, i128, i128, i128); 6] = [
     (0, 0, 0, 2_500_000_000_000_000),
     (2_500, 25_000_000_000_000, 6_250_000_000_000, 4_062_500_000_000_000),
@@ -224,7 +155,6 @@ mod tests {
         }
     }
 
-    /// §2.1.2 property 1, which an implementation "must test directly".
     #[test]
     fn exp2_neg_is_monotonically_non_increasing_and_exact_at_zero() {
         let e = env();
@@ -265,12 +195,6 @@ mod tests {
         }
     }
 
-    /// `HALF_POW[1]` squared is 1/2 and every later entry squared is its
-    /// predecessor — up to the truncation each entry carries. The deviation
-    /// is asserted as a *signed* band `[-2, 0]`, not an absolute tolerance:
-    /// flooring can only understate a decay factor, so a positive deviation
-    /// anywhere would mean an entry was rounded rather than truncated, which
-    /// is the exact defect the superseded rounded table had.
     #[test]
     fn the_table_telescopes_and_never_overstates_a_decay() {
         let e = env();
@@ -291,9 +215,6 @@ mod tests {
 
     #[test]
     fn every_table_entry_truncates_rather_than_rounds() {
-        // The superseded table rounded to nearest and its last entry was
-        // exactly INDEX_PRECISION — a no-op multiply that contributed
-        // nothing. Every entry here is strictly below INDEX_PRECISION.
         for (i, entry) in HALF_POW.iter().enumerate() {
             assert!(*entry < INDEX_PRECISION, "entry {} is not a decay", i + 1);
             assert!(*entry > 0);

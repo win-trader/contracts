@@ -14,10 +14,7 @@ pub struct PositionIncreased {
     pub base_added: i128,
     pub collateral_added: i128,
     pub price: i128,
-    /// Stored collateral after capitalization.
     pub stored_collateral: i128,
-    /// Accrued amounts the increase capitalized before adding new size —
-    /// the same decomposition the decrease/close events carry.
     pub receiver_funding_paid: i128,
     pub lp_funding_paid: i128,
     pub borrow_paid: i128,

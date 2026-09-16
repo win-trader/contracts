@@ -1,4 +1,4 @@
-use shared::constants::{BPS, ROLE_ADMIN, ROLE_PAUSER, ROLE_UPGRADER};
+use shared::constants::{BPS, ROLE_ADMIN, ROLE_PAUSER, ROLE_UNPAUSER, ROLE_UPGRADER};
 use shared::{
     AccountingSnapshot, ConfigManagerClient, LpConfig, MigrationData,
     PositionManagerClient, SettlementResult, SettlementStatus, TimelockedUpgradeable,
@@ -17,21 +17,10 @@ use stellar_tokens::{
 use crate::errors::VaultError;
 use crate::{events, storage};
 
-/// §7.17's conversion offsets. Minting divides by `marked_vault_nav + 1`:
-/// as NAV falls toward zero with shares still outstanding that denominator
-/// collapses, and a deposit of any size would mint an unbounded number of
-/// shares. The offsets keep the arithmetic **defined**, not fair — the
-/// `min_deposit_nav_factor_bps` gate is what keeps it away from that regime.
 const NAV_OFFSET: i128 = 1;
 const SHARE_OFFSET: i128 = shared::constants::SHARE_SCALE;
 
-/// §12.1 — the collateral token's decimals are part of the trust boundary.
-/// Every cash amount in the specification is stated at `PRICE_PRECISION` and
-/// compared directly against the token balance, and §2.2 forbids a second
-/// authoritative cash counter, which is what a conversion factor would
-/// amount to.
 const REQUIRED_ASSET_DECIMALS: u32 = shared::constants::PRICE_DECIMALS;
-/// §12.1 — `7` collateral decimals plus the six-decimal share offset.
 const REQUIRED_SHARE_DECIMALS: u32 = REQUIRED_ASSET_DECIMALS + 6;
 
 #[contract]
@@ -61,9 +50,6 @@ fn require_router(env: &Env, caller: &Address) {
     shared::bump_instance_ttl(env);
 }
 
-/// §10.3.1's three LP rules, checked together. The delay's upper bound is
-/// this implementation's own: an LP request may not outlive the storage
-/// entry that holds it.
 fn validate_config(env: &Env, config: &LpConfig) {
     if config.max_withdraw_utilization_bps > BPS as u32
         || config.min_deposit_nav_factor_bps > BPS as u32
@@ -96,9 +82,6 @@ fn transfer_asset(env: &Env, from: &Address, to: &Address, amount: i128) {
     TokenClient::new(env, &asset(env)).transfer(from, to, &amount);
 }
 
-/// The position manager prices every active market from the external feed
-/// inside this call, so the snapshot is synchronized by virtue of being one
-/// transaction rather than by a separately published round.
 fn snapshot(env: &Env, mutating: bool) -> AccountingSnapshot {
     let physical = cash(env);
     let pm = PositionManagerClient::new(env, &storage::position_manager(env));
@@ -109,22 +92,26 @@ fn snapshot(env: &Env, mutating: bool) -> AccountingSnapshot {
     }
 }
 
-/// §7.17 — the shared prefix of both gates: the vault must not be short of
-/// its own claims. A shortfall means physical cash no longer covers what has
-/// already been promised, and neither minting against it nor paying out of
-/// it is defensible until it is cured.
 fn vault_is_short(s: &AccountingSnapshot) -> bool {
     s.cash_shortfall > 0
 }
 
-/// §5.10 `keeper_lp_resolve_reward`, read from the position manager's live
-/// configuration rather than cached here: §5.10 owns every reward, and a
-/// second copy would be a second thing to keep in step.
 fn lp_resolve_reward(env: &Env) -> i128 {
     PositionManagerClient::new(env, &storage::position_manager(env))
         .global_config()
         .keeper_rewards
         .lp_resolve
+}
+
+fn lp_paused(env: &Env) -> bool {
+    storage::get::<bool>(env, &storage::Key::Paused).unwrap_or(false)
+        || PositionManagerClient::new(env, &storage::position_manager(env)).is_paused()
+}
+
+fn config_timelock_seconds(env: &Env) -> u64 {
+    PositionManagerClient::new(env, &storage::position_manager(env))
+        .global_config()
+        .config_timelock_seconds
 }
 
 fn failed(env: &Env) -> SettlementResult {
@@ -165,9 +152,6 @@ impl VaultContract {
         validate_config(&env, &lp_config);
         Vault::set_asset(&env, asset_address);
         Vault::set_decimals_offset(&env, 6);
-        // §12.1 — checked at the moment the token is wired rather than
-        // discovered at the first deposit. A token with different decimals
-        // would make every claim wrong by a power of ten.
         if TokenClient::new(&env, &asset(&env)).decimals() != REQUIRED_ASSET_DECIMALS
             || Vault::decimals(&env) != REQUIRED_SHARE_DECIMALS
         {
@@ -206,20 +190,6 @@ impl VaultInterface for VaultContract {
         transfer_asset(&env, &from, &env.current_contract_address(), amount);
     }
 
-    fn pull_from_allowance(env: Env, caller: Address, from: Address, amount: i128) -> bool {
-        require_pm(&env, &caller);
-        if amount <= 0 {
-            panic_with_error!(&env, VaultError::InvalidAmount);
-        }
-        // The vault is the approved spender; `try_transfer_from` catches a
-        // revoked/expired allowance or insufficient balance into `Err` so
-        // the caller can drop the order without reverting.
-        let current = env.current_contract_address();
-        TokenClient::new(&env, &asset(&env))
-            .try_transfer_from(&current, &from, &current, &amount)
-            .is_ok()
-    }
-
     fn transfer_claim(
         env: Env,
         caller: Address,
@@ -254,28 +224,15 @@ impl VaultInterface for VaultContract {
         if assets <= 0 {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
-        if storage::get::<bool>(&env, &storage::Key::Paused).unwrap_or(false) {
-            return failed(&env);
+        if lp_paused(&env) {
+            panic_with_error!(&env, VaultError::Paused);
         }
         let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
 
-        // §7.17 `deposit_eligible`, and nothing else. It is a guard on the
-        // conversion arithmetic, not a judgement about market conditions:
-        // the depositor is already protected because marked NAV deducts
-        // recognized trader profit before conversion, so depositing into a
-        // vault under stress is priced rather than subsidized.
-        //
-        // A deposit is deliberately **not** gated on side risk state. It
-        // adds LP equity and therefore lowers every side's PnL factor, which
-        // is the direction the vault wants in exactly the conditions that
-        // would make such a gate bind.
         let eligible = if supply == 0 {
-            // No holders to dilute.
             true
         } else if s.cash_lp_equity == 0 {
-            // Shares outstanding against no cash equity. Recapitalization is
-            // governance's job (§15.2); this operation is not the path.
             false
         } else {
             mul_div_floor(&env, s.vault_nav, BPS, s.cash_lp_equity)
@@ -310,9 +267,6 @@ impl VaultInterface for VaultContract {
         SettlementResult {
             status: SettlementStatus::Settled,
             amount: shares,
-            // The router pays a deposit's reward out of its own asset
-            // escrow, before conversion, so no share is minted against value
-            // that went to the executor. It reports it, not the vault.
             reward: 0,
         }
     }
@@ -328,8 +282,8 @@ impl VaultInterface for VaultContract {
         if shares <= 0 || Base::balance(&env, &caller) < shares {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
-        if storage::get::<bool>(&env, &storage::Key::Paused).unwrap_or(false) {
-            return failed(&env);
+        if lp_paused(&env) {
+            panic_with_error!(&env, VaultError::Paused);
         }
         let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
@@ -339,9 +293,6 @@ impl VaultInterface for VaultContract {
             s.vault_nav + NAV_OFFSET,
             supply + SHARE_OFFSET,
         );
-        // §7.17 — in a clean terminal vault the final LP takes all residual
-        // cash LP equity, so conversion rounding cannot strand ownerless
-        // assets behind a supply of zero.
         let empties_supply = shares == supply;
         let clean_terminal = empties_supply
             && s.open_position_count == 0
@@ -360,26 +311,17 @@ impl VaultInterface for VaultContract {
             mul_div_ceil(&env, s.total_risk_units, BPS, post_equity)
         };
         let config = storage::lp_config(&env);
-        // A withdrawal removes LP equity, and LP equity is the denominator
-        // of every side's PnL factor, so paying one out pushes every side
-        // closer to restriction. `Warning` does not block it (§6.16.1); a
-        // side actually in `ADL` or `HardCap` does.
         if vault_is_short(&s)
             || s.deleveraging_side_count > 0
+            // The payout itself must not push a side into ADL or HardCap.
+            || post_equity < s.min_equity_clear_of_adl
             || assets > s.free_lp_capital
             || post_util > config.max_withdraw_utilization_bps as i128
-            // Burning the last share while the vault still owes anything
-            // would leave those claims with no equity behind them.
             || (empties_supply && !clean_terminal)
         {
             return failed(&env);
         }
 
-        // §7.17 — the reward comes out of the assets this withdrawal
-        // releases, after every capacity and health check has been satisfied
-        // on the full amount. A withdrawal worth less than the reward pays
-        // the executor everything it releases; it is never topped up from LP
-        // equity.
         let reward = core::cmp::min(lp_resolve_reward(&env), assets);
         let to_owner = assets - reward;
 
@@ -389,7 +331,8 @@ impl VaultInterface for VaultContract {
             transfer_asset(&env, &current, &executor, reward);
         }
         if to_owner > 0 {
-            transfer_asset(&env, &current, &owner, to_owner);
+            // Via the router, which delivers or holds it for the owner.
+            transfer_asset(&env, &current, &caller, to_owner);
         }
         let new_cash = cash(&env);
         PositionManagerClient::new(&env, &storage::position_manager(&env))
@@ -424,10 +367,16 @@ impl VaultInterface for VaultContract {
         storage::lp_config(&env)
     }
 
+    fn config_timelock_seconds(env: Env) -> u64 {
+        config_timelock_seconds(&env)
+    }
+
     fn can_create_lp_request(env: Env) -> bool {
-        let physical = cash(&env);
-        PositionManagerClient::new(&env, &storage::position_manager(&env))
-            .can_create_lp_request(&env.current_contract_address(), &physical)
+        !lp_paused(&env)
+    }
+
+    fn lp_paused(env: Env) -> bool {
+        lp_paused(&env)
     }
 
     fn accounting_snapshot(env: Env) -> AccountingSnapshot {
@@ -453,7 +402,7 @@ impl VaultInterface for VaultContract {
     }
 
     fn unpause(env: Env, caller: Address) {
-        require_role(&env, &caller, ROLE_PAUSER);
+        require_role(&env, &caller, ROLE_UNPAUSER);
         storage::set(&env, &storage::Key::Paused, &false);
         events::PauseChanged { paused: false }.publish(&env);
     }
@@ -496,7 +445,9 @@ impl TimelockedUpgradeable for VaultContract {
         require_role(env, caller, ROLE_PAUSER);
     }
     fn _timelock_seconds(env: &Env) -> u64 {
-        ConfigManagerClient::new(env, &storage::config_manager(env)).get_upgrade_timelock()
+        let upgrade =
+            ConfigManagerClient::new(env, &storage::config_manager(env)).get_upgrade_timelock();
+        core::cmp::max(upgrade, config_timelock_seconds(env))
     }
     fn _panic_with_upgrade_error(env: &Env, failure: UpgradeFailure) -> ! {
         match failure {

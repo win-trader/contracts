@@ -1,10 +1,6 @@
 use super::{EventHeader, FeeSource};
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
-/// A collected fee split into its revenue shares. `lp_share` stays in the
-/// vault as LP cash; the others accrue to their claim totals. `referral` is
-/// carved from the protocol slice (only nonzero on a referred closing fee);
-/// `lp + protocol + referral == collected`.
 #[contractevent(topics = ["revsplit"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevenueSplit {

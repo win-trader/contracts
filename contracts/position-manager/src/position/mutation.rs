@@ -1,18 +1,3 @@
-//! §7.7–7.10 — position mutations: add collateral, increase, decrease,
-//! close.
-//!
-//! `add_collateral` is immediate. The other three are commit-then-settle,
-//! and a position holds at most one of them at a time (§8.4): creation fails
-//! while `pending_mutation_action_id` is occupied, so two commitments can
-//! never assume the same starting size, collateral, and debt baselines.
-//!
-//! Every settlement here runs a complete preflight against the hypothetical
-//! post-settlement state and *returns* a failure reason rather than
-//! reverting. The preflight is not defensive duplication: it is what turns
-//! §6.10's and §6.13's `require`s — which would revert, preserve the action,
-//! and hand the trader a free retry — into terminal outcomes that pay the
-//! keeper and consume the commitment.
-
 use soroban_sdk::{panic_with_error, Address, Env};
 
 use shared::constants::{BPS, PRICE_PRECISION};
@@ -30,21 +15,6 @@ use crate::risk::LiquidationAssessment;
 use crate::settle::{self, ClosingFee};
 use crate::{action, borrow, fees, funding, keeper, math, risk, snapshot, storage};
 
-// ---------------------------------------------------------------------------
-// §7.7 Add collateral — the one position mutation that needs no commitment.
-// ---------------------------------------------------------------------------
-
-/// §7.7 — add collateral immediately.
-///
-/// It adds no price exposure and so cannot exploit a stale execution price,
-/// which is the entire reason the two-phase lifecycle exists. It charges no
-/// fee or reward, settles nothing, resets no baseline, does not touch
-/// `stored_minimum_borrow_fee`, and does **not** restart the
-/// minimum-position-lifetime clock — a top-up is not a size increase.
-///
-/// A liquidatable owner may use this to rescue the position before a
-/// liquidation transaction succeeds. That is deliberate: refusing a rescue
-/// would only convert a recoverable position into bad debt.
 pub fn add_collateral(env: Env, position_id: u64, amount: i128) {
     require_initialized(&env);
     let mut position = storage::get_position(&env, position_id);
@@ -56,8 +26,6 @@ pub fn add_collateral(env: Env, position_id: u64, amount: i128) {
     let mut ledger = storage::get_ledger(&env);
     let mut market = storage::get_market(&env, &position.market);
     let now = env.ledger().timestamp();
-    // The checkpoints run so health is reported against one consistent
-    // timestamp, not because this action settles anything.
     let actor = position.owner.clone();
     borrow::accrue(&env, &mut ledger, Some(&actor), now);
     funding::accrue(
@@ -80,21 +48,12 @@ pub fn add_collateral(env: Env, position_id: u64, amount: i128) {
     );
 
     storage::save_market(&env, &position.market, &market);
-    // Physical cash and the position claim rise by the same amount, so cash
-    // LP equity and the rate ordinarily do not move; the refresh is the
-    // §4.9 order rather than an expectation of change.
     borrow::refresh_rate(&env, &mut ledger, ledger::physical_cash(&env));
     storage::save_position(&env, &position);
     storage::save_ledger(&env, &ledger);
     events::emit_collateral_added(&env, &position, amount);
 }
 
-// ---------------------------------------------------------------------------
-// Creation (§7.8, §7.9, §7.10).
-// ---------------------------------------------------------------------------
-
-/// The common creation steps: authorize, claim the position's one mutation
-/// slot, freeze the commitment cursor, escrow any added cash, and store.
 fn commit(
     env: &Env,
     position: &mut Position,
@@ -133,18 +92,10 @@ fn commit(
     action.action_id
 }
 
-/// Load the position, its market, and the commitment observation, and claim
-/// the position's one mutation slot.
-///
-/// One feed read and one market read per creation: the cursor stored in the
-/// action and any price the caller validates against are then guaranteed to
-/// be the same observation.
 fn claim_slot(env: &Env, position_id: u64) -> (Position, Market, StampedPrice) {
     require_initialized(env);
     let position = storage::get_position(env, position_id);
     position.owner.require_auth();
-    // §8.4 — at most one ordinary pending mutation. The slot is cleared only
-    // by execution, terminal failure, or forced-position cleanup.
     if position.pending_mutation_action_id.is_some() {
         panic_with_error!(env, PositionManagerError::MutationPending);
     }
@@ -153,18 +104,6 @@ fn claim_slot(env: &Env, position_id: u64) -> (Position, Market, StampedPrice) {
     (position, market, commit_price)
 }
 
-/// §7.8 — commit an increase.
-///
-/// The two dust checks run **here**, against the commitment price, and that
-/// placement is the point of them. `derive_added_exposure` requires positive
-/// added base and positive added risk, and those are `require`s: failing one
-/// at settlement reverts, and a position mutation has neither a cancel
-/// operation nor an expiry. A size add of one unit on a market priced in the
-/// tens of thousands would therefore occupy the position's one mutation slot
-/// permanently, leaving it with no increase, decrease, or close for the rest
-/// of its life — only an attached trigger or liquidation could still exit
-/// it. Rejecting at creation is what makes those requires unreachable rather
-/// than merely defensive.
 pub fn create_increase(
     env: Env,
     position_id: u64,
@@ -176,11 +115,6 @@ pub fn create_increase(
     if size_added <= 0 || collateral_added < 0 || acceptable_price < 0 {
         panic_with_error!(&env, PositionManagerError::InvalidAmount);
     }
-    // §12.2 — an increase adds exposure, so a pause closes its *creation*
-    // too, not just its settlement. §9.11's drain rule is about a commitment
-    // made before the pause; letting new ones be made during one would only
-    // queue actions that are certain to fail, each costing the trader a
-    // keeper reward for the privilege.
     if storage::is_paused(&env) {
         panic_with_error!(&env, PositionManagerError::Paused);
     }
@@ -214,8 +148,6 @@ pub fn create_increase(
     )
 }
 
-/// §7.9 — commit a partial decrease. A decrease carries no escrow: its
-/// payment source is the position that already exists.
 pub fn create_decrease(
     env: Env,
     position_id: u64,
@@ -224,6 +156,11 @@ pub fn create_decrease(
 ) -> u64 {
     let (mut position, market, commit_price) = claim_slot(&env, position_id);
     if size_removed <= 0 || size_removed >= position.size || acceptable_price < 0 {
+        panic_with_error!(&env, PositionManagerError::InvalidAmount);
+    }
+    // A survivor must keep positive base and risk units.
+    let removed = settle::removed_exposure(&env, &position, size_removed, &market.config);
+    if removed.base_after <= 0 || removed.risk_after <= 0 {
         panic_with_error!(&env, PositionManagerError::InvalidAmount);
     }
     let payload = ActionPayload::Decrease(DecreasePayload {
@@ -242,9 +179,6 @@ pub fn create_decrease(
     )
 }
 
-/// §7.10 — commit a full close. No size is stored: it always targets the
-/// complete remaining exposure as it stands at settlement, so an increase
-/// that lands in between is closed too.
 pub fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64 {
     let (mut position, market, commit_price) = claim_slot(&env, position_id);
     if acceptable_price < 0 {
@@ -265,14 +199,6 @@ pub fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64 {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Settlement.
-// ---------------------------------------------------------------------------
-
-/// Everything the three settlement paths need after their shared gates have
-/// passed. Assembling it in one place is what guarantees eligibility, the
-/// liquidation assessment, the fee snapshot, and the settlement itself all
-/// observe the same instant.
 struct Eligible {
     action: PendingAction,
     position: Position,
@@ -285,12 +211,6 @@ struct Eligible {
     observed_at: u64,
 }
 
-/// The shared front half of `settle_increase`, `settle_decrease`, and
-/// `settle_close`: the timing gates, the checkpoints, the risk refresh, and
-/// the liquidation precedence check.
-///
-/// `Err` carries a non-terminal outcome — the action is untouched and
-/// nothing is paid.
 fn eligible(
     env: &Env,
     keeper_address: &Address,
@@ -309,14 +229,11 @@ fn eligible(
     if !action::delay_satisfied(now, action.execute_after) {
         return Err(ActionOutcome::NotReady);
     }
-    // §8.5 — the lifetime gate is read from the position at settlement, not
-    // frozen at creation, so an increase landing in between moves it
-    // forward. It applies to decrease and close, never to increase.
     if removes_exposure && !action::lifetime_satisfied(now, &position, &config) {
         return Err(ActionOutcome::NotReady);
     }
     let fill = snapshot::read_stamped_price(env, &action.market_id);
-    if !action::fresh_for_commit(fill.observed_at, action.commit_observed_at) {
+    if !action::fresh_for_commit(fill.observed_at, action.commit_observed_at, action.created_at) {
         return Err(ActionOutcome::NotReady);
     }
 
@@ -333,9 +250,6 @@ fn eligible(
     );
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
-    // §6.5 — the side risk state is refreshed from this fill before anything
-    // reads a payout factor. Refreshing afterwards would let the first
-    // position out of a newly-crossed side settle unscaled.
     risk::evaluate_market_risk(
         env,
         &mut ledger,
@@ -348,9 +262,6 @@ fn eligible(
 
     let pending = funding::pending_fees(env, &ledger, &position, &market);
     let assessment = risk::evaluate_liquidation(env, &ledger, &position, &market, fill.price);
-    // §8.12 — liquidation outranks every voluntary mutation. This is the
-    // only non-terminal safety exception: the action stays pending and pays
-    // nothing, and the liquidation path supersedes it.
     if assessment.liquidatable {
         return Err(ActionOutcome::RequiresLiquidation);
     }
@@ -368,17 +279,9 @@ fn eligible(
     })
 }
 
-/// §6.11 — the LP share of a collected fee, which is the *only* part of a
-/// distribution that changes cash LP equity: the protocol and referral
-/// slices become claims, and leaving the rest in the residual is what
-/// credits LPs.
 fn lp_share(env: &Env, collected: i128, share_bps: u32) -> i128 {
     math::mul_div_floor(env, collected, share_bps as i128, BPS)
 }
-
-// ---------------------------------------------------------------------------
-// §7.8 Increase.
-// ---------------------------------------------------------------------------
 
 pub fn settle_increase(env: Env, keeper_address: Address, action_id: u64) -> ActionOutcome {
     let mut e = match eligible(
@@ -415,7 +318,6 @@ pub fn settle_increase(env: Env, keeper_address: Address, action_id: u64) -> Act
     ActionOutcome::Executed
 }
 
-/// §7.8 — the increase preflight, against the complete resulting position.
 fn increase_preflight(
     env: &Env,
     e: &Eligible,
@@ -437,7 +339,7 @@ fn increase_preflight(
         });
     }
 
-    let exposure = math::derive_added_exposure(
+    let Some(exposure) = math::try_added_exposure(
         env,
         e.position.is_long,
         e.position.size,
@@ -445,15 +347,11 @@ fn increase_preflight(
         payload.size_added,
         e.price,
         e.market.config.market_risk_factor_bps,
-    );
+    ) else {
+        return Some(FailureReason::SizeTooSmall);
+    };
     let opening_fee = fees::calculate_opening_fee(env, payload.size_added, &e.market.config);
 
-    // Project stored collateral through the settlement, in the order
-    // `execute_increase` performs it. The completed old window is settled
-    // first, from **pre-existing** collateral: an increase must not use new
-    // money to cover an obligation the position could not already meet,
-    // because that would let a position which should have been liquidated
-    // buy its way past the check.
     let owed = math::add(
         env,
         math::add(
@@ -487,10 +385,6 @@ fn increase_preflight(
     let resulting_size = math::add(env, e.position.size, payload.size_added);
     let resulting_base = math::add(env, e.position.base_exposure, exposure.base_added);
     let resulting_risk = math::add(env, e.position.risk_units, exposure.risk_added);
-    // Every pending obligation is settled by the capitalization above, so
-    // effective collateral after the action is the projected stored
-    // collateral plus the payable PnL still riding on the resulting
-    // exposure (§6.6).
     let effective = math::add(
         env,
         after_charges,
@@ -503,10 +397,6 @@ fn increase_preflight(
 
     let projected_equity = projected_equity_after_increase(env, e, opening_fee);
     let projected_total_risk = math::add(env, e.ledger.total_risk_units, exposure.risk_added);
-    // §7.2's `projected_minimum_borrow`, here against the **full resulting**
-    // risk units rather than only the added ones: the increase opens a fresh
-    // window for the whole position (§3.3.3), so the floor it will be quoted
-    // covers all of it.
     let projected_minimum = borrow::projected_minimum(
         env,
         borrow::rate_at(env, projected_total_risk, projected_equity),
@@ -550,15 +440,6 @@ fn increase_preflight(
     None
 }
 
-/// Cash LP equity after an increase settles.
-///
-/// Only three moves touch it. Collected payer funding returns cash that
-/// already backs a receiver claim or is LP revenue outright, so it lands in
-/// the residual in full; collected borrow lands there net of the protocol
-/// slice; and the opening fee lands there net of the protocol and referral
-/// slices. The keeper reward leaves the vault against its own claim and the
-/// escrow-to-collateral move relabels one claim as another, so neither
-/// changes equity at all.
 fn projected_equity_after_increase(env: &Env, e: &Eligible, opening_fee: i128) -> i128 {
     let equity = e
         .ledger
@@ -577,9 +458,6 @@ fn projected_equity_after_increase(env: &Env, e: &Eligible, opening_fee: i128) -
     )
 }
 
-/// §7.8 — the success path, in the specified order: settle the old window,
-/// then move escrow in, then the opening fee, then the keeper reward, then
-/// add exposure, then reset the baselines and open the new borrow window.
 fn execute_increase(
     env: &Env,
     e: &mut Eligible,
@@ -649,8 +527,6 @@ fn execute_increase(
         e.price,
         e.market.config.market_risk_factor_bps,
     );
-    // §4.9 step 7 — reset the opposite stream's distribution carry before
-    // this side's size changes.
     funding::reset_receiver_distribution_remainder(&mut e.market, is_long);
     e.position.size = math::add(env, e.position.size, payload.size_added);
     e.position.base_exposure = math::add(env, e.position.base_exposure, exposure.base_added);
@@ -664,7 +540,7 @@ fn execute_increase(
     }
     risk::register_exposure(env, &mut e.ledger, exposure.risk_added);
 
-    funding::reset_debts(env, &mut e.position, &e.market);
+    funding::snapshot_funding_indices(&mut e.position, &e.market);
     funding::refresh_display(env, &mut e.ledger, &mut e.market);
     let physical = ledger::physical_cash(env);
     let equity = e.ledger.cash_lp_equity(env, physical);
@@ -678,9 +554,6 @@ fn execute_increase(
         equity,
     );
     storage::save_market(env, &e.action.market_id, &e.market);
-    // §4.9 step 9, then §4.10 — the rate is refreshed from the resulting
-    // risk units, and only then is the replacement window quoted. §3.3.3:
-    // nothing of the old window carries forward.
     borrow::refresh_rate(env, &mut e.ledger, physical);
     borrow::initialize_window(env, &e.ledger, &mut e.position);
 
@@ -711,10 +584,6 @@ fn execute_increase(
         &collected,
     );
 }
-
-// ---------------------------------------------------------------------------
-// §7.9 Decrease.
-// ---------------------------------------------------------------------------
 
 pub fn settle_decrease(env: Env, keeper_address: Address, action_id: u64) -> ActionOutcome {
     let mut e = match eligible(&env, &keeper_address, action_id, ActionKind::Decrease, true) {
@@ -781,8 +650,6 @@ pub fn settle_decrease(env: Env, keeper_address: Address, action_id: u64) -> Act
         settle::Settled::Partial(header) => {
             events::emit_decreased(&env, &keeper_address, header)
         }
-        // `create_decrease` requires `size_removed < position.size`, so a
-        // decrease can never consume the position.
         settle::Settled::Closed(..) => {
             panic_with_error!(&env, PositionManagerError::InvariantViolation)
         }
@@ -790,13 +657,6 @@ pub fn settle_decrease(env: Env, keeper_address: Address, action_id: u64) -> Act
     ActionOutcome::Executed
 }
 
-/// §7.9 — the decrease preflight.
-///
-/// It projects the settlement's collateral arithmetic in the order
-/// `settle::settle` performs it, so the three guards that keep this path
-/// from diverging from the terminal path are evaluated *before* anything
-/// moves: no uncollectible loss, no unpaid profit, and cash LP equity
-/// covering the payable profit to be credited.
 fn decrease_preflight(
     env: &Env,
     e: &Eligible,
@@ -809,6 +669,9 @@ fn decrease_preflight(
     }
 
     let removed = settle::removed_exposure(env, &e.position, size_removed, &e.market.config);
+    if removed.base_after <= 0 || removed.risk_after <= 0 {
+        return Some(FailureReason::SizeTooSmall);
+    }
     let raw_pnl = math::pnl(
         env,
         e.position.is_long,
@@ -820,18 +683,11 @@ fn decrease_preflight(
     let payable = core::cmp::max(risk::payable_pnl(env, raw_pnl, side), 0);
     let negative = core::cmp::max(-raw_pnl, 0);
 
-    // §6.5 — the payment-time cash limit. A surviving position may not
-    // realize profit the vault could not pay: it has no result in which to
-    // report the shortfall, and its closing fee would be computed from
-    // profit that was never credited.
     let equity = e.ledger.cash_lp_equity(env, ledger::physical_cash(env));
     if payable > equity {
         return Some(FailureReason::UnpayableProfit);
     }
 
-    // The §11.4 waterfall, as arithmetic. A surviving position may not carry
-    // a loss its collateral could not absorb either, so the whole of it must
-    // clear.
     let credits = math::add(
         env,
         math::add(env, e.position.stored_collateral, payable),
@@ -850,8 +706,6 @@ fn decrease_preflight(
     if after_waterfall < 0 {
         return Some(FailureReason::InsufficientCollateral);
     }
-    // §6.12 — a voluntary settlement that cannot pay for itself must not
-    // complete, so the reward is required in full here.
     let after_reward = math::sub(env, after_waterfall, reward);
     if after_reward < 0 {
         return Some(FailureReason::InsufficientCollateral);
@@ -885,18 +739,23 @@ fn decrease_preflight(
         risk::maintenance_requirement(env, removed.new_size, &e.market.config),
         e.config.keeper_rewards.liquidation,
     );
-    // Strictly above: liquidation eligibility is `effective <= threshold`,
-    // so a survivor left exactly at it would be liquidatable the instant the
-    // decrease committed.
-    if math::add(env, stored_final, remaining_pnl) <= threshold {
+    // Upper bound on the survivor's rate: only the profit credit lowers equity.
+    let projected_rate = borrow::rate_at(
+        env,
+        math::sub(env, e.ledger.total_risk_units, removed.risk_removed),
+        core::cmp::max(math::sub(env, equity, payable), 0),
+    );
+    let projected_minimum = borrow::projected_minimum(env, projected_rate, removed.risk_after);
+    let surviving_effective = math::sub(
+        env,
+        math::add(env, stored_final, remaining_pnl),
+        projected_minimum,
+    );
+    if surviving_effective <= threshold {
         return Some(FailureReason::InsufficientCollateral);
     }
     None
 }
-
-// ---------------------------------------------------------------------------
-// §7.10 Close.
-// ---------------------------------------------------------------------------
 
 pub fn settle_close(env: Env, keeper_address: Address, action_id: u64) -> ActionOutcome {
     let mut e = match eligible(&env, &keeper_address, action_id, ActionKind::Close, true) {
@@ -908,10 +767,6 @@ pub fn settle_close(env: Env, keeper_address: Address, action_id: u64) -> Action
     };
     let reward = keeper::reward_for(&e.config, keeper::RewardKind::Close);
 
-    // A close needs no economic preflight beyond its price bound. Terminal
-    // settlement may collect less than is owed and report the remainder as
-    // bad debt, so there is no shortfall that could make it diverge — which
-    // is exactly what a surviving decrease cannot do.
     if !action::exit_price_allowed(e.position.is_long, e.price, payload.acceptable_price) {
         return action::fail_position_action(
             &env,

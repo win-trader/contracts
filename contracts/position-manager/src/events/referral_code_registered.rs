@@ -1,7 +1,6 @@
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
-/// A referrer claimed ownership of a referral code (owner immutable after).
 #[contractevent(topics = ["refreg"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferralCodeRegistered {

@@ -1,19 +1,3 @@
-//! Shared PositionManager contract interface.
-//!
-//! The PositionManager is the protocol's accounting ledger: it owns the
-//! market and position state, the non-LP claim totals, and every fee index.
-//! The vault holds the cash; this contract decides who owns it.
-//!
-//! Conventions used across the trait:
-//! - Prices, USD notionals, and base exposures are scaled by
-//!   `constants::PRICE_PRECISION`; cash amounts use the collateral token's
-//!   native decimals (identical scale on this deployment).
-//! - `0` is the "none" sentinel for `take_profit`, `stop_loss`, and
-//!   `acceptable_price` — a zero bound disables that check.
-//! - Functions taking a `caller` verify both `require_auth` and a
-//!   ConfigManager role (or a specific contract address); functions taking
-//!   `owner`/`position_id` require the position owner's auth.
-
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
 use crate::types::{
@@ -21,47 +5,29 @@ use crate::types::{
     PendingAction, PendingFeesView, Position,
 };
 
+/// Accounting ledger of the protocol: markets, positions, non-LP claims, and fee indices.
+/// Prices, notionals, and cash use `PRICE_PRECISION`; a `0` price bound disables that check.
 #[contractclient(name = "PositionManagerClient")]
 pub trait PositionManager {
-    /// One-time wiring of the vault address (ADMIN). Panics with
-    /// `AlreadyInitialized` on a second call.
+    /// One-time wiring of the vault address (ADMIN).
     fn set_vault(env: Env, caller: Address, vault: Address);
 
-    /// Point the protocol at a different external price feed
-    /// (`oracle_authority`, §12.3). Verifies the feed reports
-    /// `PRICE_DECIMALS`.
-    ///
-    /// Rewireable rather than fixed at deploy: the protocol does not own its
-    /// oracle, so replacing the provider must not require redeploying the
-    /// protocol. It is the one authority whose whole job is naming the
-    /// contract that supplies authenticated prices.
-    fn set_price_feed(env: Env, caller: Address, price_feed: Address);
+    /// Propose a replacement price feed (ORACLE). Applies after `config_timelock_seconds`.
+    fn propose_price_feed(env: Env, caller: Address, price_feed: Address);
 
-    /// The external price feed currently in use.
+    /// Apply a due price-feed proposal. Permissionless.
+    fn apply_price_feed(env: Env, caller: Address);
+
+    /// Withdraw a pending price-feed proposal (ORACLE).
+    fn cancel_price_feed(env: Env, caller: Address);
+
+    /// The price feed currently in use.
     fn price_feed(env: Env) -> Address;
 
-    // -----------------------------------------------------------------
-    // §7.1–7.6 Entries.
-    //
-    // Every price-sensitive trader action is two calls: a commitment that
-    // freezes the economic inputs and the observation cursor, and a
-    // settlement against a **strictly newer** observation. The settlement
-    // functions return an `ActionOutcome` rather than panicking on an
-    // expected business failure: a revert would undo the keeper payment and
-    // the escrow refund, and hand the trader a free retry after they have
-    // seen the price (§8.9).
-    // -----------------------------------------------------------------
-
-    /// §7.1 — commit a market open. Transfers `request.submitted_collateral`
-    /// into action escrow, records the commit observation, and reserves
-    /// nothing: no capacity, no price, no fee, no position. Binding — a
-    /// market entry has no cancel. Returns the action id.
+    /// Commit a market open and escrow its collateral. Binding; returns the action id.
     fn create_market_open(env: Env, owner: Address, market: Symbol, request: OpenPayload) -> u64;
 
-    /// §7.3 — commit a limit open. As `create_market_open`, but bounded by
-    /// `max_order_lifetime_seconds`, requiring `trigger_price > 0`, and
-    /// freezing the trigger direction against the authenticated commit
-    /// price. Cancellable by the owner until expiry.
+    /// Commit a limit open and escrow its collateral. Cancellable until expiry.
     fn create_limit_open(
         env: Env,
         owner: Address,
@@ -70,39 +36,22 @@ pub trait PositionManager {
         trigger_price: i128,
     ) -> u64;
 
-    /// §7.2 — settle a committed market open against a strictly newer
-    /// observation. The first eligible attempt is terminal: it either opens
-    /// the position or fails, pays `keeper_open_reward` from escrow, refunds
-    /// the remainder, and charges no opening fee.
+    /// Settle a market open. The first eligible attempt executes or fails terminally.
     fn settle_market_open(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
 
-    /// §7.4 — settle a committed limit open. An untriggered observation
-    /// returns `Pending` and does **not** consume the order; once triggered
-    /// the attempt is terminal and pays `keeper_limit_order_reward`.
+    /// Settle a limit open. Returns `Pending` until the trigger crosses.
     fn settle_limit_open(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
 
-    /// §7.5 — owner cancellation of a pending limit entry before expiry.
-    /// Full refund, no fee, no keeper reward. Returns the refund.
+    /// Owner cancels a limit open before expiry. Returns the refund.
     fn cancel_limit_open(env: Env, action_id: u64) -> i128;
 
-    /// §7.6 — permissionless cleanup at or after an entry's expiry. Pays
-    /// `keeper_expiry_reward` from escrow and refunds the remainder. At
-    /// exactly `expires_at` execution is closed and only this succeeds.
+    /// Clean up an expired entry: pays the expiry reward and refunds the rest.
     fn clean_expired_entry(env: Env, keeper: Address, action_id: u64);
 
-    // -----------------------------------------------------------------
-    // §7.7–7.10 Position mutations.
-    // -----------------------------------------------------------------
-
-    /// §7.7 — add collateral immediately. It adds no price exposure, so it
-    /// needs no commitment: no fee, no reward, no baseline reset, and it
-    /// does **not** restart the minimum-lifetime clock. A liquidatable owner
-    /// may use it to rescue the position.
+    /// Add collateral to a position immediately. No fee, reward, or window reset.
     fn add_collateral(env: Env, position_id: u64, amount: i128);
 
-    /// §7.8 — commit an increase. Escrows `collateral_added`, rejects a dust
-    /// add against the commitment price, and occupies the position's one
-    /// pending-mutation slot. Returns the action id.
+    /// Commit a size increase, escrowing any added collateral.
     fn create_increase(
         env: Env,
         position_id: u64,
@@ -111,204 +60,178 @@ pub trait PositionManager {
         acceptable_price: i128,
     ) -> u64;
 
-    /// §7.9 — commit a partial decrease of `size_removed`.
+    /// Commit a partial decrease of `size_removed`.
     fn create_decrease(env: Env, position_id: u64, size_removed: i128, acceptable_price: i128)
         -> u64;
 
-    /// §7.10 — commit a full close. No size is stored: it always targets the
-    /// complete remaining exposure at settlement.
+    /// Commit a full close of whatever size remains at settlement.
     fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64;
 
-    /// §7.8 — settle a committed increase.
+    /// Settle a committed increase.
     fn settle_increase(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
 
-    /// §7.9 — settle a committed decrease.
+    /// Settle a committed decrease.
     fn settle_decrease(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
 
-    /// §7.10 — settle a committed close.
+    /// Settle a committed close.
     fn settle_close(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
 
-    // -----------------------------------------------------------------
-    // §7.11–7.14 Triggers and forced actions.
-    // -----------------------------------------------------------------
-
-    /// §7.11 — attach or replace a take-profit. Records a fresh commitment
-    /// cursor, so the instruction cannot execute on the observation that
-    /// armed it.
+    /// Attach or replace a take-profit instruction.
     fn set_take_profit(env: Env, position_id: u64, trigger_price: i128, acceptable_price: i128);
+
+    /// Remove the take-profit instruction.
     fn clear_take_profit(env: Env, position_id: u64);
-    /// §7.12 — the stop-loss mirror.
+
+    /// Attach or replace a stop-loss instruction.
     fn set_stop_loss(env: Env, position_id: u64, trigger_price: i128, acceptable_price: i128);
+
+    /// Remove the stop-loss instruction.
     fn clear_stop_loss(env: Env, position_id: u64);
 
-    /// §7.11 — execute a crossed take-profit. Closes the position in full
-    /// and pays only `keeper_tp_reward`. A crossed trigger whose exit bound
-    /// fails leaves the instruction attached and pays nothing (§8.7).
+    /// Close a position whose take-profit has crossed. Returns `Pending` outside its bound.
     fn execute_take_profit(env: Env, keeper: Address, position_id: u64) -> ActionOutcome;
 
-    /// §7.12 — execute a crossed stop-loss. Pays only `keeper_sl_reward`.
+    /// Close a position whose stop-loss has crossed. Returns `Pending` outside its bound.
     fn execute_stop_loss(env: Env, keeper: Address, position_id: u64) -> ActionOutcome;
 
-    /// §7.13 — liquidate a position whose effective collateral has fallen to
-    /// its threshold. Permissionless. One snapshot serves eligibility and
-    /// settlement. Pays `keeper_liquidation_reward` from position value,
-    /// then LP residual for the gap, capped at what exists; no closing fee.
+    /// Liquidate a position at or below its liquidation threshold. Permissionless.
     fn liquidate_position(env: Env, keeper: Address, position_id: u64);
 
-    /// §7.14 — deleverage one profitable position on a side the current book
-    /// puts in `ADL` or `HardCap`. Permissionless: the state gate bounds the
-    /// mechanism, not an allowlist. Fixed `keeper_adl_reward`, no closing
-    /// fee.
+    /// Deleverage a profitable position on a side in `ADL` or `HardCap`. Permissionless.
     fn execute_adl(env: Env, keeper: Address, position_id: u64) -> ActionOutcome;
 
-    /// Read a pending action (panics `ActionNotFound` if absent or
-    /// consumed).
+    /// A pending action. Panics `ActionNotFound` once consumed.
     fn get_pending_action(env: Env, action_id: u64) -> PendingAction;
 
-    /// Register a referral code (owner). First-come; the code owner is
-    /// immutable, and one address may own several codes. Panics
-    /// `ReferralCodeTaken` if the code exists.
+    /// Register a referral code. First come; the owner is immutable.
     fn register_referral_code(env: Env, owner: Address, code: Symbol);
 
-    /// Point the caller at a referrer via that referrer's code (§11.1).
-    /// Freely re-settable; a trader cannot refer themselves.
+    /// Attach a trader to the owner of `code`. Self-referral is rejected.
     fn set_referrer(env: Env, trader: Address, code: Symbol);
 
-    /// Withdraw the caller's accrued referral rewards (§11.1).
-    /// Conservation-checked, so it is blocked during a cash shortfall.
+    /// Withdraw accrued referral rewards. Blocked during a cash shortfall.
     fn claim_referral(env: Env, referrer: Address);
 
-    /// The referrer a trader is attached to, if any.
+    /// The trader's referrer, if any.
     fn get_referrer(env: Env, trader: Address) -> Option<Address>;
 
-    /// The owner of a referral code, if it is registered.
+    /// The owner of a referral code, if registered.
     fn referral_code_owner(env: Env, code: Symbol) -> Option<Address>;
 
-    /// A referrer's accrued unclaimed referral rewards.
+    /// A referrer's unclaimed rewards.
     fn referral_balance(env: Env, referrer: Address) -> i128;
 
-    /// Total accrued unclaimed referral rewards across all referrers.
+    /// All unclaimed referral rewards.
     fn referral_claimable_total(env: Env) -> i128;
 
-    /// Checkpoint the global indices and one market's funding indices to
-    /// now. Fee accrual is lazy; this bounds staleness. Permissionless
-    /// (§7.0): a checkpoint pays no reward and moves no value between
-    /// parties, so there is nothing for an allowlist to protect.
+    /// Checkpoint the borrow index and one market's funding to now. Permissionless.
     fn update_indices(env: Env, caller: Address, market: Symbol);
 
-    /// Propose a global configuration change (configuration authority,
-    /// §12.3). Validated immediately and stored with
-    /// `effective_at = now + config_timelock_seconds`. A purely
-    /// conservative change — lowering `risk_capacity_limit_bps` with
-    /// nothing else altered — is exempt and applies at once.
+    /// Propose a global config (ADMIN). Conservative changes apply immediately.
     fn propose_global_config(env: Env, caller: Address, config: GlobalConfig);
 
-    /// Apply a global proposal whose timelock has elapsed. Permissionless:
-    /// the authorization happened at proposal and the delay is the
-    /// protection. Checkpoints under the old values before storing (§10.3.3).
+    /// Apply a due global proposal. Permissionless; expires one timelock after it is due.
     fn apply_global_config(env: Env, caller: Address);
 
-    /// Register a market, or propose a change to an existing one
-    /// (configuration authority, §12.3). Registration and conservative
-    /// changes apply at once; everything else waits out the timelock.
-    /// Bounded by `max_active_markets` and the global hard-cap factor limit.
+    /// Withdraw the pending global proposal (ADMIN).
+    fn cancel_global_config(env: Env, caller: Address);
+
+    /// Register a market or propose a change to one (ADMIN).
     fn propose_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
 
-    /// Apply a market proposal whose timelock has elapsed. Permissionless.
+    /// Apply a due market proposal. Permissionless.
     fn apply_market_config(env: Env, caller: Address, market: Symbol);
 
-    /// §7.18 — remove a market from the active registry (configuration
-    /// authority). Requires both sides empty of open interest, base
-    /// exposure, and risk units, no pending receiver-funding liability, and
-    /// both sides in `Normal`.
-    ///
-    /// The market's accounting record is **kept**: indices and the
-    /// checkpoint timestamp are retained, never reset, so a later
-    /// re-registration cannot rewind an index a historical position was
-    /// priced against. Re-registering is `propose_market_config` on the same
-    /// symbol.
+    /// Withdraw a pending market proposal (ADMIN).
+    fn cancel_market_config(env: Env, caller: Address, market: Symbol);
+
+    /// Remove an empty market from the registry (ADMIN). Its indices are kept.
     fn deregister_market(env: Env, caller: Address, market: Symbol);
 
-    /// Block new opens/increases on one market (PAUSER). Existing positions
-    /// keep accruing and can always decrease, close, or be liquidated.
+    /// Block new exposure on one market (PAUSER).
     fn disable_market(env: Env, caller: Address, market: Symbol);
+
+    /// Re-admit exposure on one market (UNPAUSER).
     fn enable_market(env: Env, caller: Address, market: Symbol);
+
+    /// Whether a market is disabled.
     fn is_market_disabled(env: Env, market: Symbol) -> bool;
 
-    /// LP-settlement snapshot (vault only, §7.17): checkpoints global
-    /// accrual, prices every active market from the external feed inside
-    /// this transaction, evaluates and persists every side's risk state
-    /// against those prices, and returns the accounting snapshot the
-    /// settlement decides against.
-    ///
-    /// Reading each market here rather than accepting a published round is
-    /// what removes the liveness dependency the round carried: there is no
-    /// separate publication step that can stop while positions keep
-    /// trading.
+    /// Checkpoint, price every active market, persist risk states, and snapshot (vault only).
     fn prepare_lp_snapshot(env: Env, caller: Address, physical_cash: i128) -> AccountingSnapshot;
 
-    /// Recompute the borrow rate from current utilization (vault only,
-    /// called after vault cash moved).
+    /// Recompute the borrow rate after vault cash moved (vault only).
     fn refresh_borrow_rate(env: Env, caller: Address, physical_cash: i128);
 
-    /// Whether new LP requests may be created: no cash shortfall and no
-    /// side in a restricted risk state (vault only, §14).
-    fn can_create_lp_request(env: Env, caller: Address, physical_cash: i128) -> bool;
+    /// Whether the protocol is paused.
+    fn is_paused(env: Env) -> bool;
 
-    /// Read-only accounting snapshot at current feed prices — no
-    /// risk-state transitions are persisted and no accrual checkpoint runs.
+    /// Read-only accounting snapshot at current prices.
     fn accounting_snapshot(env: Env, physical_cash: i128) -> AccountingSnapshot;
 
+    /// A position.
     fn get_position(env: Env, position_id: u64) -> Position;
 
-    /// §4.12 — quote a position's accrued fees as of `now` without a
-    /// state-changing checkpoint. The global index and the market's funding
-    /// indices are advanced on in-memory copies; nothing is written.
-    ///
-    /// Reading the last stored indices instead would understate fees after
-    /// time has elapsed. A quote immediately followed by settlement reports
-    /// the same amounts unless another transaction changes state first.
+    /// A position's accrued fees as of `now`, without writing state.
     fn pending_fees(env: Env, position_id: u64, now: u64) -> PendingFeesView;
+
+    /// A market's configuration and accounting.
     fn get_market(env: Env, market: Symbol) -> Market;
+
+    /// The active market registry.
     fn active_markets(env: Env) -> Vec<Symbol>;
+
+    /// The global configuration.
     fn global_config(env: Env) -> GlobalConfig;
-    /// The guaranteed receiver-funding liability (§8.3).
+
+    /// Guaranteed receiver funding not yet credited to positions.
     fn pending_receiver_funding_total(env: Env) -> i128;
+
+    /// Collected protocol revenue not yet claimed.
     fn protocol_claimable_total(env: Env) -> i128;
-    /// Complete non-LP claims on the vault's physical cash (§4.2).
+
+    /// All non-LP claims on vault cash.
     fn non_lp_claims(env: Env) -> i128;
 
-    /// Pay out protocol revenue (`protocol_recipient`, §12.3).
-    /// Conservation-checked against the remaining claims, so it is blocked
-    /// during a cash shortfall.
+    /// Withdraw protocol revenue (PROTOCOL). Blocked while paused or short.
     fn claim_protocol(env: Env, caller: Address, recipient: Address, amount: i128);
 
-    /// Transfer cash into the vault without minting shares (§15.2). Open to
-    /// anyone; the cure for a cash shortfall.
+    /// Add cash to the vault without minting shares. Open to anyone.
     fn recapitalize(env: Env, contributor: Address, amount: i128);
 
-    /// §12.2 operational pause: blocks every path that adds exposure and
-    /// none that removes it. Accrual clocks keep running (§12.2) and
-    /// closes, liquidations, and ADL stay available. `pause_authority`.
+    /// Withdraw payouts and refunds that could not be delivered at settlement.
+    fn claim_payout(env: Env, owner: Address) -> i128;
+
+    /// An owner's undelivered payouts.
+    fn unclaimed_payout(env: Env, owner: Address) -> i128;
+
+    /// All undelivered payouts.
+    fn unclaimed_payout_total(env: Env) -> i128;
+
+    /// Pause new exposure; exits stay open (PAUSER).
     fn pause(env: Env, caller: Address);
-    /// Clear the pause. A **separate** authority from `pause`: pausing is a
-    /// fast safety action, unpausing re-admits risk (§12.3).
+
+    /// Clear the pause (UNPAUSER).
     fn unpause(env: Env, caller: Address);
 
+    /// Propose a WASM upgrade (UPGRADER).
     fn propose_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>);
+
+    /// Cancel a pending upgrade (PAUSER).
     fn cancel_upgrade(env: Env, caller: Address);
 
-    // §12.4 — every persistent entry is extendable permissionlessly. A
-    // position whose owner has gone quiet must still be liquidatable, and a
-    // referral balance must survive its owner's inactivity; letting either
-    // expire destroys a claim, which no rule in §9 permits.
-
-    /// Re-extend a position entry's storage TTL. Open to anyone.
+    /// Extend a position's TTL. Open to anyone.
     fn bump_position(env: Env, position_id: u64);
-    /// Re-extend a pending action's storage TTL. Open to anyone.
+
+    /// Extend a pending action's TTL. Open to anyone.
     fn bump_pending_action(env: Env, action_id: u64);
-    /// Re-extend a market's storage TTL. Open to anyone.
+
+    /// Extend a market's TTL. Open to anyone.
     fn bump_market_entry(env: Env, market: Symbol);
-    /// Re-extend referral entries' storage TTL. Open to anyone.
+
+    /// Extend referral entries' TTL. Open to anyone.
     fn bump_referral_entry(env: Env, code: Symbol, trader: Address, referrer: Address);
+
+    /// Extend an owner's undelivered-payout entry TTL. Open to anyone.
+    fn bump_unclaimed_payout(env: Env, owner: Address);
 }

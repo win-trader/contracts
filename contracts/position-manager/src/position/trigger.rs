@@ -1,15 +1,3 @@
-//! §7.11–7.12 — attached take-profit and stop-loss.
-//!
-//! A trigger is a standing conditional instruction stored inside the
-//! position, not a market-style one-attempt commitment and not a prepaid
-//! keeper budget. That difference decides its failure behaviour: a crossed
-//! trigger whose exit bound does not pass leaves the instruction **attached**
-//! and pays nothing (§8.7), because the trader asked to exit at a price, not
-//! to exit once.
-//!
-//! Both close the position in full. There is no partial take-profit and
-//! neither takes a size.
-
 use soroban_sdk::{panic_with_error, Address, Env};
 
 use shared::{ActionOutcome, Trigger, TriggerInstruction};
@@ -21,13 +9,6 @@ use crate::ledger;
 use crate::settle::{self, ClosingFee};
 use crate::{action, borrow, funding, keeper, risk, snapshot, storage};
 
-/// Build an attached instruction, or the `None` variant for the zero
-/// sentinel.
-///
-/// `commit_observed_at` is the caller's: an entry fill passes its own fill
-/// observation (§8.6), and `set_take_profit` passes the observation it read
-/// when attaching. Either way the instruction cannot execute on the
-/// observation that armed it.
 pub(crate) fn attach(
     trigger_price: i128,
     acceptable_price: i128,
@@ -47,9 +28,6 @@ pub(crate) fn attach(
     })
 }
 
-/// §7.11 / §7.12 — attach or replace a trigger. Each attach records a fresh
-/// commitment cursor and a fresh delay, so replacing a trigger cannot be
-/// used to execute against an observation the trader has already seen.
 fn set(env: &Env, position_id: u64, trigger_price: i128, acceptable_price: i128, take_profit: bool) {
     require_initialized(env);
     let mut position = storage::get_position(env, position_id);
@@ -115,11 +93,6 @@ pub fn execute_stop_loss(env: Env, keeper_address: Address, position_id: u64) ->
     execute(&env, keeper_address, position_id, false)
 }
 
-/// §7.11 / §7.12 — execute a crossed trigger.
-///
-/// Every gate here is non-terminal. A trigger that is early, unfunded by a
-/// newer observation, uncrossed, or outside its exit bound simply stays
-/// attached; none of those is an execution attempt and none pays a reward.
 fn execute(
     env: &Env,
     keeper_address: Address,
@@ -144,16 +117,15 @@ fn execute(
     if !action::delay_satisfied(now, instruction.execute_after) {
         return ActionOutcome::NotReady;
     }
-    // §8.5 — the minimum lifetime gates all four exits, triggers included.
-    // A size increase re-locks the position against its own stop-loss;
-    // exempting stop-loss alone would leave take-profit as the obvious
-    // churn bypass, and exempting both would turn open / take-profit just
-    // above entry / exit into a way around the rule entirely.
     if !action::lifetime_satisfied(now, &position, &config) {
         return ActionOutcome::NotReady;
     }
     let fill = snapshot::read_stamped_price(env, &position.market);
-    if !action::fresh_for_commit(fill.observed_at, instruction.commit_observed_at) {
+    if !action::fresh_for_commit(
+        fill.observed_at,
+        instruction.commit_observed_at,
+        instruction.committed_at,
+    ) {
         return ActionOutcome::NotReady;
     }
     if !action::exit_trigger_crossed(
@@ -164,10 +136,6 @@ fn execute(
     ) {
         return ActionOutcome::Pending;
     }
-    // §8.7 — a crossed trigger outside its bound stays attached and may
-    // execute on a later qualifying observation. This is the one place a
-    // failed price check is *not* terminal, and the reason is that the
-    // instruction is standing rather than single-attempt.
     if !action::exit_price_allowed(position.is_long, fill.price, instruction.acceptable_price) {
         return ActionOutcome::Pending;
     }
@@ -178,8 +146,6 @@ fn execute(
     funding::accrue(env, &mut ledger, &position.market, Some(&keeper_address), &mut market, now);
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
-    // §6.5 — refresh the side risk state from this fill before anything
-    // reads a payout factor.
     risk::evaluate_market_risk(
         env,
         &mut ledger,
@@ -190,9 +156,6 @@ fn execute(
         equity,
     );
 
-    // §8.12 — liquidation outranks every voluntary exit, triggers included.
-    // The instruction stays attached; the liquidation path removes the
-    // position.
     if risk::evaluate_liquidation(env, &ledger, &position, &market, fill.price).liquidatable {
         return ActionOutcome::RequiresLiquidation;
     }
@@ -218,9 +181,6 @@ fn execute(
             reward,
             liquidation: false,
         },
-        // A losing stop-loss pays no closing fee because there is no profit
-        // to charge it against, not because the path waives it; a stop-loss
-        // moved above entry closes in profit and pays the normal fee.
         ClosingFee::Charged,
     );
     storage::save_ledger(env, &ledger);

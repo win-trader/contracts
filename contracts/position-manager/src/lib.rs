@@ -22,8 +22,5 @@ mod validation;
 mod window;
 
 pub use contract::PositionManagerContract;
-// The generated client for the concrete contract, not the shared trait.
-// `upgrade` and `migrate` (§12.4) are declared here rather than on
-// `PositionManager`, so this is the only client that can reach them.
 pub use contract::PositionManagerContractClient;
 pub use errors::PositionManagerError;

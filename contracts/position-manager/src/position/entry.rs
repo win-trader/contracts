@@ -1,18 +1,3 @@
-//! §7.1–7.6 — the entry lifecycle: market and limit opens as commit then
-//! settle.
-//!
-//! Creation performs structural and collateral checks and escrows the
-//! trader's cash. It reserves no capacity, chooses no price, collects no fee,
-//! pays no keeper, and creates no position — every economic decision belongs
-//! to settlement, against an observation that did not exist when the trader
-//! committed.
-//!
-//! Settlement returns an outcome. An eligible attempt that fails an expected
-//! check is **terminal**: it pays the action's reward from escrow, refunds
-//! the remainder to the owner, and consumes the record. Reverting instead
-//! would give the trader a free retry after seeing the price, which is
-//! exactly the option the two-phase lifecycle exists to remove.
-
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::BPS;
@@ -30,13 +15,9 @@ use crate::{action, borrow, fees, funding, keeper, math, risk, snapshot, storage
 
 use super::trigger;
 
-/// §7.1 / §7.3 — the two kinds differ in four values and nothing else.
 struct EntryKind {
     kind: ActionKind,
     reward: keeper::RewardKind,
-    /// `true` for a limit entry: bounded by `max_order_lifetime_seconds`
-    /// rather than the shorter market-entry cap, because a resting order is
-    /// meant to rest (§8.5).
     resting: bool,
 }
 
@@ -52,17 +33,10 @@ const LIMIT: EntryKind = EntryKind {
     resting: true,
 };
 
-// ---------------------------------------------------------------------------
-// Creation (§7.1, §7.3).
-// ---------------------------------------------------------------------------
-
-/// §7.1 — commit a market open. Binding: there is no cancel operation, only
-/// settlement or expiry.
 pub fn create_market_open(env: Env, owner: Address, market: Symbol, request: OpenPayload) -> u64 {
     create_entry(&env, owner, market, request, 0, &MARKET)
 }
 
-/// §7.3 — commit a limit open. Cancellable by the owner until expiry.
 pub fn create_limit_open(
     env: Env,
     owner: Address,
@@ -87,9 +61,6 @@ fn create_entry(
     require_initialized(env);
     owner.require_auth();
     require_market_active(env, &market_symbol);
-    // §7.18 — a deregistered market keeps its record so its indices survive,
-    // which means `get_market` still answers. "Open for business" is the
-    // registry, and that is the question creation is asking.
     if !storage::is_market_registered(env, &market_symbol) {
         panic_with_error!(env, PositionManagerError::MarketNotConfigured);
     }
@@ -102,16 +73,6 @@ fn create_entry(
     let now = env.ledger().timestamp();
     let commit = snapshot::read_stamped_price(env, &market_symbol);
 
-    // §7.1 — the side must be able to take new exposure *now*. A paused
-    // vault accepts no new commitments rather than accumulating a queue for
-    // an unpause that may never come.
-    //
-    // The two conditions are reported separately even though one predicate
-    // decides both (§6.16.1). §12.5 puts them in the same class but they are
-    // not the same fact: a pause is a vault-wide decision by an authority
-    // and clears when that authority says so, a risk state is a consequence
-    // of the book and clears when the book changes. A caller told only
-    // "blocked" cannot tell the trader which.
     if storage::is_paused(env) {
         panic_with_error!(env, PositionManagerError::Paused);
     }
@@ -119,9 +80,6 @@ fn create_entry(
         panic_with_error!(env, PositionManagerError::RiskStateBlocked);
     }
 
-    // A limit entry fills at roughly its trigger, so its attached exits are
-    // validated against the trigger; a market entry against the price it is
-    // committing at.
     let reference_price = if entry.resting {
         trigger_price
     } else {
@@ -147,13 +105,6 @@ fn create_entry(
         panic_with_error!(env, PositionManagerError::InvalidOrder);
     }
 
-    // The dust guard §7.8 states for an increase applies here for the same
-    // reason, one step weaker. A size too small to move base or risk units
-    // makes `derive_added_exposure` revert at settlement (§6.13), and a
-    // revert leaves the entry pending — so the trader holds a free retry
-    // against every observation until expiry instead of the single binding
-    // attempt they committed to. Rejecting it against the commitment price
-    // is what makes those requires unreachable.
     if math::base_added(env, request.size, commit.price, request.is_long) <= 0
         || math::risk_units_for(env, request.size, market.config.market_risk_factor_bps) <= 0
     {
@@ -167,11 +118,6 @@ fn create_entry(
         math::sub(env, request.submitted_collateral, opening_fee),
         reward,
     );
-    // §9.11 — the escrow must cover the settlement charges *and* the expiry
-    // reward, so both terminal paths remain payable from it however the
-    // order ends. Entry rewards are read from live configuration rather than
-    // frozen, and §10.3.1's `every reward <= min_collateral` bound is what
-    // keeps a later configuration change from stranding one.
     if after_charges < config.min_collateral
         || request.submitted_collateral < config.keeper_rewards.expiry
         || after_charges < risk::initial_requirement(env, request.size, &market.config)
@@ -188,9 +134,6 @@ fn create_entry(
             request.clone(),
             TriggerCondition {
                 trigger_price,
-                // Frozen here against the authenticated commit price rather
-                // than re-derived at settlement, so a price that has since
-                // crossed cannot silently flip the order's meaning.
                 trigger_above: trigger_price >= commit.price,
             },
         )
@@ -209,19 +152,11 @@ fn create_entry(
         payload,
     };
     storage::save_pending_action(env, &action);
-    // Escrow raises physical cash and claims by the same amount, so cash LP
-    // equity is unchanged and the rate does not move — but the ledger is
-    // written either way, and refreshing from the post-change book is the
-    // §4.9 order rather than a special case.
     borrow::refresh_rate(env, &mut ledger, ledger::physical_cash(env));
     storage::save_ledger(env, &ledger);
     events::emit_action_committed(env, &action);
     action.action_id
 }
-
-// ---------------------------------------------------------------------------
-// Settlement (§7.2, §7.4).
-// ---------------------------------------------------------------------------
 
 pub fn settle_market_open(env: Env, keeper_address: Address, action_id: u64) -> ActionOutcome {
     settle_entry(&env, keeper_address, action_id, &MARKET)
@@ -238,9 +173,6 @@ fn settle_entry(
     entry: &EntryKind,
 ) -> ActionOutcome {
     require_initialized(env);
-    // §7.0 — "keeper authorization" is the caller authenticating the address
-    // that receives the reward. There is no allowlist; execution is
-    // permissionless.
     keeper_address.require_auth();
 
     let mut action = action::load(env, action_id, entry.kind);
@@ -251,9 +183,6 @@ fn settle_entry(
         .clone();
     let now = env.ledger().timestamp();
 
-    // The three non-terminal gates, in the §7.2 order. None of them is an
-    // execution attempt: none consumes the action, none pays a reward, and
-    // none may revert.
     if action::expired(now, open.expires_at) {
         return ActionOutcome::Expired;
     }
@@ -261,12 +190,10 @@ fn settle_entry(
         return ActionOutcome::NotReady;
     }
     let fill = snapshot::read_stamped_price(env, &action.market_id);
-    if !action::fresh_for_commit(fill.observed_at, action.commit_observed_at) {
+    if !action::fresh_for_commit(fill.observed_at, action.commit_observed_at, action.created_at) {
         return ActionOutcome::NotReady;
     }
     if let ActionPayload::LimitOpen(_, condition) = &action.payload {
-        // §8.3 — an untriggered observation is not an attempt. The order
-        // keeps resting; only a crossed trigger makes the attempt terminal.
         if !action::trigger_crossed(condition.trigger_above, fill.price, condition.trigger_price) {
             return ActionOutcome::Pending;
         }
@@ -285,8 +212,6 @@ fn settle_entry(
     );
     let physical = ledger::physical_cash(env);
     let equity = ledger.cash_lp_equity(env, physical);
-    // §6.5 — the side risk state is refreshed from this fill before anything
-    // reads a payout factor or asks whether the side accepts exposure.
     risk::evaluate_market_risk(
         env,
         &mut ledger,
@@ -305,7 +230,7 @@ fn settle_entry(
         math::sub(env, action.escrowed_collateral, reward),
         opening_fee,
     );
-    let exposure = math::derive_added_exposure(
+    let Some(exposure) = math::try_added_exposure(
         env,
         open.is_long,
         0,
@@ -313,7 +238,17 @@ fn settle_entry(
         open.size,
         fill.price,
         market.config.market_risk_factor_bps,
-    );
+    ) else {
+        return action::fail_entry_action(
+            env,
+            &mut ledger,
+            &market,
+            &mut action,
+            &keeper_address,
+            reward,
+            FailureReason::SizeTooSmall,
+        );
+    };
 
     if let Some(reason) = preflight(
         env,
@@ -328,10 +263,6 @@ fn settle_entry(
         math::add(
             env,
             equity,
-            // §6.11 — only the LP share of a collected fee reaches cash LP
-            // equity. The protocol and referral slices become claims of
-            // their own, and the keeper reward leaves the vault against the
-            // escrow claim that funded it, so neither moves equity at all.
             math::mul_div_floor(
                 env,
                 opening_fee,
@@ -368,10 +299,6 @@ fn settle_entry(
     ActionOutcome::Executed
 }
 
-/// §7.2 — the complete preflight, against the hypothetical post-settlement
-/// state. Every check here is an **expected** deterministic condition that
-/// may legitimately have changed since commitment, so each returns a reason
-/// rather than reverting (§8.9).
 #[allow(clippy::too_many_arguments)]
 fn preflight(
     env: &Env,
@@ -388,11 +315,6 @@ fn preflight(
     if !action::entry_price_allowed(open.is_long, price, open.acceptable_price) {
         return Some(FailureReason::PriceBoundExceeded);
     }
-    // §9.11 — a market disabled while the entry waited is not a reason to
-    // hold the escrow. The action drains: it terminates, pays, and refunds.
-    // A market disabled or deregistered while the entry waited is not a
-    // reason to hold the escrow. The action drains: it terminates, pays, and
-    // refunds. Reverting instead would strand the escrow until expiry.
     if storage::is_market_disabled(env, market_symbol)
         || !storage::is_market_registered(env, market_symbol)
     {
@@ -410,12 +332,6 @@ fn preflight(
         return Some(FailureReason::InsufficientCollateral);
     }
 
-    // §7.2 `projected_minimum_borrow`. The position's borrow window opens
-    // after the health checks, and its monetary minimum is part of pending
-    // borrow from the window's first second — so without this term a
-    // position could be admitted exactly at initial margin and be under it
-    // the moment its window exists. Both inputs come from the projected
-    // post-settlement book, never the pre-action one.
     let projected_risk = math::add(env, ledger.total_risk_units, exposure.risk_added);
     let projected_rate = borrow::rate_at(env, projected_risk, projected_equity);
     let projected_minimum = borrow::projected_minimum(env, projected_rate, exposure.risk_added);
@@ -428,9 +344,6 @@ fn preflight(
         return Some(FailureReason::InsufficientCollateral);
     }
 
-    // §8.8 — capacity is evaluated from the post-fee, post-reward,
-    // post-mutation state. Pending entries reserve nothing, so two orders
-    // can each look fillable and the first to settle consumes the room.
     let capacity = math::mul_div_floor(
         env,
         projected_equity,
@@ -460,12 +373,6 @@ fn preflight(
     None
 }
 
-/// §7.2 — the success path: pay, charge, create, and open the borrow window,
-/// in that order.
-///
-/// Escrow is distributed exactly once and reaches zero before the record is
-/// removed, satisfying §9.11's identity `escrow_before = keeper_reward +
-/// opening_fee + initial_position_collateral`.
 #[allow(clippy::too_many_arguments)]
 fn execute(
     env: &Env,
@@ -493,9 +400,6 @@ fn execute(
         reward,
     );
 
-    // §6.8 — the opening fee, collected only now that every execution check
-    // has passed (§9.12). It leaves escrow for the LP residual, and the
-    // distribution then carves the protocol and referral shares out of it.
     if opening_fee > 0 {
         action.escrowed_collateral = math::sub(env, action.escrowed_collateral, opening_fee);
         ledger::spend_escrow(env, ledger, opening_fee);
@@ -521,19 +425,14 @@ fn execute(
         base_exposure: exposure.base_added,
         stored_collateral: 0,
         risk_units: exposure.risk_added,
-        borrow_debt: 0,
-        // §3.3.2 — quoted by `initialize_window` below, after the rate
-        // refresh, never here.
+        borrow_index_snapshot: 0,
         stored_minimum_borrow_fee: 0,
-        funding_paid_to_receivers_debt: 0,
-        funding_paid_to_lps_debt: 0,
-        funding_received_debt: 0,
+        receiver_payer_index_snapshot: 0,
+        lp_payer_index_snapshot: 0,
+        receiver_index_snapshot: 0,
         opened_at: now,
         last_size_increase_at: now,
         pending_mutation_action_id: None,
-        // §8.6 — the fill's observation becomes the commitment cursor for
-        // both attached exits, so neither can close the position on the same
-        // observation that opened it.
         take_profit: trigger::attach(
             open.take_profit,
             0,
@@ -555,9 +454,6 @@ fn execute(
     );
 
     let was_empty = market.long.size_open_interest == 0 && market.short.size_open_interest == 0;
-    // §4.9 step 7 — this side's size is about to change, so the opposite
-    // payer stream's receiver-distribution carry is no longer valid under
-    // the new divisor.
     funding::reset_receiver_distribution_remainder(market, is_long);
     {
         let side = market.side_mut(is_long);
@@ -570,13 +466,8 @@ fn execute(
     }
     risk::register_exposure(env, ledger, exposure.risk_added);
     risk::register_position(ledger);
-    funding::reset_debts(env, &mut position, market);
+    funding::snapshot_funding_indices(&mut position, market);
     funding::refresh_display(env, ledger, market);
-    // §7.2 — refresh the market display **and** risk state from the
-    // resulting book. A position opened at the fill carries no PnL of its
-    // own, so this ordinarily changes nothing; it runs because the side's
-    // state is a function of the book as it now stands, not as it stood
-    // before the preflight.
     let physical_after = ledger::physical_cash(env);
     let equity_after = ledger.cash_lp_equity(env, physical_after);
     risk::evaluate_market_risk(
@@ -589,16 +480,12 @@ fn execute(
         equity_after,
     );
     storage::save_market(env, &action.market_id, market);
-    // §4.9 step 9, then §4.10 — the rate is refreshed from the resulting
-    // risk units and claims, and only then is the borrow window quoted.
     borrow::refresh_rate(env, ledger, physical_after);
     borrow::initialize_window(env, ledger, &mut position);
     storage::save_position(env, &position);
     storage::remove_pending_action(env, action.action_id);
     storage::save_ledger(env, ledger);
     events::emit_opened(env, keeper_address, &position, price);
-    // §12.6 — what ties the commitment to its outcome. The action record is
-    // gone by now (§5.6), so without this an indexer cannot connect the two.
     events::emit_action_settled(
         env,
         &action.market_id,
@@ -613,12 +500,6 @@ fn execute(
     );
 }
 
-// ---------------------------------------------------------------------------
-// Cancellation and expiry (§7.5, §7.6).
-// ---------------------------------------------------------------------------
-
-/// §7.5 — the owner withdraws a resting limit entry. Complete refund, no
-/// fee, no keeper reward. A market entry does not expose this operation.
 pub fn cancel_limit_open(env: Env, action_id: u64) -> i128 {
     require_initialized(&env);
     let mut action = action::load(&env, action_id, ActionKind::LimitOpen);
@@ -628,8 +509,6 @@ pub fn cancel_limit_open(env: Env, action_id: u64) -> i128 {
         .open()
         .unwrap_or_else(|| panic_with_error!(&env, PositionManagerError::WrongActionKind))
         .expires_at;
-    // At or past expiry only the cleanup path is valid (§8.13), so both
-    // cannot consume the same record.
     if action::expired(env.ledger().timestamp(), expires_at) {
         panic_with_error!(&env, PositionManagerError::InvalidOrder);
     }
@@ -651,9 +530,6 @@ pub fn cancel_limit_open(env: Env, action_id: u64) -> i128 {
     refund
 }
 
-/// §7.6 — permissionless cleanup of an expired entry. Pays
-/// `keeper_expiry_reward` from escrow and refunds the remainder to the
-/// owner. Creation guaranteed the escrow covers this reward.
 pub fn clean_expired_entry(env: Env, keeper_address: Address, action_id: u64) {
     require_initialized(&env);
     keeper_address.require_auth();

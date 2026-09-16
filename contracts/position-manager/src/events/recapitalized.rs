@@ -1,7 +1,6 @@
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env};
 
-/// Cash added during a shortfall without minting shares (§15.2).
 #[contractevent(topics = ["recap"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Recapitalized {

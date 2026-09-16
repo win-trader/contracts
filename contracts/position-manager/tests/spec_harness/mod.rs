@@ -330,14 +330,16 @@ impl Protocol {
         );
     }
 
-    /// §9.1's decomposition of `non_lp_claims`. The interface exposes no
+    /// §2.5's decomposition of `non_lp_claims` into its six labels. The
+    /// interface exposes no
     /// aggregate for position collateral or action escrow, so the caller
     /// names the live positions and pending actions.
     pub fn claims_from_parts(&self, positions: &[u64], actions: &[u64]) -> i128 {
         let c = self.pm();
         let mut total = c.pending_receiver_funding_total()
             + c.protocol_claimable_total()
-            + c.referral_claimable_total();
+            + c.referral_claimable_total()
+            + c.unclaimed_payout_total();
         for id in positions {
             total += c.get_position(id).stored_collateral;
         }

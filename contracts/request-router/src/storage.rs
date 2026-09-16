@@ -14,6 +14,8 @@ pub(crate) enum Key {
     NextToResolve,
     Request(u64),
     Version,
+    Claimable(Address),
+    ClaimableTotal,
 }
 
 pub(crate) fn get<T: TryFromVal<Env, Val>>(env: &Env, key: &Key) -> Option<T> {
@@ -70,4 +72,28 @@ pub(crate) fn load_request(env: &Env, id: u64) -> LpRequest {
 
 pub(crate) fn save_version(env: &Env, data: &MigrationData) {
     set(env, &Key::Version, &data.version);
+}
+
+pub(crate) fn claimable(env: &Env, owner: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&Key::Claimable(owner.clone()))
+        .unwrap_or(0)
+}
+
+pub(crate) fn save_claimable(env: &Env, owner: &Address, amount: i128) {
+    let key = Key::Claimable(owner.clone());
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+    shared::bump_instance_ttl(env);
+}
+
+pub(crate) fn claimable_total(env: &Env) -> i128 {
+    get(env, &Key::ClaimableTotal).unwrap_or(0)
+}
+
+pub(crate) fn save_claimable_total(env: &Env, amount: i128) {
+    set(env, &Key::ClaimableTotal, &amount);
 }

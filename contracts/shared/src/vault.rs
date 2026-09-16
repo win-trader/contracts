@@ -1,44 +1,18 @@
-//! Shared vault contract interface.
-//!
-//! The vault is deliberately thin: it holds the one collateral-token
-//! balance and the LP share token, and it moves cash only on instruction
-//! from the PositionManager (claim transfers) or the RequestRouter (LP
-//! settlement). All accounting state lives in the PositionManager.
-//!
-//! The two claim-transfer entry points differ in exactly one invariant:
-//! `transfer_claim` re-checks cash-ownership conservation
-//! (`physical - amount >= claims_after`) and therefore fails during a cash
-//! shortfall — use it for ordinary outgoing claims (§15.2 stops those).
-//! `transfer_safety_claim` skips that check — it is reserved for position
-//! settlement, liquidation rewards, and budget payouts, which must not be
-//! blockable by a shortfall (a safety action must never wait, §15.4).
-
 use soroban_sdk::{contractclient, Address, BytesN, Env};
 
 use crate::types::{AccountingSnapshot, LpConfig, SettlementResult};
 
+/// Holds the collateral balance and the LP share token. Moves cash only for the
+/// position manager and the request router; all accounting lives in the position manager.
 #[contractclient(name = "VaultClient")]
 pub trait VaultInterface {
-    /// One-time wiring of the RequestRouter address (ADMIN).
+    /// One-time wiring of the request router (ADMIN).
     fn set_request_router(env: Env, caller: Address, request_router: Address);
 
-    /// Pull `amount` collateral from `from` into the vault
-    /// (PositionManager only). The caller is responsible for recording the
-    /// matching claim.
+    /// Pull collateral from `from` into the vault (position manager only).
     fn receive_collateral(env: Env, caller: Address, from: Address, amount: i128);
 
-    /// Pull `amount` from `from` into the vault via `from`'s pre-granted
-    /// token allowance (PositionManager only, entry-order fills). Returns
-    /// `false` — without panicking — if the pull fails (revoked/expired
-    /// allowance or insufficient balance), so the caller can drop the dead
-    /// order and still commit. The caller records the matching claim on
-    /// success.
-    fn pull_from_allowance(env: Env, caller: Address, from: Address, amount: i128) -> bool;
-
-    /// Conservation-checked outgoing claim (PositionManager only):
-    /// `claims_after` is the caller's post-transfer non-LP claim total, and
-    /// the transfer must leave at least that much cash behind. Fails during
-    /// a shortfall.
+    /// Pay out a claim, leaving at least `claims_after` in cash (position manager only).
     fn transfer_claim(
         env: Env,
         caller: Address,
@@ -47,16 +21,11 @@ pub trait VaultInterface {
         claims_after: i128,
     );
 
-    /// Unchecked outgoing settlement transfer (PositionManager only) — for
-    /// trader payouts, liquidation/keeper rewards, and execution budgets.
-    /// See the module docs for why this bypasses the conservation check.
+    /// Pay out a settlement, refund, or keeper reward without the conservation check
+    /// (position manager only).
     fn transfer_safety_claim(env: Env, caller: Address, recipient: Address, amount: i128);
 
-    /// Settle a matured deposit request (RequestRouter only, §7.17). Prices
-    /// every active market from the external feed inside this transaction,
-    /// so the whole NAV calculation sees one timestamp. Returns `Failed`
-    /// (escrow refunded by the router) instead of panicking for business
-    /// rejections.
+    /// Settle a matured deposit (request router only). Business rejections return `Failed`.
     fn settle_deposit(
         env: Env,
         caller: Address,
@@ -64,13 +33,8 @@ pub trait VaultInterface {
         assets: i128,
     ) -> SettlementResult;
 
-    /// Settle a matured withdrawal request (RequestRouter only, §7.17).
-    /// Full-or-nothing; never leaves a cash claim behind.
-    ///
-    /// `executor` receives `keeper_lp_resolve_reward` out of the assets the
-    /// withdrawal releases, after every capacity and health check has passed
-    /// on the full amount. The vault pays it rather than the router because
-    /// the router's escrow for a withdrawal is shares, not cash.
+    /// Settle a matured withdrawal (request router only). Pays the resolve reward to
+    /// `executor` and the owner's assets to the router.
     fn settle_withdrawal(
         env: Env,
         caller: Address,
@@ -79,30 +43,48 @@ pub trait VaultInterface {
         executor: Address,
     ) -> SettlementResult;
 
-    /// §5.10 `keeper_lp_resolve_reward`, read through to the position
-    /// manager's live configuration. The router needs it to size a deposit's
-    /// reward, which comes out of its own asset escrow before conversion.
+    /// The live `keeper_lp_resolve_reward`.
     fn lp_resolve_reward(env: Env) -> i128;
 
+    /// The position manager's `config_timelock_seconds`.
+    fn config_timelock_seconds(env: Env) -> u64;
+
+    /// Set the LP request policy (ADMIN).
     fn set_lp_config(env: Env, caller: Address, config: LpConfig);
+
+    /// The LP request policy.
     fn get_lp_config(env: Env) -> LpConfig;
-    /// Whether the protocol currently accepts new LP requests (§14).
+
+    /// Whether LP requests may be created (not paused).
     fn can_create_lp_request(env: Env) -> bool;
-    /// Read-only accounting snapshot at current feed prices — delegates to
-    /// the PositionManager with the current physical cash.
+
+    /// Whether the vault or the protocol is paused.
+    fn lp_paused(env: Env) -> bool;
+
+    /// Read-only accounting snapshot at current prices.
     fn accounting_snapshot(env: Env) -> AccountingSnapshot;
-    /// `collateral_token.balanceOf(vault)` — the only authoritative cash
-    /// balance (§4.1).
+
+    /// The vault's collateral token balance.
     fn physical_cash(env: Env) -> i128;
+
+    /// The collateral token.
     fn query_asset(env: Env) -> Address;
+
+    /// Total LP share supply.
     fn total_share_supply(env: Env) -> i128;
 
-    /// Operational pause: LP settlements resolve as `Failed` (escrow
-    /// refunded) instead of executing.
+    /// Hold LP request creation and resolution (PAUSER).
     fn pause(env: Env, caller: Address);
+
+    /// Clear the vault pause (UNPAUSER).
     fn unpause(env: Env, caller: Address);
+
+    /// Propose a WASM upgrade (UPGRADER).
     fn propose_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>);
+
+    /// Cancel a pending upgrade (PAUSER).
     fn cancel_upgrade(env: Env, caller: Address);
-    /// Re-extend instance storage TTL. Open to anyone.
+
+    /// Extend instance storage TTL. Open to anyone.
     fn bump_vault_state(env: Env);
 }

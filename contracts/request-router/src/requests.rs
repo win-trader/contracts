@@ -15,6 +15,50 @@ fn transfer(env: &Env, token: &Address, from: &Address, to: &Address, amount: i1
     TokenClient::new(env, token).transfer(from, to, &amount);
 }
 
+fn deliver_or_hold(env: &Env, owner: &Address, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    let current = env.current_contract_address();
+    // A failed push is held for the owner so one LP can't block the queue head.
+    let delivered = TokenClient::new(env, &storage::asset(env))
+        .try_transfer(&current, owner, &amount)
+        .is_ok();
+    if delivered {
+        return;
+    }
+    storage::save_claimable(env, owner, storage::claimable(env, owner) + amount);
+    storage::save_claimable_total(env, storage::claimable_total(env) + amount);
+    events::LpPayoutDeferred {
+        owner: owner.clone(),
+        amount,
+    }
+    .publish(env);
+}
+
+pub(crate) fn claim_lp_payout(env: &Env, owner: Address) -> i128 {
+    owner.require_auth();
+    let amount = storage::claimable(env, &owner);
+    if amount <= 0 {
+        panic_with_error!(env, RequestRouterError::InvalidAmount);
+    }
+    storage::save_claimable(env, &owner, 0);
+    storage::save_claimable_total(env, storage::claimable_total(env) - amount);
+    transfer(
+        env,
+        &storage::asset(env),
+        &env.current_contract_address(),
+        &owner,
+        amount,
+    );
+    events::LpPayoutClaimed {
+        owner,
+        amount,
+    }
+    .publish(env);
+    amount
+}
+
 fn ensure_lp_actions_open(env: &Env) {
     if !VaultClient::new(env, &storage::vault(env)).can_create_lp_request() {
         panic_with_error!(env, RequestRouterError::LpActionBlocked);
@@ -39,10 +83,6 @@ fn authorize_vault_asset_pull(env: &Env, amount: i128) {
 
 pub(crate) fn request_deposit(env: &Env, owner: Address, assets: i128) -> u64 {
     owner.require_auth();
-    // §7.17 — strictly greater than the resolve reward, so a deposit always
-    // has something left to convert after the executor is paid. Equal would
-    // mint zero shares and fail for a reason the depositor could have been
-    // told at creation.
     if assets <= VaultClient::new(env, &storage::vault(env)).lp_resolve_reward() {
         panic_with_error!(env, RequestRouterError::InvalidAmount);
     }
@@ -121,14 +161,6 @@ pub(crate) fn request_withdrawal(env: &Env, owner: Address, shares: i128) -> u64
     id
 }
 
-/// §7.17 — resolve the FIFO head.
-///
-/// Permissionless and paid, "exactly like every other settlement in this
-/// protocol". No LP depends on a third party: because only the head is
-/// resolvable, an owner queued behind others clears the queue by calling
-/// this once per request ahead of theirs, collecting each reward on the way,
-/// so the manual path funds itself. The reward exists to make that path
-/// unnecessary, not to make it exclusive.
 pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
     executor.require_auth();
     let id = storage::next_to_resolve(env);
@@ -136,25 +168,18 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
     if request.status != LpRequestStatus::Pending {
         panic_with_error!(env, RequestRouterError::InvalidRequest);
     }
-    // §7.17 — the delay is a wall-clock wait, not a wait for a published
-    // round. The vault prices every market from the external feed inside the
-    // settling transaction, so there is no separate publication step whose
-    // stalling would strand LP requests while positions keep trading.
-    //
-    // Not ready is a **return**, not a revert: there is no `Expired`
-    // outcome for an LP request, so a premature call simply leaves the head
-    // pending, changes nothing, and pays nothing.
+    let not_ready = SettlementResult {
+        status: SettlementStatus::NotReady,
+        amount: 0,
+        reward: 0,
+    };
     if env.ledger().timestamp() < request.execute_after {
-        return SettlementResult {
-            status: SettlementStatus::NotReady,
-            amount: 0,
-            reward: 0,
-        };
+        return not_ready;
+    }
+    if VaultClient::new(env, &storage::vault(env)).lp_paused() {
+        return not_ready;
     }
 
-    // Mark and advance before external effects. A panic rolls the complete
-    // transaction back; an expected business failure is a terminal outcome
-    // that still advances the queue.
     request.status = LpRequestStatus::Settled;
     storage::save_request(env, &request);
     storage::advance_next_to_resolve(env, id);
@@ -163,12 +188,6 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
     let vault_client = VaultClient::new(env, &vault_address);
     let current = env.current_contract_address();
     let result = if request.kind == LpRequestKind::Deposit {
-        // §7.17 — a deposit's reward comes out of its **asset escrow,
-        // before conversion**, so the depositor mints shares for the assets
-        // that actually reach the vault and no share is created against
-        // value paid to the executor. It is paid on every terminal outcome,
-        // success or failure, which is why it is taken here rather than in
-        // each branch.
         let reward = core::cmp::min(vault_client.lp_resolve_reward(), request.amount);
         let deposit_assets = request.amount - reward;
         let asset = storage::asset(env);
@@ -180,22 +199,20 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
             vault_client.settle_deposit(&current, &request.owner, &deposit_assets);
         settled.reward = reward;
         if settled.status == SettlementStatus::Failed {
-            // Only the un-deposited remainder goes back; the reward has
-            // already left, exactly as `fail_lp_request` specifies.
-            transfer(env, &asset, &current, &request.owner, deposit_assets);
+            deliver_or_hold(env, &request.owner, deposit_assets);
         }
         settled
     } else {
-        // §7.17 — a failed withdrawal pays **no** reward. Its escrow is
-        // shares, not cash, and a failed withdrawal releases no assets, so
-        // there is nothing to pay from; taking the reward in shares would
-        // confiscate part of an LP's stake for an outcome they did not
-        // cause. The executor is compensated by the deposits and successful
-        // withdrawals in the same queue.
         let settled =
             vault_client.settle_withdrawal(&current, &request.owner, &request.amount, &executor);
-        if settled.status == SettlementStatus::Failed {
-            transfer(env, &vault_address, &current, &request.owner, request.amount);
+        match settled.status {
+            SettlementStatus::Settled => {
+                deliver_or_hold(env, &request.owner, settled.amount - settled.reward)
+            }
+            SettlementStatus::Failed => {
+                transfer(env, &vault_address, &current, &request.owner, request.amount)
+            }
+            SettlementStatus::NotReady => {}
         }
         settled
     };

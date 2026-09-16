@@ -141,7 +141,7 @@ fn an_unwired_feed_surfaces_as_this_contracts_own_error() {
     // with something that is not ours.
     let impostor = Address::generate(&w.env);
     assert!(
-        c.try_set_price_feed(&w.admin, &impostor).is_err(),
-        "an address that cannot answer `decimals` is refused at wiring time"
+        c.try_propose_price_feed(&w.admin, &impostor).is_err(),
+        "an address that cannot answer `decimals` is refused at proposal time"
     );
 }

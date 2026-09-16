@@ -45,7 +45,7 @@
   - [4.1 Why indices are necessary](#41-why-indices-are-necessary)
   - [4.2 Global borrow index](#42-global-borrow-index)
   - [4.3 Per-market funding indices](#43-per-market-funding-indices)
-  - [4.4 Position debt baselines](#44-position-debt-baselines)
+  - [4.4 Position index snapshots](#44-position-index-snapshots)
   - [4.5 Accrual remainders](#45-accrual-remainders)
   - [4.6 Funding EMA and exact window integration](#46-funding-ema-and-exact-window-integration)
   - [4.7 Global checkpoint](#47-global-checkpoint)
@@ -261,7 +261,7 @@ settlement order and the remaining shortfall becomes a vault loss.
 
 A market order commits to execute at the authenticated current price used by
 the first settlement call that reaches a terminal outcome, subject to the
-trader's execution bounds. The price must come from an observation newer than
+trader's execution bounds. The price must come from an observation sampled after
 the commitment. The protocol does not claim that this is the first oracle
 observation produced after the delay; enforcing a particular oracle round
 would require a separate round-assignment mechanism. What makes the first
@@ -470,6 +470,9 @@ carried_div(n, d, r):
 
 `mul_div_trunc` is the helper for signed quantities: the signed skew of §3.4.1,
 the blend coefficient `B` of §4.6, and the decayed values derived from them.
+Its **divisor** is always positive; a signed quantity may appear as a factor
+but never as `d`. Dividing by a value that can be negative is written over
+magnitudes instead (§6.2.1's `d_star`).
 Truncation toward zero means the magnitude of a signed skew is never
 overstated, in either direction, which floor division would not give for a
 negative value.
@@ -637,21 +640,45 @@ EMA is still far from live skew satisfies that weaker test while its crossing
 lies hours beyond `elapsed`, and the window would then be split at a point
 outside itself.
 
-When the endpoint test passes:
+When the endpoint test passes, `A` and `B` have opposite signs, so `-A / B` is
+positive and is formed from magnitudes:
 
 ```text
-d_star = -A / B                       in (d_end, 1)
-t_star = mul_div_floor(H, log2(mul_div_floor(INDEX_PRECISION,
-                                             INDEX_PRECISION, d_star)),
-                       INDEX_PRECISION)
+d_star = mul_div_floor(abs(A), INDEX_PRECISION, abs(B))     # -A / B, in (d_end, 1)
+t_star = H * log2(mul_div_floor(INDEX_PRECISION, INDEX_PRECISION, d_star))
+                                      # INDEX_PRECISION-scaled seconds
 ```
 
-`d_star > d_end` places `t_star` strictly inside `(0, elapsed)`.
+`B` is negative for every **upward** crossing — a short-dominated history under
+a book that is now long — so writing `mul_div_trunc(-A, INDEX_PRECISION, B)`
+divides by a negative number, which §2.1.1's helper refuses. An earlier
+revision did exactly that, and because a failed checkpoint never advances, the
+first upward crossing froze its market permanently.
 
-`t_star` is used at this precision and is not rounded to a whole second before
-the two subintervals are integrated. Its residual error is second order: the
-integrand `I(t)^2` vanishes at the crossing, so a small error in `t_star`
-perturbs each subinterval's contribution by an amount quadratic in that error.
+`t_star` is kept at `INDEX_PRECISION` — seconds times `1e14` — and is **not**
+rounded to a whole second before the two subintervals are integrated. With
+`t_star` and `d_star` describing the same instant, the residual error is second
+order: the integrand `I(t)^2` vanishes at the crossing, so a small error in the
+crossing point perturbs each subinterval's contribution by an amount quadratic
+in that error. Rounding `t_star` to whole seconds while keeping `d_star` exact
+breaks that pairing and makes the error first order — up to one second of
+funding at the limit rate `A^2`, moved from one payer side to the other.
+
+Rounding can still place the computed crossing on or past a window boundary
+even though the endpoints disagree. That is not a split, and it is not an
+error:
+
+```text
+if d_star >= INDEX_PRECISION or t_star <= 0:
+    the end sign governs the whole window       # crossing rounds to the start
+else if d_star <= d_end or t_star >= elapsed * INDEX_PRECISION:
+    the start sign governs the whole window     # crossing rounds to the end
+```
+
+These branches replace `require`s. Every input to them is stored state plus
+elapsed time, so a check that reverted on them would revert identically at
+every later timestamp: a checkpoint that lands less than one second before a
+crossing, with whole-second `t_star`, froze its market in exactly that way.
 
 #### 2.1.3 Constants and conformance vectors
 
@@ -890,6 +917,7 @@ non_lp_claims =
     + action_escrow_total
     + protocol_claimable_total
     + referral_claimable_total
+    + unclaimed_payout_total
 ```
 
 - `stored_position_collateral_total` is the sum of collateral owned by all
@@ -901,6 +929,9 @@ non_lp_claims =
 - `protocol_claimable_total` is collected protocol revenue awaiting claim.
 - `referral_claimable_total` is collected referral revenue awaiting claim and
   equals the sum of individual referral balances.
+- `unclaimed_payout_total` is trader payouts and escrow refunds that could not
+  be delivered when they settled and await the owner's claim (§12.1). It equals
+  the sum of individual unclaimed payout balances.
 
 Keeper rewards are paid directly from order escrow or position value and do
 not accumulate in a keeper reserve. LP revenue has no explicit claim bucket;
@@ -1104,7 +1135,14 @@ What protects the vault is the split itself: since `floor(x) + floor(y) <=
 floor(x + y)`, valuing two portions separately can only produce less trader
 value than valuing the whole position once.
 
-Any negative pending fee obtained by subtracting a stored debt baseline from a
+Each pending index amount is rounded **once**, from the index delta over its
+window: `ceil(base * delta / INDEX_PRECISION)` for an obligation,
+`floor(base * delta / INDEX_PRECISION)` for a credit (§4.4). Rounding the
+cumulative value at both ends of a window and subtracting instead —
+`floor(size * I_now) - floor(size * I_then)` — can exceed the exact credit by a
+whole unit, which is rounding in the trader's favour.
+
+Any negative index delta obtained by subtracting a stored snapshot from a
 monotonic index is an invariant violation. A floor or cap must never hide it.
 
 ### 2.12 Stored and derived values
@@ -1112,8 +1150,8 @@ monotonic index is an invariant violation. A floor or cap must never hide it.
 The system stores a value only when it cannot be reconstructed safely and
 efficiently from authoritative state. Stored values include ownership claims,
 position and market exposure, cumulative indices and their remainders,
-position debt baselines, active borrow minima, order state, risk-state latches,
-and configuration.
+position index snapshots, active borrow minima, order state, risk-state
+latches, and configuration.
 
 The following values are derived when needed and are not independent sources
 of truth:
@@ -1321,15 +1359,16 @@ or whether the position is profitable:
 
 ```text
 actual_borrow = ceil(
-    risk_units * current_borrow_index / INDEX_PRECISION
-) - borrow_debt
+    risk_units * (current_borrow_index - borrow_index_snapshot)
+    / INDEX_PRECISION
+)
 
 pending_borrow = max(actual_borrow, stored_minimum_borrow_fee)
 ```
 
-`borrow_debt` is the position's index baseline for its current borrow window.
-A negative `actual_borrow` is an invariant violation and must be rejected
-before the minimum is applied.
+`borrow_index_snapshot` is the global borrow index at the start of the
+position's current borrow window. A negative index delta is an invariant
+violation and must be rejected before the minimum is applied.
 
 Borrow revenue is collected only to the extent the position can pay it. The
 collected amount is distributed 90% to LPs and 10% to the protocol by default.
@@ -1422,8 +1461,8 @@ The previous window does not carry a tranche, proportional remainder, or
 minimum into the new one. A decrease deliberately begins a fresh minimum for
 the entire position that remains.
 
-A collateral-only addition does not settle borrow, reset the debt baseline, or
-quote a new minimum because it does not change exposure. A full close,
+A collateral-only addition does not settle borrow, retake the borrow snapshot,
+or quote a new minimum because it does not change exposure. A full close,
 liquidation, or ADL settles the current window but creates no replacement
 window.
 
@@ -1554,7 +1593,8 @@ LP-backed portion belongs to LP residual equity because LPs remain the
 counterparty for payer exposure that no trader offsets.
 
 Separate indices track payer obligations backed by receivers, payer
-obligations backed by LPs, and receiver credits. At the position boundary:
+obligations backed by LPs, and receiver credits. At the position boundary, each
+rounded once from its index delta since the position's snapshot:
 
 ```text
 funding_owed_to_receivers = ceil(
@@ -1610,15 +1650,27 @@ The reward is an execution cost, not protocol revenue. It is transferred to
 the keeper rather than accumulated in a reserve or shared with LPs, the
 protocol, or a referrer.
 
-Three payments are capped at what their source holds and complete anyway: the
-failure reward on a position action (§7.0), `keeper_lp_resolve_reward` on a
-request worth less than the reward, and `keeper_liquidation_reward` (§9.10).
-Each pays for an action that must not be blocked by its own cost.
+Four kinds of payment are capped at what their source holds and complete
+anyway: the failure reward on a position action (§7.0),
+`keeper_lp_resolve_reward` on a request worth less than the reward,
+`keeper_liquidation_reward` (§9.10), and the reward of a **terminal exit** — a
+voluntary close, take-profit, stop-loss, or ADL — which is capped at the
+position's stored collateral once its profit has been credited. Each pays for
+an action that must not be blocked by its own cost.
 
-Every other reward is required in full, and its action reverts if the position
-cannot fund it: a voluntary settlement that cannot pay for itself should not
-complete. Of the three capped payments, only the liquidation reward may draw
-on LP equity, and only as far as that equity reaches.
+The terminal-exit cap exists because health and payment measure profit
+differently. Effective collateral counts payable profit in full (§2.9), while
+settlement credits it only up to cash LP equity (§2.8). A healthy winner whose
+stored collateral has been worn down by funding and borrow can therefore reach
+the reward step with less stored collateral than the reward, in a vault that
+cannot pay its profit. Requiring the reward in full reverted every exit of
+that position while it was too healthy to liquidate.
+
+The rewards of surviving actions — increase and decrease — are required in
+full: their preflights guarantee it, and a surviving settlement that cannot
+pay for itself takes the expected-failure path instead. Of the capped
+payments, only the liquidation reward may draw on LP equity, and only as far as
+that equity reaches.
 
 #### 3.5.1 Open execution
 
@@ -1812,8 +1864,8 @@ profit is eligible, so the closing fee cannot indirectly replace collateral
 used to pay them.
 
 A partial action must satisfy every senior obligation and leave the surviving
-position healthy. It cannot leave unpaid debt attached to a reset index
-baseline. A full forced settlement may exhaust all position value and report a
+position healthy. It cannot leave unpaid debt attached to a retaken index
+snapshot. A full forced settlement may exhaust all position value and report a
 shortfall.
 
 Entry settlement uses a separate escrow distribution:
@@ -2070,67 +2122,61 @@ The displayed payer side and rate describe the state after the latest
 checkpoint. Accrued obligations come from cumulative indices, never from these
 display fields.
 
-### 4.4 Position debt baselines
+### 4.4 Position index snapshots
 
-Each position stores four monetary debt baselines:
+Each position stores four index snapshots — the value of each cumulative index
+that applies to it, taken at its last accounting boundary:
 
 ```text
-funding_paid_to_receivers_debt
-funding_paid_to_lps_debt
-funding_received_debt
-borrow_debt
+borrow_index_snapshot           = borrow_index
+receiver_payer_index_snapshot   = receiver_backed_payer_index   # for its direction
+lp_payer_index_snapshot         = lp_backed_payer_index         # for its direction
+receiver_index_snapshot         = receiver_index                # for its direction
 ```
 
-For the position's direction, the baseline values are recorded with the same
-rounding used when the current cumulative value is later read:
+A pending amount is the index delta since the snapshot, applied to the
+position's fee base and rounded **once**, in the direction §2.11 gives it:
 
 ```text
-funding_paid_to_receivers_debt = ceil(
-    position_size * receiver_backed_payer_index / INDEX_PRECISION
+pending_receiver_funding_owed = ceil(
+    position_size
+    * (current_receiver_backed_payer_index - receiver_payer_index_snapshot)
+    / INDEX_PRECISION
 )
 
-funding_paid_to_lps_debt = ceil(
-    position_size * lp_backed_payer_index / INDEX_PRECISION
+pending_lp_funding_owed = ceil(
+    position_size
+    * (current_lp_backed_payer_index - lp_payer_index_snapshot)
+    / INDEX_PRECISION
 )
 
-funding_received_debt = floor(
-    position_size * receiver_index / INDEX_PRECISION
+pending_funding_received = floor(
+    position_size
+    * (current_receiver_index - receiver_index_snapshot)
+    / INDEX_PRECISION
 )
 
-borrow_debt = ceil(
-    position_risk_units * borrow_index / INDEX_PRECISION
+actual_borrow = ceil(
+    position_risk_units
+    * (current_borrow_index - borrow_index_snapshot)
+    / INDEX_PRECISION
 )
-```
-
-Pending amounts subtract these baselines from current cumulative values:
-
-```text
-pending_receiver_funding_owed =
-    ceil(position_size * current_receiver_backed_payer_index
-         / INDEX_PRECISION)
-    - funding_paid_to_receivers_debt
-
-pending_lp_funding_owed =
-    ceil(position_size * current_lp_backed_payer_index
-         / INDEX_PRECISION)
-    - funding_paid_to_lps_debt
-
-pending_funding_received =
-    floor(position_size * current_receiver_index
-          / INDEX_PRECISION)
-    - funding_received_debt
-
-actual_borrow =
-    ceil(position_risk_units * current_borrow_index
-         / INDEX_PRECISION)
-    - borrow_debt
 
 pending_borrow = max(actual_borrow, stored_minimum_borrow_fee)
 ```
 
-The raw differences are checked before any floor or cap is applied. A negative
-difference means an index decreased or a baseline was corrupted and is always
-an invariant violation.
+The index deltas are checked before any rounding, floor, or cap is applied. A
+negative delta means an index decreased or a snapshot was corrupted and is
+always an invariant violation.
+
+The snapshot is an index, not a rounded monetary value, and that is
+load-bearing. An earlier revision stored `floor(size * index)` at the boundary
+and computed a credit as `floor(size * index_now) - floor(size * index_then)`.
+A difference of two floors can exceed the exact share by a whole unit per
+window, so the sum of receiver credits could outrun the guaranteed liability
+that backs them, and §9.4's sufficiency check — a `require` — could revert a
+receiver's close or liquidation. Rounding once from the delta makes every
+credit at most its exact share and every obligation at least its exact charge.
 
 ### 4.5 Accrual remainders
 
@@ -2284,9 +2330,9 @@ For an interval on which `I(t)` keeps one sign, that sign selects the payer and
 the non-negative quadratic integral determines the amount. Because `I(t)` is
 monotonic while live skew is constant, it has at most one zero crossing in a
 checkpoint interval. A crossing exists exactly when `I` disagrees in sign at
-the two ends of that interval, `A + B` and `A + B * d`; §2.1.2 states the test
-and gives the closed form for `t_star`, which the test places strictly inside
-the window. Integrate the two subintervals independently and carry each result
+the two ends of that interval, `A + B` and `A + B * d`; §2.1.2 states the test,
+gives the closed form for `t_star`, and says what happens when rounding places
+it on a window boundary. Integrate the two subintervals independently and carry each result
 to the corresponding payer stream. The crossing uses the same declared decay quantization as the EMA
 calculation; it is not rounded to an arbitrary whole-second boundary before
 integration.
@@ -2385,9 +2431,7 @@ A position begins a borrow window only after its exposure has been accepted
 and the resulting global borrow rate has been derived. The new position stores:
 
 ```text
-borrow_debt = ceil(
-    resulting_risk_units * current_borrow_index / INDEX_PRECISION
-)
+borrow_index_snapshot = current_borrow_index
 
 stored_minimum_borrow_fee = ceil(
     resulting_risk_units
@@ -2402,7 +2446,7 @@ claim mutations. The baseline prevents the new exposure from paying historical
 index growth. The monetary minimum fixes the minimum obligation for this one
 window without storing a rate history on the position.
 
-The position's three funding debt baselines are initialized from the current
+The position's three funding index snapshots are taken from the current
 indices in the same step. A position opened into an existing market therefore
 begins only at the post-checkpoint boundary.
 
@@ -2413,11 +2457,10 @@ position before changing size:
 
 ```text
 function settle_and_reset_borrow_window(position, size_after):
-    raw_actual =
-        ceil(position.risk_units * borrow_index / INDEX_PRECISION)
-        - position.borrow_debt
+    delta = borrow_index - position.borrow_index_snapshot
+    require delta >= 0
 
-    require raw_actual >= 0
+    raw_actual = ceil(position.risk_units * delta / INDEX_PRECISION)
 
     borrow_due = max(
         raw_actual,
@@ -2429,9 +2472,7 @@ function settle_and_reset_borrow_window(position, size_after):
     refresh the global borrow rate
 
     if size_after > 0:
-        position.borrow_debt = ceil(
-            risk_units_after * borrow_index / INDEX_PRECISION
-        )
+        position.borrow_index_snapshot = borrow_index
 
         position.stored_minimum_borrow_fee = quote_minimum(
             risk_units_after,
@@ -2441,16 +2482,16 @@ function settle_and_reset_borrow_window(position, size_after):
 ```
 
 Funding accrued on the old size is settled at the same boundary. After the
-mutation, all three funding debt baselines are reset using the resulting size
-and the current funding indices.
+mutation, all three funding index snapshots are retaken from the current
+funding indices.
 
 No old minimum is apportioned to the removed or added size. No old actual
 borrow is carried forward. The surviving position starts at zero actual
 borrow with one new monetary minimum for its full resulting exposure.
 
-A collateral-only addition changes no index baseline and starts no new borrow
+A collateral-only addition changes no index snapshot and starts no new borrow
 window. A full close, liquidation, or full ADL settles the existing window and
-then removes the position, so no new minimum or debt baseline is created.
+then removes the position, so no new minimum or snapshot is created.
 
 ### 4.12 Reading pending fees without mutation
 
@@ -2461,9 +2502,9 @@ in-memory copy:
 ```text
 1. Virtually advance the global borrow index to the quote timestamp.
 2. Virtually advance the position's market funding indices to that timestamp.
-3. Calculate cumulative index values for the position's size and risk units.
-4. Subtract the stored debt baselines.
-5. Validate every raw pending amount is non-negative.
+3. Subtract the position's index snapshots from the advanced indices.
+4. Validate every index delta is non-negative.
+5. Round each delta against the position's size or risk units (§4.4).
 6. Apply the stored monetary minimum to raw borrow.
 7. Return the pending amounts without saving any state or remainder.
 ```
@@ -2487,7 +2528,7 @@ opens:
 2. Add the first exposure.
 3. Set skew_ema to the new live skew.
 4. Refresh the displayed payer side and rate.
-5. Initialize the position's funding debts from current indices.
+5. Take the position's funding index snapshots from current indices.
 ```
 
 Seeding the EMA from zero would describe a balanced history that never existed
@@ -2504,8 +2545,8 @@ release market.pending_receiver_funding from the market and global claim totals
 ```
 
 The cumulative funding indices and checkpoint timestamp remain monotonic and
-are not reset. A future position records the then-current indices as its debt
-baselines.
+are not reset. A future position records the then-current indices as its
+snapshots.
 
 Because receiver liabilities are attributed per market, empty-market cleanup
 does not wait for every other market in the vault to become empty. The global
@@ -2521,14 +2562,14 @@ The index system must always satisfy these properties:
 2. Calling a checkpoint twice at the same timestamp is a no-op the second
    time.
 3. Borrow and all six funding indices are monotonic.
-4. Raw pending index amounts are non-negative before a minimum or cap is
+4. Index deltas are non-negative before any rounding, minimum, or cap is
    applied.
 5. Past time uses the rate, exposure, skew, and parameters that were active
    during that time.
-6. New size begins at current debt baselines and never inherits historical
+6. New size begins at current index snapshots and never inherits historical
    accrual.
 7. Payer obligations round up at the position boundary; receiver credits
-   round down.
+   round down; each is rounded once, from its index delta.
 8. Guaranteed aggregate receiver credit never exceeds its receiver-backed
    payer accrual.
 9. Every repeated division carries its own remainder until its defined reset.
@@ -2557,6 +2598,7 @@ Global configuration applies to the complete vault.
 |---|---:|---|
 | `min_collateral` | Cash | Minimum stored collateral for a surviving position; must exceed `keeper_liquidation_reward` |
 | `min_position_lifetime` | Seconds | Minimum time after an open or size increase before voluntary exposure removal |
+| `max_price_age_seconds` | Seconds | Oldest price observation any action accepts (§8.6) |
 | `max_order_lifetime_seconds` | Seconds | Upper bound on a limit entry's `expires_at`; initial value `604,800` |
 | `max_market_order_lifetime_seconds` | Seconds | Upper bound on a market entry's `expires_at`; initial value `300` |
 | `min_borrow_fee_seconds` | Seconds | Duration used to quote each monetary minimum-borrow obligation; initial value `900` |
@@ -2585,7 +2627,7 @@ LP request policy is global:
 
 | Field | Unit | Meaning |
 |---|---:|---|
-| `lp_request_delay_seconds` | Seconds | Delay before an LP request can use its assigned synchronized price snapshot |
+| `lp_request_delay_seconds` | Seconds | Delay before an LP request becomes resolvable |
 | `max_withdraw_utilization_bps` | Bps | Maximum utilization permitted after an LP withdrawal |
 | `min_deposit_nav_factor_bps` | Bps | Minimum marked-NAV-to-cash-equity factor for an ordinary share-minting deposit |
 
@@ -2609,6 +2651,7 @@ risk counters, and borrow clock:
 | `action_escrow_total` | Cash | Sum of collateral committed to pending trader actions and held inside the vault |
 | `protocol_claimable_total` | Cash | Collected protocol revenue not yet withdrawn |
 | `referral_claimable_total` | Cash | Sum of all unclaimed referrer balances |
+| `unclaimed_payout_total` | Cash | Sum of payouts and refunds held for owners who could not receive them (§12.1) |
 | `total_risk_units` | Cash-scaled risk units | Sum of risk units across every open position |
 | `open_position_count` | Count | Number of stored open positions |
 | `restricted_market_side_count` | Count | Number of market sides latched in `Warning`, `ADL`, or `HardCap` |
@@ -2746,11 +2789,11 @@ One open position stores:
 | `base_exposure` | Base units | Current positive underlying exposure |
 | `stored_collateral` | Cash | Trader-owned cash label currently attached to the position |
 | `risk_units` | Risk units | Canonical capacity usage derived from complete current size and the market risk factor |
-| `borrow_debt` | Cash | Rounded cumulative borrow value at the active window's baseline |
+| `borrow_index_snapshot` | Index | Global borrow index at the start of the active window |
 | `stored_minimum_borrow_fee` | Cash | Fixed monetary minimum for the active borrow window |
-| `funding_paid_to_receivers_debt` | Cash | Rounded receiver-backed payer value at the last funding boundary |
-| `funding_paid_to_lps_debt` | Cash | Rounded LP-backed payer value at the last funding boundary |
-| `funding_received_debt` | Cash | Rounded receiver-credit value at the last funding boundary |
+| `receiver_payer_index_snapshot` | Index | Receiver-backed payer index for the direction at the last funding boundary |
+| `lp_payer_index_snapshot` | Index | LP-backed payer index for the direction at the last funding boundary |
+| `receiver_index_snapshot` | Index | Receiver-credit index for the direction at the last funding boundary |
 | `opened_at` | Timestamp | Time the first exposure was successfully created |
 | `last_size_increase_at` | Timestamp | Start of the current minimum-position-lifetime restriction |
 | `pending_mutation_action_id` | Optional identifier | The one pending voluntary increase, decrease, or close for this position |
@@ -2855,7 +2898,8 @@ execute_after = created_at + order_execution_delay_seconds_at_creation
 
 A later configuration change does not alter an existing commitment.
 `commit_observed_at` is the qualifying oracle cursor recorded at creation; an
-execution observation must be strictly newer.
+execution observation must be strictly newer than both it and `created_at`
+(§8.6).
 
 The payload freezes every trader-controlled economic input. Settlement may
 read current vault state and current position state, but it must not replace a
@@ -3014,19 +3058,17 @@ min_collateral > keeper_liquidation_reward
 Entry-order creation must also guarantee that its actual escrow can pay the
 applicable open, limit, or expiry reward.
 
-Only three payments are capped at what their source holds: the failure reward
-on a position action (§7.0), `keeper_lp_resolve_reward`, and
-`keeper_liquidation_reward`. Every other payment through
-`pay_keeper_from_position` requires its full amount and reverts if the
-position cannot fund it — a voluntary settlement that cannot pay for itself
-should not complete.
+The payments capped at what their source holds are listed in §3.5: the failure
+reward on a position action, `keeper_lp_resolve_reward`,
+`keeper_liquidation_reward`, and the reward of a terminal exit (close, TP, SL,
+ADL). A surviving increase or decrease pays its reward in full through
+`pay_keeper_from_position`, which its preflight has already guaranteed.
 
-That makes the blanket bound load-bearing rather than cosmetic. Without it,
-raising `keeper_close_reward` above `keeper_liquidation_reward` would create
-positions that are neither liquidatable, because their effective collateral is
-above the liquidation threshold, nor closeable, because
-`pay_keeper_from_position` reverts. Bounding every reward by `min_collateral`,
-which is itself above `keeper_liquidation_reward`, keeps that gap empty.
+The blanket bound still matters for the surviving actions. Without it, a
+decrease reward above `min_collateral` could never be paid by a position left
+at minimum collateral, and every such decrease would fail. Bounding every
+reward by `min_collateral`, which is itself above `keeper_liquidation_reward`,
+keeps the configured rewards payable by any position the protocol admits.
 
 ### 5.11 Aggregate exposure and risk state
 
@@ -3086,6 +3128,7 @@ non_lp_claims =
     + action_escrow_total
     + protocol_claimable_total
     + referral_claimable_total
+    + unclaimed_payout_total
 
 if physical_cash >= non_lp_claims:
     physical_cash = cash_lp_equity + non_lp_claims
@@ -3114,7 +3157,7 @@ The following values must be recalculated from authoritative state:
 | Derived value | Authoritative inputs |
 |---|---|
 | Physical cash | Vault collateral-token balance |
-| Non-LP claims | Five global claim totals |
+| Non-LP claims | Six global claim totals |
 | Cash LP equity and shortfall | Physical cash and non-LP claims |
 | Marked vault NAV | Cash LP equity, market-side aggregates, and synchronized prices |
 | LP share price | Marked NAV and actual share-token supply |
@@ -3123,8 +3166,8 @@ The following values must be recalculated from authoritative state:
 | Next borrow rate | Utilization and global curve parameters |
 | Position entry price | Position size and base exposure |
 | Raw and payable PnL | Position exposure, price, and the side's stored payout factor |
-| Pending funding | Position size, market indices, and funding debts |
-| Pending borrow | Position risk units, global index, borrow debt, and stored minimum |
+| Pending funding | Position size, market indices, and funding index snapshots |
+| Pending borrow | Position risk units, global index, borrow index snapshot, and stored minimum |
 | Effective collateral | Stored collateral, payable PnL, and pending fees |
 | Liquidation eligibility | Effective collateral, size, margin config, and fixed reward |
 | Opening and closing fees | Action values and market fee configuration |
@@ -3154,13 +3197,15 @@ Cleanup is part of every terminal transition:
   and checkpoint timestamp remain monotonic.
 - When a market has no open positions, its unassigned guaranteed-receiver
   residue is released to LP equity and deducted from the global aggregate.
-- A claimed protocol or referral balance is reduced before its cash transfer;
-  a failed transfer reverts both changes.
+- A claimed protocol, referral, or unclaimed-payout balance is reduced before
+  its cash transfer; a failed transfer reverts both changes.
+- A payout or refund owed to an owner who cannot receive it becomes an
+  unclaimed payout balance rather than reverting its settlement (§12.1).
 - A terminal LP request retains its status for FIFO history but holds no
   escrow. The FIFO pointer cannot remain on a terminal request.
 
-No live position, pending action, escrow, referral balance, or protocol claim
-may disappear because of storage expiry. Storage lifetime must be extended or
+No live position, pending action, escrow, referral balance, unclaimed payout,
+or protocol claim may disappear because of storage expiry. Storage lifetime must be extended or
 the state must remain restorable for as long as the economic obligation
 exists. §12.4 assigns each of these a storage class and requires every
 persistent entry to be extendable permissionlessly.
@@ -3371,27 +3416,27 @@ function integrate_funding_window_by_sign(
     I_start = A + B
     I_end   = A + mul_div_trunc(B, d_end, INDEX_PRECISION)
 
+    # --- span times are INDEX_PRECISION-scaled seconds ---
+    T = elapsed * INDEX_PRECISION
+    whole(sign) = [(0, INDEX_PRECISION, T, d_end, sign)]
+
     # --- split the window at a sign change, if there is one (§2.1.2) ---
     if I_start != 0 and I_end != 0 and sign(I_start) != sign(I_end):
-        d_star = mul_div_trunc(-A, INDEX_PRECISION, B)
-        require d_end < d_star < INDEX_PRECISION
+        d_star = mul_div_floor(abs(A), INDEX_PRECISION, abs(B))
+        t_star = half_life_seconds
+               * log2(mul_div_floor(INDEX_PRECISION, INDEX_PRECISION, d_star))
 
-        t_star = mul_div_floor(
-            half_life_seconds,
-            log2(mul_div_floor(INDEX_PRECISION, INDEX_PRECISION, d_star)),
-            INDEX_PRECISION
-        )
-        require 0 < t_star < elapsed
-
-        spans = [
-            (0,      INDEX_PRECISION, t_star,  d_star, I_start),
-            (t_star, d_star,          elapsed, d_end,  I_end)
-        ]
+        if d_star >= INDEX_PRECISION or t_star <= 0:
+            spans = whole(I_end)
+        else if d_star <= d_end or t_star >= T:
+            spans = whole(I_start)
+        else:
+            spans = [
+                (0,      INDEX_PRECISION, t_star, d_star, I_start),
+                (t_star, d_star,          T,      d_end,  I_end)
+            ]
     else:
-        spans = [
-            (0, INDEX_PRECISION, elapsed, d_end, I_start if I_start != 0
-                                                 else I_end)
-        ]
+        spans = whole(I_start if I_start != 0 else I_end)
 
     # --- integrate each span (§4.6) ---
     segments = []
@@ -3411,9 +3456,10 @@ function integrate_funding_window_by_sign(
             2 * LN2
         )
 
-        # INDEX_PRECISION^3 * seconds; every product formed in 256-bit
+        # INDEX_PRECISION^3 * seconds; every product formed in 256-bit.
+        # (t2 - t1) is already INDEX_PRECISION-scaled seconds.
         quadratic_scaled =
-              A * A * (t2 - t1) * INDEX_PRECISION
+              A * A * (t2 - t1)
             + 2 * A * B * j1
             + B * B * j2
 
@@ -3459,11 +3505,16 @@ segment starts at `d_star` rather than at `INDEX_PRECISION`. Restarting the
 decay at each segment would integrate the second one as though the EMA were
 fresh and would roughly double the funding attributed to it.
 
-`require d_end < d_star < INDEX_PRECISION` and `require 0 < t_star < elapsed`
-are the guards that the endpoint test of §2.1.2 is supposed to make
-unreachable. They are cheap, and an implementation that gets the sign test
-wrong fails loudly at the checkpoint rather than silently integrating a window
-at 150 times its true length.
+**The function never reverts on its inputs.** A crossing that rounding places
+on or past a window boundary integrates the window unsplit under the sign that
+boundary implies (§2.1.2). An earlier revision guarded the split with
+`require d_end < d_star < INDEX_PRECISION` and `require 0 < t_star < elapsed`,
+and divided by the signed `B`. Those failed on an upward crossing and on a
+checkpoint landing within a second of one; since the inputs are stored state
+and a failed checkpoint never advances, the market's every settlement,
+liquidation, and LP resolution then failed with it, forever. A liveness-critical
+accumulator may degrade a rounding edge case; it may not turn one into a
+revert.
 
 The clamp on `quadratic_integral` is bounded truncation residue on a quantity
 that is mathematically non-negative, which is why it is a clamp and not a
@@ -3479,14 +3530,14 @@ read from it.
 
 ```text
 function calculate_pending_borrow(position, ledger):
-    cumulative_value = mul_div_ceil(
+    delta = ledger.borrow_index - position.borrow_index_snapshot
+    require delta >= 0
+
+    raw_actual = mul_div_ceil(
         position.risk_units,
-        ledger.borrow_index,
+        delta,
         INDEX_PRECISION
     )
-
-    raw_actual = cumulative_value - position.borrow_debt
-    require raw_actual >= 0
 
     return PendingBorrow {
         actual: raw_actual,
@@ -3507,38 +3558,27 @@ function calculate_pending_funding(position, market):
         position.direction
     )
 
-    owed_to_receivers =
-        mul_div_ceil(
-            position.size,
-            indices.receiver_backed_payer,
-            INDEX_PRECISION
-        )
-        - position.funding_paid_to_receivers_debt
+    receiver_payer_delta =
+        indices.receiver_backed_payer - position.receiver_payer_index_snapshot
+    lp_payer_delta =
+        indices.lp_backed_payer - position.lp_payer_index_snapshot
+    receiver_delta =
+        indices.receiver - position.receiver_index_snapshot
 
-    owed_to_lps =
-        mul_div_ceil(
-            position.size,
-            indices.lp_backed_payer,
-            INDEX_PRECISION
-        )
-        - position.funding_paid_to_lps_debt
-
-    received =
-        mul_div_floor(
-            position.size,
-            indices.receiver,
-            INDEX_PRECISION
-        )
-        - position.funding_received_debt
-
-    require owed_to_receivers >= 0
-    require owed_to_lps >= 0
-    require received >= 0
+    require receiver_payer_delta >= 0
+    require lp_payer_delta >= 0
+    require receiver_delta >= 0
 
     return PendingFunding {
-        owed_to_receivers,
-        owed_to_lps,
-        received
+        owed_to_receivers: mul_div_ceil(
+            position.size, receiver_payer_delta, INDEX_PRECISION
+        ),
+        owed_to_lps: mul_div_ceil(
+            position.size, lp_payer_delta, INDEX_PRECISION
+        ),
+        received: mul_div_floor(
+            position.size, receiver_delta, INDEX_PRECISION
+        )
     }
 ```
 
@@ -3827,11 +3867,7 @@ start the replacement window:
 
 ```text
 function initialize_borrow_window(position, ledger, global_config):
-    position.borrow_debt = mul_div_ceil(
-        position.risk_units,
-        ledger.borrow_index,
-        INDEX_PRECISION
-    )
+    position.borrow_index_snapshot = ledger.borrow_index
 
     position.stored_minimum_borrow_fee = mul_div_ceil(
         position.risk_units * ledger.current_borrow_rate,
@@ -4007,8 +4043,8 @@ split.
 
 After capitalization, the action applies its size mutation and any realized
 PnL, pays its selected keeper reward, and collects a closing fee when the
-action is a profitable decrease. Every debt baseline is then reset from the
-resulting size and current indices.
+action is a profitable decrease. Every index snapshot is then retaken from the
+current indices.
 
 For a terminal close, liquidation, or ADL:
 
@@ -4078,7 +4114,8 @@ function settle_terminal_position(inputs):
 
     pay the reward selected by
         keeper_reward_for(inputs.action_kind, inputs.global_config),
-        from the source §5.10 assigns it
+        from the source §5.10 assigns it; a voluntary close, TP, SL, or
+        ADL pays min(reward, position.stored_collateral) (§3.5)
 
     if inputs.close_reason permits closing fee:
         closing_fee = calculate_closing_fee(
@@ -4115,7 +4152,7 @@ function settle_terminal_position(inputs):
         ledger,
         trader_payout
     )
-    transfer_cash(owner, trader_payout)
+    deliver_to_owner(ledger, owner, trader_payout)          # §6.12
 
     report every unpaid senior amount and uncollectible PnL
     remove complete position exposure and state
@@ -4238,7 +4275,7 @@ function pay_keeper_from_position(position, side, ledger, keeper, reward):
     transfer_cash(keeper, reward)
 ```
 
-Liquidation guarantees the configured reward:
+Liquidation pays the configured reward as far as its sources reach:
 
 ```text
 function pay_liquidation_keeper(
@@ -4252,9 +4289,12 @@ function pay_liquidation_keeper(
     from_position = min(position.stored_collateral, reward)
     remove_position_collateral(position, side, ledger, from_position)
 
+    # equity measured after from_position has left the vault: the position's
+    # claim has already fallen by it, so the pre-payment balance overstates
+    # the backstop by exactly that amount
     lp_backstop = min(
         reward - from_position,
-        derive_cash_lp_equity(ledger, physical_cash)
+        derive_cash_lp_equity(ledger, physical_cash - from_position)
     )
 
     paid = from_position + lp_backstop
@@ -4269,6 +4309,24 @@ function pay_liquidation_keeper(
 
 No keeper payment creates a keeper claim or reserve entry. A reverted action
 reverts the cash transfer and its source debit together.
+
+Pay an owner — a trader payout or an escrow refund — whose claim label has
+already been removed:
+
+```text
+function deliver_to_owner(ledger, owner, amount):
+    if amount == 0:
+        return
+    if try_transfer_cash(owner, amount) succeeds:
+        return
+    unclaimed_payout[owner]       += amount
+    ledger.unclaimed_payout_total += amount
+    emit payout-deferred result(owner, amount)
+```
+
+The transfer is attempted, not required (§12.1). A keeper payment stays a plain
+transfer: the keeper names the address it is paid at, and a keeper who cannot
+receive fails only their own call.
 
 ### 6.13 Update exposure aggregates
 
@@ -4359,6 +4417,7 @@ For a partial decrease:
 ```text
 function derive_partial_removal(position, size_removed, market_config):
     require 0 < size_removed < position.size
+    # base_after > 0 and risk_after > 0 are required below (§5.5)
 
     size_after = position.size - size_removed
 
@@ -4373,6 +4432,8 @@ function derive_partial_removal(position, size_removed, market_config):
         market_config.market_risk_factor_bps,
         BPS
     )
+
+    require base_after > 0 and risk_after > 0
 
     return Removal {
         size_removed,
@@ -4693,6 +4754,7 @@ Price-sensitive trader actions use these common predicates:
 
 ```text
 fresh_for_commit = fill_observed_at > commit_observed_at
+               and fill_observed_at > created_at          # §8.6
 delay_satisfied  = now >= execute_after
 
 entry_price_allowed(direction, price, acceptable_price):
@@ -4723,7 +4785,7 @@ function fail_entry_action(action, ledger, keeper, reward, reason):
     refund = action.escrowed_collateral
     action.escrowed_collateral = 0
     ledger.action_escrow_total -= refund
-    transfer_cash(action.owner, refund)
+    deliver_to_owner(ledger, action.owner, refund)          # §6.12
 
     remove pending action
     refresh global borrow rate after checkpoint and claim changes
@@ -4753,7 +4815,7 @@ function fail_position_action(action, position, keeper, reward, reason):
         )
 
     if action.escrowed_collateral > 0:
-        refund complete action escrow to owner
+        refund complete action escrow to owner through deliver_to_owner
 
     clear position.pending_mutation_action_id
     remove pending action
@@ -4872,7 +4934,7 @@ function settle_market_open(action_id, keeper):
 
     fill = read_stamped_price(action.market_id)
 
-    if fill.observed_at <= action.commit_observed_at:
+    if not fresh_for_commit(fill, action):
         return NotReady without state change or reward
 
     accrue_global_borrow(ledger, now)
@@ -4911,6 +4973,12 @@ expected checks:
 
 If any expected check fails, call `fail_entry_action` with
 `keeper_open_reward`. The first eligible attempt is terminal.
+
+`derive_added_exposure`'s positivity requirements are part of that preflight:
+a committed size that moves no base exposure or no risk units at the fill
+price fails as `SizeTooSmall`. Creation rejects dust against the commitment
+price, but a fill that moved far enough can still round an admitted size to
+zero, and a revert there would keep the commitment alive as a free retry.
 
 `projected_minimum_borrow` is the monetary minimum that
 `initialize_borrow_window` will quote for this position. The borrow window is
@@ -4977,7 +5045,7 @@ position.opened_at = now
 position.last_size_increase_at = now
 position.pending_mutation_action_id = None
 
-initialize funding debt baselines from current market indices
+snapshot funding indices from current market indices
 refresh market display and risk state
 refresh_borrow_rate(ledger, physical_cash, global_config)
 initialize_borrow_window(position, ledger, global_config)
@@ -5053,7 +5121,7 @@ function settle_limit_open(action_id, keeper):
 
     fill = read_stamped_price(action.market_id)
 
-    if fill.observed_at <= action.commit_observed_at:
+    if not fresh_for_commit(fill, action):
         return NotReady without state change or reward
 
     trigger_crossed =
@@ -5093,7 +5161,7 @@ function cancel_limit_open(action_id, owner):
     ledger.action_escrow_total -= refund
 
     remove pending action
-    transfer_cash(owner, refund)
+    deliver_to_owner(ledger, owner, refund)
 
     emit action-cancelled result
     return refund
@@ -5126,7 +5194,7 @@ function clean_expired_entry(action_id, keeper):
     ledger.action_escrow_total -= refund
 
     remove pending action
-    transfer_cash(action.owner, refund)
+    deliver_to_owner(ledger, action.owner, refund)
 
     emit action-expired result(reward, refund)
 ```
@@ -5163,7 +5231,7 @@ LP equity and the borrow rate ordinarily remain unchanged. The checkpoints
 still preserve one consistent timestamp for health reporting.
 
 This action charges no opening fee or keeper reward. It does not settle funding
-or borrow, reset any debt baseline, change the stored minimum borrow fee, or
+or borrow, retake any index snapshot, change the stored minimum borrow fee, or
 restart the minimum-position-lifetime clock. A liquidatable owner may use this
 path to rescue the position before a liquidation transaction succeeds.
 
@@ -5236,7 +5304,7 @@ function settle_increase(action_id, keeper):
         return NotReady without state change or reward
 
     fill = read_stamped_price(position.market_id)
-    if fill.observed_at <= action.commit_observed_at:
+    if not fresh_for_commit(fill, action):
         return NotReady without state change or reward
 
     accrue_global_borrow(ledger, now)
@@ -5331,7 +5399,7 @@ require resulting effective collateral
 enforce global capacity and market exposure caps
 
 position.last_size_increase_at = now
-reset all funding debt baselines for resulting size
+snapshot all funding indices for resulting size
 refresh market display and risk state
 refresh_borrow_rate(ledger, physical_cash, global_config)
 initialize_borrow_window(position, ledger, global_config)
@@ -5356,6 +5424,8 @@ function create_decrease(position_id, owner, size_removed, acceptable_price):
     require position.owner == owner
     require position.pending_mutation_action_id is None
     require 0 < size_removed < position.size
+    removal = derive_partial_removal(position, size_removed, market.config)
+        # rejects a survivor with zero base or zero risk units
 
     commit = read_stamped_price(position.market_id)
     action_id = consume_next_action_id()
@@ -5378,7 +5448,7 @@ function settle_decrease(action_id, keeper):
         return NotReady without state change or reward
 
     fill = read_stamped_price(position.market_id)
-    if fill.observed_at <= action.commit_observed_at:
+    if not fresh_for_commit(fill, action):
         return NotReady without state change or reward
 
     accrue global borrow and market funding to now
@@ -5410,8 +5480,9 @@ function settle_decrease(action_id, keeper):
     payable_pnl = calculate payable PnL for the removed exposure
 
     preflight full capitalization, keeper reward, closing fee,
-        remaining health, minimum collateral, and that cash LP equity
-        covers the payable profit to be credited
+        remaining health including projected_minimum_borrow, minimum
+        collateral, a non-zero surviving base and risk, and that cash LP
+        equity covers the payable profit to be credited
 
     if an expected preflight check fails:
         return fail_position_action(
@@ -5470,9 +5541,10 @@ distribute_open_close_revenue(
 apply removal to position, side, and global risk aggregates
 
 require surviving position collateral >= min_collateral
-require surviving effective collateral > liquidation_threshold
+require surviving effective collateral - projected_minimum_borrow
+    > liquidation_threshold
 
-reset funding debts for resulting size
+snapshot funding indices for resulting size
 refresh market display and risk state
 refresh_borrow_rate(ledger, physical_cash, global_config)
 initialize_borrow_window(position, ledger, global_config)
@@ -5484,6 +5556,23 @@ store state and emit decrease result
 
 Realized residual profit remains position collateral. A separate immediate
 collateral-withdrawal operation is not part of this decrease.
+
+The dust rule is checked at creation. The removal split depends only on the
+position's size and base, neither of which can change while the decrease holds
+the position's one mutation slot, so the check is exact there rather than a
+projection. A survivor with zero base exposure and zero risk units would pay no
+borrow, could never be liquidated or deleveraged, and would keep its market
+from ever emptying — blocking deregistration and any risk-factor change for
+the price of one unit of size.
+
+`projected_minimum_borrow` is the survivor's counterpart of §7.2's term. The
+surviving position opens a new borrow window whose monetary minimum is part of
+pending borrow from its first second (§2.9), so without it a decrease could
+leave a position that is liquidatable the moment its window opens. The rate is
+quoted at an upper bound of the one the window will get — post-decrease risk
+units against `cash_lp_equity - payable_profit`, the lowest equity the
+settlement can leave, since collected funding, borrow, and fees all raise it —
+so the preflight never admits a survivor the settlement would find unhealthy.
 
 Three guards keep this path and the terminal path from diverging.
 `uncollectible_loss == 0` enforces §6.5: a surviving position may never carry
@@ -5526,7 +5615,7 @@ function settle_close(action_id, keeper):
         return NotReady without state change or reward
 
     fill = read_stamped_price(position.market_id)
-    if fill.observed_at <= action.commit_observed_at:
+    if not fresh_for_commit(fill, action):
         return NotReady without state change or reward
 
     accrue global borrow and market funding to now
@@ -5609,7 +5698,7 @@ function execute_take_profit(position_id, keeper):
         return NotReady without state change or reward
 
     fill = read_stamped_price(position.market_id)
-    if fill.observed_at <= instruction.commit_observed_at:
+    if not fresh_for_commit(fill, instruction):   # created_at = committed_at
         return NotReady without state change or reward
 
     trigger_crossed =
@@ -5872,7 +5961,7 @@ Create a deposit request:
 function request_lp_deposit(owner, assets):
     require owner authorization
     require assets > keeper_lp_resolve_reward
-    require LP requests are currently allowed
+    require LP requests are currently allowed      # not paused (§12.2)
 
     transfer collateral from owner into LP request escrow
         (held by the request contract, not the vault)
@@ -5899,11 +5988,12 @@ function resolve_next_lp_request(executor):
     request = load request[next_lp_request_to_resolve]
     require request is Pending
 
-    round = latest authenticated synchronized price round
-
-    if round.timestamp < request.execute_after:
+    if now < request.execute_after:
+        return NotReady without state change or reward
+    if vault or protocol is paused:                 # §12.2
         return NotReady without state change or reward
 
+    read every active market's price in this transaction (§12.7.2)
     accrue global borrow and every active market to one timestamp
     derive physical cash, claims, LP equity, synchronized marked NAV,
         free capital, utilization, and risk states
@@ -6021,14 +6111,16 @@ assets_to_pay = mul_div_floor(
 if assets_to_pay > free_lp_capital
    or post-withdraw utilization > max_withdraw_utilization_bps
    or vault_shortfall > 0
-   or any active market side is in ADL or HardCap:
+   or any active market side is in ADL or HardCap
+   or cash_lp_equity - assets_to_pay < min_equity_clear_of_adl:
     fail_lp_request(request, executor, reason)
 
 resolve_reward = min(keeper_lp_resolve_reward, assets_to_pay)
 
 burn complete escrowed shares
 transfer resolve_reward from vault to the executor
-transfer assets_to_pay - resolve_reward from vault to owner
+transfer assets_to_pay - resolve_reward from vault to the request router
+deliver_or_hold(owner, assets_to_pay - resolve_reward)     # §12.1
 mark request Settled and advance FIFO pointer
 refresh global borrow rate
 ```
@@ -6040,8 +6132,20 @@ never topped up from LP equity.
 
 A withdrawal removes LP equity, and LP equity is the denominator of every
 side's PnL factor, so paying one out pushes every side closer to restriction.
-It is refused while the vault is short of its claims, and while any active side
-is in `ADL` or `HardCap`. `Warning` does not block it, for the same reason it
+It is refused while the vault is short of its claims, while any active side is
+in `ADL` or `HardCap`, and when the payout itself would put a side there:
+
+```text
+min_equity_clear_of_adl =
+    max over active sides with positive_pnl > 0 of
+        floor(positive_pnl * BPS / adl_pnl_factor_bps) + 1
+```
+
+§6.16 places a side in `ADL` or above exactly when
+`floor(positive_pnl * BPS / equity) >= adl_pnl_factor_bps`, so this is the least
+equity that keeps every side out. Checking only the state before the payout let
+one large withdrawal latch a side into `HardCap` on its way out and haircut
+every trader on it — to the benefit of the LPs who stayed. `Warning` does not block it, for the same reason it
 does not block new exposure (§6.16.1): it is a latch that makes recovery
 sticky, not a stop.
 
@@ -6055,7 +6159,7 @@ function fail_lp_request(request, executor, reason):
     if request.kind == Deposit:
         reward = min(keeper_lp_resolve_reward, request.escrowed_amount)
         transfer reward from escrow to the executor
-        refund the remaining collateral escrow to the owner
+        deliver_or_hold(owner, remaining collateral escrow)    # §12.1
     else:
         reward = 0
         return the complete escrowed shares to the owner
@@ -6209,6 +6313,7 @@ Eligibility is a predicate, not a stored state:
 eligible =
       now >= execute_after
   and fill_observed_at > commit_observed_at
+  and fill_observed_at > created_at
   and, for expiring entries, now < expires_at
   and, for actions that remove exposure,
       now >= position.last_size_increase_at + min_position_lifetime
@@ -6456,30 +6561,38 @@ so waiting to close is not a right the commitment granted them.
 ### 8.6 Fresh-price requirement
 
 Creation stores the observation time of the authenticated price available when
-the trader commits:
+the trader commits, alongside the commitment's own ledger time:
 
 ```text
 commit_observed_at
+created_at
 ```
 
-Settlement obtains a fresh aggregate and requires:
+Settlement obtains the feed's current observation and requires:
 
 ```text
 fill_observed_at > commit_observed_at
+fill_observed_at > created_at
 ```
 
-Equality fails. A transaction timestamp, block number, or elapsed delay cannot
-replace the observation cursor because none proves that the price contains
-information created after commitment.
+Equality fails in both. A transaction timestamp, block number, or elapsed
+delay cannot replace the observation stamp because none proves that the price
+contains information created after commitment.
+
+The two comparisons do different work. The first rejects the very observation
+the trader committed against. The second is the one that makes the rule true:
+a feed stamps a price with the moment it was **sampled** and publishes it
+later, so an observation can be newer than every stamp on chain at commit time
+and still have been sampled before the commitment. A trader who has watched
+the market move commits in that gap and fills at a price they already knew.
+Comparing against `commit_observed_at` alone accepted exactly that observation;
+comparing against `created_at` rejects it, whatever the feed's publication lag.
 
 The observation stamp is the oldest source timestamp contributing to the
-accepted aggregate. This conservative choice ensures every source supporting
-the fill is newer than the commitment cursor.
-
-Both reads must be freshly aggregated. A stamp retained from an earlier read is
-backdated by however long it was retained, which satisfies the comparison
-without any new observation having arrived; §12.7.1 states this as a
-requirement on the oracle.
+accepted aggregate, as the feed reports it. A stamp later than the ledger's
+current time is refused as unavailable: the age test below would read it as
+perfectly fresh, and as a commitment cursor it would hold every fill `NotReady`
+until the clock caught up.
 
 If no qualifying observation exists:
 
@@ -6487,12 +6600,12 @@ If no qualifying observation exists:
 - no keeper reward is paid;
 - no escrow moves;
 - no fee is charged; and
-- no exposure or debt baseline changes.
+- no exposure or index snapshot changes.
 
-TP and SL instructions record a new commitment cursor when attached or
-replaced. Triggers attached during an entry fill use that fill's observation as
-their cursor, so they require a later observation before closing the new
-position.
+TP and SL instructions record a new commitment cursor and commitment time when
+attached or replaced. Triggers attached during an entry fill use that fill's
+observation and the fill's ledger time, so they require a later observation
+before closing the new position.
 
 Freshness relative to the commitment is one of two tests an observation must
 pass. The second is absolute age, and its boundary is inclusive:
@@ -6588,7 +6701,9 @@ error. Examples include:
 - a market side in `ADL` or `HardCap`, which blocks new risk on that side
   (§6.16.1);
 - insufficient post-charge initial margin;
-- insufficient post-action maintenance for a surviving position; and
+- insufficient post-action maintenance for a surviving position;
+- a committed size that rounds to zero base exposure or risk units at the fill
+  price; and
 - another deterministic validation that can legitimately change between
   creation and settlement.
 
@@ -6631,7 +6746,8 @@ Every escrowed unit has one terminal destination:
 | Liquidation or ADL supersedes increase | `0` | Only forced-action reward | Complete added-collateral escrow | Position is removed |
 
 Refunds always go to the owner frozen in the action. The settlement caller
-cannot redirect them.
+cannot redirect them. A refund the owner cannot receive is held for them as an
+unclaimed payout (§12.1); it never reverts the transition it belongs to.
 
 An escrow-bearing record is removed only after its accounting reaches zero.
 The individual escrow debit, `action_escrow_total` debit, keeper transfer, and
@@ -6775,6 +6891,7 @@ non_lp_claims =
     + action_escrow_total
     + protocol_claimable_total
     + referral_claimable_total
+    + unclaimed_payout_total
 ```
 
 Every cash transition has two matching sides:
@@ -6802,6 +6919,7 @@ For each aggregate claim:
 position_collateral_total = sum(position.stored_collateral)
 action_escrow_total       = sum(pending_action.escrowed_collateral)
 referral_claimable_total  = sum(referral_balance[referrer])
+unclaimed_payout_total    = sum(unclaimed_payout[owner])
 ```
 
 The protocol total and guaranteed receiver-funding total must likewise equal
@@ -6883,10 +7001,10 @@ That sufficiency is a property of the arithmetic, not a check that may fail in
 normal operation. It holds because both sides of the split derive from the same
 `receiver_backing_scaled` value, because the receiver-side division carries its
 remainder under a constant divisor within each window (§4.5.1), and because
-each position's credit is floored at its own boundary. Over any sequence of
-checkpoints the value distributed through the receiver index equals the accrued
-backing minus the retained remainder, and each floored position read is at most
-its exact share, so:
+each position's credit is rounded down **once, from its own index delta**
+(§4.4). Over any sequence of checkpoints the value distributed through the
+receiver index equals the accrued backing minus the retained remainder, and
+each position's credit is at most its exact share, so:
 
 ```text
 sum(receiver credits taken) <= sum(receiver_liability_delta recognized)
@@ -6895,8 +7013,10 @@ sum(receiver credits taken) <= sum(receiver_liability_delta recognized)
 If an implementation omits the §4.5.1 reset, this bound is violated by up to
 `receiver_size / INDEX_PRECISION` whole cash units and the sufficiency check in
 `credit_received_funding` reverts, which would prevent a receiver position from
-being settled. The reset is what makes the check unreachable rather than merely
-defensive; it must not be replaced by a clamp that hides the deficit.
+being settled. Rounding a credit at both ends of its window instead of once
+breaks it the same way, by up to one unit per receiver window. The reset and
+the single rounding are what make the check unreachable rather than merely
+defensive; neither may be replaced by a clamp that hides the deficit.
 
 Receiver-backed funding is collected before negative PnL, LP-backed funding,
 borrow, keeper rewards, closing fees, and trader payout. If a forced terminal
@@ -6917,9 +7037,8 @@ Every cumulative borrow and funding index is unsigned and monotonic:
 next_index >= previous_index
 ```
 
-Elapsed time must be non-negative. A position debt baseline must never exceed
-the current cumulative entitlement or obligation from which pending value is
-derived. A negative raw pending delta indicates corrupted state, incorrect
+Elapsed time must be non-negative. A position index snapshot must never exceed
+the current cumulative index from which pending value is derived. A negative raw pending delta indicates corrupted state, incorrect
 checkpoint ordering, or a decreasing index and must revert before minimum-fee
 logic or another clamp can hide it.
 
@@ -6939,7 +7058,7 @@ elapsed interval:
 3. settle the position's completed index window
 4. apply the cash, claim, or exposure mutation
 5. refresh utilization-dependent borrow rate from the resulting state
-6. establish new position debt baselines and minimum-borrow quote
+6. take new position index snapshots and quote the minimum borrow
 ```
 
 Refreshing a rate before accruing elapsed time would reprice history and is
@@ -7021,11 +7140,11 @@ that its new window will quote. The floor is part of pending borrow from the
 first second of the window, so admitting a position without it would accept a
 position that is already below initial margin. A partial decrease must pay every
 completed senior obligation and leave the survivor with at least minimum
-collateral and maintenance margin. Debt baselines cannot reset while any old
+collateral and maintenance margin. Index snapshots cannot be retaken while any old
 window obligation remains unpaid.
 
-A collateral-only addition does not reset funding, borrow, or the quoted
-minimum-borrow window. It changes collateral and health only.
+A collateral-only addition does not retake funding or borrow snapshots or the
+quoted minimum-borrow window. It changes collateral and health only.
 
 If an unchanged position is already liquidatable, or paying an ordinary
 failed-action keeper reward would make it unsafe, voluntary settlement cannot
@@ -7170,8 +7289,11 @@ arithmetic produced it:
 ```
 
 The fee can reduce the current settlement's remaining price profit to zero,
-but cannot consume original collateral, previously stored profit, added
-collateral, or receiver-funding credit. Any nominal amount above the
+but cannot consume original collateral, previously stored profit, or added
+collateral. Funding received is not fee revenue either, but under §3.2.3's
+source-attribution rule it offsets senior items before they reduce eligible
+price profit, so a funding credit can leave more of the price profit
+collectible than the senior items alone would. Any nominal amount above the
 collectible boundary is waived immediately, creates no claim, and is not bad
 debt.
 
@@ -7257,6 +7379,7 @@ Global parameters affect the complete vault.
 |---|---:|---:|---|
 | `min_collateral` | Cash | `10,000,000` (`$1.00`) | Minimum stored collateral for every surviving position |
 | `min_position_lifetime` | Seconds | `60` | Time after open or the latest size increase before voluntary exposure removal |
+| `max_price_age_seconds` | Seconds | `60` | Oldest observation any action accepts (§8.6); must cover the feed's publication cadence (§12.7.4) |
 | `max_order_lifetime_seconds` | Seconds | `604,800` | Longest permitted limit-entry lifetime, one week (§8.5) |
 | `max_market_order_lifetime_seconds` | Seconds | `300` | Longest permitted market-entry lifetime, five minutes (§8.5) |
 | `min_borrow_fee_seconds` | Seconds | `900` | Duration used to quote the monetary minimum for each borrow window |
@@ -7324,7 +7447,7 @@ user-selected execution budget exists.
 | `hard_cap_relatch_band_bps` | Bps | `2,500` | Growth in a latched side's positive PnL that triggers a fresh hard-cap snapshot (§6.5) |
 | `max_withdraw_utilization_bps` | Bps | `8,000` | Maximum post-withdrawal utilization |
 | `min_deposit_nav_factor_bps` | Bps | `1,000` | Minimum marked-NAV-to-cash-equity factor for an ordinary LP deposit |
-| `lp_request_delay_seconds` | Seconds | Profile-specific | Delay assigning an LP request to a synchronized price round |
+| `lp_request_delay_seconds` | Seconds | Profile-specific | Delay before an LP request becomes resolvable |
 
 The initial LP request delays are operational profiles:
 
@@ -7406,6 +7529,7 @@ min_collateral > keeper_liquidation_reward
 every keeper reward <= min_collateral
 
 0 <= min_position_lifetime  <= 86,400
+0 <  max_price_age_seconds  <= 86,400
 0 <  min_borrow_fee_seconds <= 86,400
 0 <  max_order_lifetime_seconds <= 2,592,000
 60 <= max_market_order_lifetime_seconds <= max_order_lifetime_seconds
@@ -7540,6 +7664,7 @@ The complete initial parameter set is:
 GLOBAL
 min_collateral                       = 10,000,000       # $1.00
 min_position_lifetime                = 60              # 1 minute
+max_price_age_seconds                = 60              # 1 minute
 max_order_lifetime_seconds           = 604,800         # 7 days, limit entries
 max_market_order_lifetime_seconds    = 300             # 5 minutes, market entries
 min_borrow_fee_seconds               = 900             # 15 minutes
@@ -7666,8 +7791,8 @@ post-settlement risk units pass capacity    => capacity passes
 ```
 
 The action escrow becomes zero, the keeper receives `$0.25`, and `$5,099.75`
-is relabelled as position collateral. The position starts its funding and
-borrow baselines at the settlement indices. With the opening fee set to zero,
+is relabelled as position collateral. The position snapshots its funding and
+borrow indices at settlement. With the opening fee set to zero,
 LP, protocol, and referral opening-fee revenue are all zero.
 
 ### 11.2 Market open rejected by slippage
@@ -7860,9 +7985,9 @@ required initial margin                  $7,500
 ```
 
 The position passes initial margin. Suppose the post-mutation utilization
-refresh sets the new borrow rate to `40` bps/day. The old debt and minimum are
-discarded after payment, the debt baseline resets at the current index, and
-the full resulting exposure receives a new minimum:
+refresh sets the new borrow rate to `40` bps/day. The old window and minimum are
+discarded after payment, the borrow snapshot is retaken at the current index,
+and the full resulting exposure receives a new minimum:
 
 ```text
 new minimum borrow = ceil(
@@ -7937,7 +8062,7 @@ resulting size                   $75,000.00
 ```
 
 No cash is paid out during the decrease; residual realized profit remains
-position collateral. The old funding and borrow baselines are fully settled.
+position collateral. The old funding and borrow windows are fully settled.
 If the refreshed post-decrease borrow rate is `30` bps/day, the new `$7,500`
 risk exposure starts with:
 
@@ -8163,63 +8288,74 @@ and `t_star` lands a day beyond the window's end. That is the case §2.1.2
 exists to exclude:
 
 ```text
-d_star = 23,809,523,809,524          # -A/B, and d_end < d_star < 1
-t_star = 89,440                      # seconds, inside (0, 172,800)
+d_star = 23,809,523,809,523          # |A| / |B|, and d_end < d_star < 1
+t_star = 8,944,081,896,490,632,000   # INDEX_PRECISION-scaled: 89,440.8189649 s
 ```
 
-Segment one, `t = 0` to `89,440`, shorts paying, `d` running from `1` to
+Segment one, `t = 0` to `t_star`, shorts paying, `d` running from `1` to
 `d_star`:
 
 ```text
-j1                 = 4,748,527,677,440,269,774
+j1                 = 4,748,527,677,440,332,098
 j2                 = 2,939,564,752,701,152,030
-quadratic_integral = 20,910,289,747,150,055,707,600,000,000,000
+quadratic_integral = 20,910,371,643,640,164,186,000,000,000,000
 ```
 
-Segment two, `t = 89,440` to `172,800`, longs paying, `d` running from `d_star`
-to `d_end`:
+Segment two, `t = t_star` to `172,800`, longs paying, `d` running from
+`d_star` to `d_end`:
 
 ```text
-j1                 = 1,094,387,238,160,076,781
+j1                 = 1,094,387,238,160,014,457
 j2                 =   164,483,796,211,532,077
-quadratic_integral =  2,044,641,364,626,780,877,880,000,000,000
+quadratic_integral =  2,044,559,468,136,672,399,480,000,000,000
 ```
 
 The additivity property of §4.6 holds exactly here. Integrating the window as
 one segment gives `22,954,931,111,776,836,585,480,000,000,000`, and the two
 segments sum to precisely that — a difference of zero, not merely one inside
-`DECAY_TOLERANCE`. Against a high-precision evaluation the three integrals are
-off by `2.8e-14`, `-2.7e-13`, and `1.9e-15` relative. Note that the second is
-*negative*: the composite integral is not one-directional even though each
+`DECAY_TOLERANCE`. Against a 60-digit evaluation of the closed form the three
+integrals are off by `-4.4e-15`, `6.7e-14`, and `1.9e-15` relative. The signs
+differ: the composite integral is not one-directional even though each
 primitive inside it is, because `B` is negative and the `2*A*B*j1` term
 inverts the direction of its truncation. A test asserting one-sided error on
 the integral is testing something the specification does not claim.
+
+An earlier revision of this example integrated with `t_star` floored to
+`89,440` whole seconds. Its segment integrals were off by `-3.9e-6` and
+`4.0e-5` relative — seven orders of magnitude outside `DECAY_TOLERANCE` —
+because a whole-second `t_star` and an exact `d_star` no longer describe the
+same instant (§2.1.2).
 
 Carrying segment one into §6.2 with `$1,000,000` of short size paying and
 `$1,100,000` of long size receiving — longs have more base than shorts, so the
 receiver fraction is one whole and nothing goes to LPs:
 
 ```text
-receiver_backed_payer_index_short += 19,361,379,395
-    carried remainder                44,004,456,608,000,000,000,000
+receiver_backed_payer_index_short += 19,361,455,225
+    carried remainder                51,213,134,880,000,000,000,000
 
-receiver_backing_scaled = 1,000,000 * 10^7 * 19,361,379,395
+receiver_backing_scaled = 1,000,000 * 10^7 * 19,361,455,225
 
-liability_delta         = 1,936,137,939          # $193.6137939
+liability_delta         = 1,936,145,522          # $193.6145522
     carried remainder      50,000,000,000,000
 
-receiver_index_long    += 17,601,253,995
-    carried remainder      5,000,000,000,000
+receiver_index_long    += 17,601,322,931
+    carried remainder      9,000,000,000,000
 ```
 
 And the EMA advances for the whole window regardless of the split:
 
 ```text
-ema_after = 7,375,000,000,000            # +0.07375
+ema_after = 6,250,000,000,000            # +0.0625 = S + (E0 - S) * d_end
+I_end     = 7,375,000,000,000            # +0.07375, the blended skew
 ```
 
+An earlier revision printed `7,375,000,000,000` as `ema_after`. That figure is
+the blended skew `I_end = A + B * d_end`, not the EMA: the EMA carries no
+instant weight, so it is `0.1 + (-0.6) / 16 = 0.0625`.
+
 Two days of a book that is only mildly long-skewed have moved the EMA from
-`-0.5` to `+0.07375`, and along the way the short side paid for the first
+`-0.5` to `+0.0625`, and along the way the short side paid for the first
 twenty-five hours on the strength of its own history before the long side took
 over. That is the mechanism of §3.4.2 doing exactly what it is for.
 
@@ -8265,17 +8401,34 @@ The token must further satisfy:
   recognized.
 - **No supply or precision change after activation.**
 
-Two properties are trusted rather than required, and the consequences are
-stated here rather than discovered later. The issuer can freeze or blacklist an
-account, and a transfer can fail for reasons the vault cannot inspect. A failed
-transfer reverts the whole operation (§8.9), which is correct for accounting
-and bad for liveness: a blacklisted trader's liquidation reverts, and the
-position keeps accruing borrow while nobody can remove it.
+A transfer **to** a participant can fail for reasons the vault cannot inspect,
+and not all of them belong to the issuer. On Stellar a classic account can hold
+the asset only through a trustline: the issuer can deauthorize it, and the
+holder can remove it at will once its balance is zero. A Stellar Asset Contract
+transfer to an account with no authorized trustline fails.
 
-An implementation that cannot accept that dependency converts terminal payouts
-to a pull model — credit an owed balance, let the owner withdraw it separately
-— at the cost of a sixth entry in the claim equation of §2.5. This
-specification pays directly and accepts the dependency.
+A payment that reverts its settlement hands the recipient a veto over that
+settlement, and the recipient is often the party the settlement is against:
+
+- an owner who stops receiving makes their own liquidation revert for as long
+  as any residual collateral would be paid to them, turning a maintenance-
+  margin liquidation into bad debt;
+- a refund that reverts undoes the terminal failure it belongs to and keeps
+  the commitment alive as a free retry (§8.2); and
+- an LP whose withdrawal payout reverts blocks the FIFO head, and with it every
+  LP queued behind them, permanently.
+
+So every payment to a position owner, action owner, or LP is **delivered or
+held**. The transfer is attempted; if it fails, the amount becomes an explicit
+claim — `unclaimed_payout_total` in the position manager's claim equation
+(§2.5), or a balance the request router holds outside the vault for LP
+payouts — and the owner withdraws it later with `claim_payout` or
+`claim_lp_payout`. The settlement completes either way (§6.12's
+`deliver_to_owner`).
+
+Keeper rewards and self-initiated claims stay plain transfers. The keeper and
+the claimant name the address they are paid at, and one who cannot receive
+fails only their own call, which any other keeper can make instead.
 
 The LP share token is a separate token controlled by the vault:
 
@@ -8322,12 +8475,19 @@ an unpause that may never come.
 | Add collateral | Allowed |
 | Decrease, close, take-profit, stop-loss | Allowed |
 | Liquidation, ADL | Allowed |
-| Create or resolve an LP request | Rejected; pending requests wait |
+| Create or resolve an LP request | Rejected; pending requests wait (vault pause or protocol pause) |
+| Disable a market / enable a market | Allowed / `unpause_authority` only |
 | Claim referral revenue | Allowed |
 | Claim protocol revenue | Rejected |
 | Global and market checkpoints | Always run |
 
-`require LP requests are currently allowed` in §7.17 means `not paused`.
+`require LP requests are currently allowed` in §7.17 means `not paused`, and
+nothing else: a deposit is never gated on side risk state, and every other gate
+is evaluated when the request resolves. The vault's own pause and the
+protocol's pause both hold LP requests; a resolution attempted during either
+returns `NotReady` and changes nothing. An earlier revision failed pending
+requests during a vault pause instead, charging each deposit the resolve reward
+for an outage its owner did not cause.
 Pending LP requests are safe to leave waiting precisely because the `Expired`
 outcome no longer exists: the queue resumes where it stopped, with every
 request's escrow intact.
@@ -8352,10 +8512,10 @@ should be distinct keys.
 
 | Authority | May |
 |---|---|
-| `configuration_authority` | Propose and apply parameter changes, register markets |
-| `pause_authority` | Set `paused`; may not clear it |
-| `unpause_authority` | Clear `paused` |
-| `oracle_authority` | Name the contract that supplies authenticated prices |
+| `configuration_authority` | Propose and cancel parameter changes, register markets |
+| `pause_authority` | Set `paused` and disable a market; may not clear either |
+| `unpause_authority` | Clear `paused` and re-enable a market |
+| `oracle_authority` | Propose and cancel a replacement price feed |
 | `protocol_recipient` | Claim accumulated protocol revenue |
 
 Pausing and unpausing are split on purpose. Pausing is a safety action whose
@@ -8370,12 +8530,35 @@ propose_configuration(authority, proposal):
     validate the complete proposal under §10.3
     store it with effective_at = now + config_timelock_seconds
 
-apply_configuration(proposal_id):
-    require now >= proposal.effective_at
+apply_configuration(proposal_id):                  # permissionless
+    require effective_at <= now <= effective_at + config_timelock_seconds
     checkpoint every accumulator the change affects, under the old value
     store the new values
     emit old and new values with the effective timestamp
+
+cancel_configuration(authority, proposal_id):
+    remove the proposal
 ```
+
+Applying is permissionless — the authorization happened at proposal and the
+delay is the protection — so a proposal must also **lapse**. One that nobody
+applied within `config_timelock_seconds` of becoming effective expires; without
+that bound a proposal validated against a book and an intent that no longer
+exist would remain a standing capability for anyone to land at the moment of
+their choosing. The proposing authority can also withdraw a proposal at any
+time before it is applied.
+
+A price feed change follows the same two phases under `oracle_authority`. The
+feed decides every fill and every liquidation, so repointing it is not one of
+the exemptions below: an instant switch would let a single key reprice the
+whole book. The cost is stated rather than hidden — replacing a failed provider
+waits out the timelock, during which §12.7.3's outage behaviour applies.
+
+An upgrade can change anything a configuration change can, so every
+contract's upgrade timelock is at least `config_timelock_seconds`; a shorter
+upgrade delay would be a way around the configuration delay. The configuration
+manager, which owns roles rather than economic state, cannot read that value
+and relies on its own minimum.
 
 The delay exists because almost every parameter here can move value between
 parties who cannot react instantly. Raising `close_pnl_fee_bps` taxes open
@@ -8390,9 +8573,12 @@ config_timelock_seconds initial value: 172,800   # 48 hours
 ```
 
 Two categories are exempt, and only these two: setting `paused`, and any
-change that is validated to move a bound in the more conservative direction —
-lowering an exposure ceiling, lowering `risk_capacity_limit_bps`, raising a
-margin requirement. A protocol that must wait 48 hours to become safer has the
+change that is validated to move an **admission** bound in the more
+conservative direction — lowering an exposure ceiling, lowering
+`risk_capacity_limit_bps`, raising `initial_margin_bps`. Those bind only when
+new risk is admitted. `maintenance_margin_bps` is not exempt in either
+direction: raising it is conservative for the vault and is also the change that
+makes open positions liquidatable on the spot. A protocol that must wait 48 hours to become safer has the
 timelock pointed the wrong way. Every exempt change still checkpoints under
 the old value first, and still emits.
 
@@ -8414,6 +8600,7 @@ is a statement about storage type and TTL, so it is made concrete here.
 | Position, pending action, LP request | Persistent | Extended on every touch |
 | Market configuration and accounting | Persistent | Extended on every touch |
 | Referral code owner, referrer map, balance | Persistent | Extended on every touch |
+| Unclaimed payout balance (§12.1) | Persistent | Extended on every touch |
 
 Nothing economic is stored as temporary. Every persistent entry must be
 extendable permissionlessly, because a position whose owner has gone quiet
@@ -8432,7 +8619,9 @@ every operation:
 
 An upgrade that changes any stored layout ships with a migration that is the
 only operation permitted to run against the previous version, and that
-advances `state_version` when it completes. Until it has run, every other
+advances the ledger's own `state_version` when it completes. The guard is the
+value every operation reads, so recording the new version anywhere else leaves
+the vault rejecting every operation forever. Until it has run, every other
 entry point rejects. This is deliberately blunt: a half-migrated vault whose
 aggregates no longer equal the sum of their records violates §5.11, and there
 is no safe way to keep trading through that.
@@ -8535,8 +8724,11 @@ The required events and the fields a consumer cannot do without:
 | `BorrowCheckpoint` | index delta, rate applied, rate after |
 | `RiskStateChanged` | market, side, previous state, next state, PnL factor |
 | `RevenueDistributed` | source, collected amount, LP, protocol, and referral shares |
+| `PayoutDeferred` / `PayoutClaimed` | owner, amount — a payout or refund held under §12.1, and its later withdrawal |
 | `LpRequestCreated` / `LpRequestResolved` | request id, owner, kind, escrow, shares, assets, NAV used, reward |
 | `ConfigurationProposed` / `ConfigurationApplied` | field, old value, new value, effective timestamp |
+| `PriceFeedProposed` / `PriceFeedChanged` | feed address, effective timestamp |
+| `ProposalCancelled` | which proposal: global, market, or price feed |
 
 Three requirements make these usable rather than decorative:
 
@@ -8553,94 +8745,73 @@ Three requirements make these usable rather than decorative:
 
 ### 12.7 Oracle interface
 
-Every price-sensitive rule in this specification rests on two things the
-oracle must supply: an authenticated price, and an **observation stamp** that
-says when the data behind that price was produced. §8.6 defines the stamp as
-the oldest source timestamp contributing to the accepted aggregate, and the
-entire fresh-price guarantee of §1.13 is a comparison between two such stamps.
+The protocol owns no oracle. It reads a third-party price feed, and every
+price-sensitive rule in this specification rests on two things that feed
+supplies: a price, and an **observation stamp** saying when the data behind
+that price was sampled. §8.6's fresh-price guarantee is a comparison between
+such a stamp and the commitment it settles.
 
-The oracle aggregates a median across sources, rejecting any source that is
-stale beyond `staleness_threshold`, future-dated, non-positive, or scaled at
-other than seven decimals, then rejecting the whole aggregate if fewer than
-`min_required_sources` survived or if the spread exceeds `max_deviation_bps`.
-The stamp accompanies that median.
+Source aggregation — median, quorum, deviation rejection — is the provider's
+concern and is not specified here. What stays in this protocol is what only it
+can decide: how old a price may be before an action refuses it, that a
+non-positive or future-dated price is never a price, and the per-action price
+bounds a trader sets.
 
 #### 12.7.1 Required read interface
 
+The interface is the SEP-40 subset the protocol uses:
+
 ```text
-StampedPrice {
-    price          # i128 at PRICE_PRECISION
-    observed_at    # oldest contributing source timestamp
+PriceData {
+    price       # i128 at PRICE_PRECISION
+    timestamp   # when the data behind the price was sampled
 }
 
-read_stamped_price(symbol)  -> StampedPrice
-latest_round_id()           -> u64
-get_round(round_id)         -> OracleRound
+lastprice(symbol) -> Option<PriceData>
+decimals()        -> u32               # must equal PRICE_DECIMALS
 ```
 
+A provider whose entry point differs is bridged by a thin adapter contract;
+the adapter is deployment wiring, not protocol. `decimals` is checked when a
+feed is proposed and again when the proposal is applied (§12.3).
+
 `read_stamped_price` is the single price primitive named throughout sections 7
-and 8 — at commitment, at settlement, and on the forced paths alike. This
-specification requires one property of it:
+and 8 — at commitment, at settlement, and on the forced paths alike. It
+refuses, as unavailable:
 
-> Every call returns an aggregate computed from source data read during that
-> call, together with a stamp naming the oldest source behind it. No call
-> answers from a value retained by an earlier call.
+- a missing price, or a feed call that fails;
+- a non-positive price; and
+- a stamp later than the ledger's current time;
 
-How the oracle is built, and whether it caches internally for its other
-consumers, is its own concern and not described here. What it may not do is
-serve one of these reads from a retained value. Two rules in this
-specification depend on that, and on nothing else about the oracle.
+and, as stale, a stamp older than `max_price_age_seconds` (§8.6).
 
-At commitment, a retained stamp is backdated by however long it was retained,
-so `commit_observed_at` is older than the moment the trader committed. A fill
-can then satisfy `fill_observed_at > commit_observed_at` against an observation
-that predates the commitment — the test passing with no new information having
-arrived, which is exactly what §1.13 exists to prevent. If anyone can cause a
-value to be retained, whoever picks that moment picks which observation every
-later commitment is measured against.
+The stamp must be the **sampling** time, never the time the value was served.
+§8.6 no longer depends on the feed publishing promptly — comparing the fill
+against `created_at` rejects any observation sampled before the commitment,
+however late it lands — but a feed that re-stamped a retained value with the
+time it served it would still claim information it does not have.
 
 On the forced paths, §7.13 and §7.14 use one snapshot for both eligibility and
-settlement, so a retained price is a price the caller chose. A keeper able to
-pin a momentary adverse print can liquidate against it after the market has
-recovered, closing a position that is currently healthy at a price that no
-longer exists, and can latch a side into `HardCap` or admit an ADL the same
-way. That these paths compare a price against a threshold rather than against
-an earlier observation does not make a stale price safe; the caller's ability
-to choose it is what does the damage.
+settlement, so the age bound is the whole of the freshness protection there. A
+keeper able to settle against a momentary adverse print can liquidate against
+it for as long as that print stays inside `max_price_age_seconds`.
 
-`observed_at` is required on every read. Without it `commit_observed_at` and
-`fill_observed_at` cannot be populated, and every rule built on them — the
-fresh-price requirement, the `NotReady` outcome, the terminal first-attempt
-semantics — has nothing to compare.
+#### 12.7.2 Synchronized LP marks
 
-#### 12.7.2 Rounds
+LP accounting marks every active market at one timestamp (§4.9). The protocol
+does not rely on a separately published round for this: the LP settlement
+transaction reads each active market's price itself, so every mark shares that
+transaction's ledger time. The active-market registry bound of §5.1 is what
+keeps that loop inside a transaction budget.
 
-Synchronized rounds are a separate mechanism with a separate purpose: they
-stamp every active market at one timestamp so LP accounting can mark the whole
-vault consistently (§4.9). A round aggregates each active market from source data read at
-publication time and records `id`, `timestamp`, `previous_id`,
-`previous_timestamp`, and one price per symbol.
-
-Round publication is permissioned where everything else in this protocol is
-permissionless, which makes it a liveness dependency: if rounds stop, LP
-deposits and withdrawals stop with them, while positions continue to trade and
-liquidate normally on per-symbol prices.
-
-Rounds are also why `max_active_markets` is bounded. A round iterates every
-active market and aggregates each from scratch, so the registry bound of §5.1
-is what keeps that operation inside a transaction budget.
+The cost is a liveness dependency across markets. A stale or missing price for
+**any** active market refuses every LP resolution until it returns, because a
+NAV that silently omitted a market would misprice every share. Positions in
+the other markets continue to trade and liquidate normally.
 
 #### 12.7.3 Failure behaviour, and what it costs
 
-Every rejection is a panic, so the calling operation reverts:
-
-| Condition | Meaning |
-|---|---|
-| No configured sources | The symbol was never set up |
-| Every source stale, future-dated, or non-positive | Total feed outage |
-| Fewer than `min_required_sources` valid | Quorum lost |
-| Spread exceeds `max_deviation_bps` | Sources disagree |
-| Median or deviation arithmetic overflows | A source returned an absurd value |
+A refused read reverts the calling operation.
 
 For trader actions a revert is the correct outcome and costs little: the
 action stays pending, nothing is charged, and it settles when prices return.
@@ -8649,44 +8820,34 @@ so an off-chain consumer sees an unexplained failed transaction rather than a
 reason.
 
 For forced actions the cost is real. Liquidation and ADL both need a price,
-and both revert without one, so **during an oracle outage the protocol cannot
+and both revert without one, so **during a feed outage the protocol cannot
 reduce risk while borrow and funding keep accruing** (§4.7). Positions that
 should have been liquidated are liquidated later, at whatever price returns,
 with the interim accrual still owed and LP equity absorbing whatever the
 collateral no longer covers.
 
-The deviation guard deserves specific attention. Sources disagreeing past
-`max_deviation_bps` rejects the aggregate, and while the disagreement persists
-the state is absorbing: every open and every close reverts together, and the
-protocol cannot trade its way out. A guard that exists to stop the vault
-pricing *new* risk badly must not also block the operations that *remove*
-risk. This specification states the requirement and does not prescribe the
-mechanism:
+A provider-side guard that rejects the aggregate — sources disagreeing past a
+deviation bound, quorum lost — blocks every open and every close together.
+This specification states the requirement and does not prescribe the
+provider's mechanism:
 
 > A risk-reducing operation must not be blocked by a guard whose purpose is to
 > protect risk-adding operations.
 
-Whether that is met by a wider bound for liquidation, a documented fallback
-aggregate, or an explicit degraded mode is an oracle-side decision. What is
-not acceptable is one guard governing both directions.
-
-#### 12.7.4 Configuration owned elsewhere
-
-These values are enforced by the router, not by this protocol, and every
-number in sections 2 and 10 assumes them:
+#### 12.7.4 Configuration
 
 | Value | Requirement |
 |---|---|
-| Source price decimals | Exactly `7`, matching `PRICE_PRECISION`; validated when sources are set |
-| `min_required_sources` | At least `2` |
-| `max_deviation_bps` | At most `10,000` |
-| Source count | At most `16` |
+| Feed price decimals | Exactly `7`, matching `PRICE_PRECISION`; checked at proposal and at apply |
+| `max_price_age_seconds` | Governed (§10.1.1); must cover the feed's publication cadence |
+| Feed address | Changed only through the timelocked proposal of §12.3 |
 
-`staleness_threshold` is the one to choose deliberately. It bounds how old the
-data behind an accepted fill can be, so it is the real width of the window a
-trader is committing against — the execution delay of §8.5 measures the wait,
-and this measures the freshness. Setting it far above the oracle's publication
-cadence widens that window silently, without any parameter in §10 changing.
+`max_price_age_seconds` is the one to choose deliberately. It bounds how old
+the data behind an accepted price can be, so on the forced paths it is the real
+width of the window a keeper can choose a price from. Set it below the feed's
+publication cadence and every action refuses between publications; set it far
+above and a quiet feed's last print stays actionable long after the market has
+moved.
 
 ### 12.8 Stated assumptions and residual risks
 
@@ -8769,9 +8930,11 @@ Liquidation and ADL both require a price and both revert without one, while
 borrow and funding keep accruing (§12.7.3). Nothing here bounds the length of
 an outage or the loss it can produce; the mitigations are operational.
 
-The collateral token is trusted not to freeze a participant (§12.1). A frozen
-account cannot receive a payout, the transfer reverts, and the liquidation
-reverts with it.
+A participant who cannot receive the collateral token — a frozen, deauthorized,
+or removed trustline — no longer blocks anything: their payouts are held as
+claims (§12.1). What is still trusted is the token's behaviour toward the vault
+itself: an issuer that freezes the vault's own balance halts every outgoing
+transfer the protocol makes.
 
 #### 12.8.5 What is genuinely guaranteed
 

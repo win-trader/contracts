@@ -1,8 +1,6 @@
-//! Shared ConfigManager contract interface.
-
 use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol};
 
-/// Protocol role authority and upgrade-timelock owner.
+/// Role authority and upgrade-timelock owner.
 #[contractclient(name = "ConfigManagerClient")]
 pub trait ConfigManager {
     fn grant_role(env: Env, caller: Address, role: Symbol, account: Address);

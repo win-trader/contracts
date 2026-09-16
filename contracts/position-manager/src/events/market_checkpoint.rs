@@ -3,11 +3,6 @@ use shared::{Market, PayerSide};
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
-/// Funding/borrow indices and current rates after a keeper checkpoint
-/// (`update_indices`). The off-chain fee projection and staleness monitors
-/// key on this event. Values are exact at `timestamp`; position actions
-/// between keeper runs change flows and rates without emitting one, so
-/// projections carry keeper-cadence staleness.
 #[contractevent(topics = ["mktchk"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketCheckpoint {

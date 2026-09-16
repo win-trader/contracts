@@ -1,11 +1,3 @@
-//! Storage layout.
-//!
-//! Instance storage holds the wiring addresses, configs, pause flag, and the
-//! one `Ledger` aggregate (all global accounting lives inside it — business
-//! logic never reads a bare accounting key). Positions and markets are
-//! persistent entries with explicit TTL extension; anyone can re-extend a
-//! position via `bump_position`.
-
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
 use shared::{
     GlobalConfig, Market, PendingAction, PendingGlobalConfig, PendingMarketConfig, Position,
@@ -19,9 +11,6 @@ use crate::ledger::Ledger;
 #[derive(Clone)]
 pub enum StorageKey {
     ConfigManager,
-    /// The external price feed this deployment reads from. Rewireable by
-    /// the oracle authority, because a provider can be replaced without
-    /// redeploying the protocol.
     PriceFeed,
     Vault,
     GlobalConfig,
@@ -34,19 +23,15 @@ pub enum StorageKey {
     Position(u64),
     Market(Symbol),
     MarketDisabled(Symbol),
-    /// §5.6 pending trader action. Persistent: it owns escrowed cash.
     PendingAction(u64),
     NextActionId,
-    /// §12.3 configuration proposals waiting out the timelock.
     PendingGlobalConfig,
     PendingMarketConfig(Symbol),
-    /// Referral code → owning referrer address (owner immutable once set).
     ReferralCode(Symbol),
-    /// Trader → their referrer address (freely re-set by the trader).
     Referrer(Address),
-    /// Referrer → accrued unclaimed referral rewards. The per-referrer
-    /// allocation of `Ledger::referral_claimable_total`.
     ReferralBalance(Address),
+    UnclaimedPayout(Address),
+    PendingPriceFeed,
 }
 
 pub fn is_paused(env: &Env) -> bool {
@@ -59,8 +44,6 @@ pub fn is_paused(env: &Env) -> bool {
 pub fn save_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&StorageKey::Paused, &paused);
 }
-
-// POSITION
 
 pub fn get_position(env: &Env, id: u64) -> Position {
     env.storage()
@@ -80,13 +63,6 @@ pub fn save_position(env: &Env, position: &Position) {
 pub fn remove_position(env: &Env, id: u64) {
     env.storage().persistent().remove(&StorageKey::Position(id));
 }
-
-// REFERRAL
-//
-// Three persistent maps. `ReferralBalance` and `ReferralCode`/`Referrer`
-// entries are archived (not deleted) if their TTL lapses, and are
-// restorable — so an unclaimed balance can never be lost, only deferred.
-// Every write bumps the TTL.
 
 pub fn try_get_referral_code_owner(env: &Env, code: &Symbol) -> Option<Address> {
     env.storage()
@@ -131,15 +107,26 @@ pub fn save_referral_balance(env: &Env, referrer: &Address, amount: i128) {
         .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
 }
 
-// MARKET
+pub fn get_unclaimed_payout(env: &Env, owner: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::UnclaimedPayout(owner.clone()))
+        .unwrap_or(0)
+}
+
+pub fn save_unclaimed_payout(env: &Env, owner: &Address, amount: i128) {
+    let key = StorageKey::UnclaimedPayout(owner.clone());
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+}
 
 pub fn get_market(env: &Env, symbol: &Symbol) -> Market {
     try_get_market(env, symbol)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::MarketNotConfigured))
 }
 
-/// Non-panicking market lookup — for callers (config admin) where absence is
-/// a legal state, not an error.
 pub fn try_get_market(env: &Env, symbol: &Symbol) -> Option<Market> {
     env.storage()
         .persistent()
@@ -167,7 +154,6 @@ pub fn set_market_disabled(env: &Env, market: &Symbol, disabled: bool) {
         .set(&StorageKey::MarketDisabled(market.clone()), &disabled);
 }
 
-// todo do we have 1 pos manager for all or per market?
 pub fn get_active_markets(env: &Env) -> Vec<Symbol> {
     env.storage()
         .instance()
@@ -175,12 +161,6 @@ pub fn get_active_markets(env: &Env) -> Vec<Symbol> {
         .unwrap_or(Vec::new(env))
 }
 
-/// §7.18 — is this symbol in the active registry?
-///
-/// Deregistration removes a market from the registry but **keeps** its
-/// `Market` record, so "the record exists" and "the market is open for
-/// business" are different questions and this is the second one. The scan is
-/// bounded by `max_active_markets`.
 pub fn is_market_registered(env: &Env, market: &Symbol) -> bool {
     get_active_markets(env).iter().any(|s| s == *market)
 }
@@ -191,29 +171,21 @@ pub fn save_active_markets(env: &Env, markets: &Vec<Symbol>) {
         .set(&StorageKey::ActiveMarkets, markets);
 }
 
-// LEDGER
-
-/// §12.4 — every operation loads the ledger, so the migration guard lives
-/// here rather than repeated at every entry point. Until a migration has
-/// advanced `state_version`, every path rejects: a half-migrated vault whose
-/// aggregates no longer equal the sum of their records violates §5.11, and
-/// there is no safe way to keep trading through that.
-pub fn get_ledger(env: &Env) -> Ledger {
-    let ledger: Ledger = env
-        .storage()
+pub fn get_ledger_unguarded(env: &Env) -> Ledger {
+    env.storage()
         .instance()
         .get(&StorageKey::Ledger)
-        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized));
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
+}
+
+pub fn get_ledger(env: &Env) -> Ledger {
+    let ledger = get_ledger_unguarded(env);
     if ledger.state_version != crate::ledger::STATE_VERSION {
         panic_with_error!(env, PositionManagerError::StateVersionMismatch);
     }
     ledger
 }
 
-/// Every mutating path ends here, and the instance entry is being written
-/// anyway, so this is where its TTL is extended (§12.4). Keeping the bump
-/// out of `borrow::accrue` is what lets §4.12's quote run the real accrual
-/// code without writing anything.
 pub fn save_ledger(env: &Env, ledger: &Ledger) {
     env.storage().instance().set(&StorageKey::Ledger, ledger);
     shared::bump_instance_ttl(env);
@@ -250,7 +222,6 @@ pub fn get_vault(env: &Env) -> Address {
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
-/// Non-panicking vault lookup — `set_vault` uses absence as "not wired yet".
 pub fn try_get_vault(env: &Env) -> Option<Address> {
     env.storage().instance().get(&StorageKey::Vault)
 }
@@ -306,8 +277,6 @@ pub fn update_position_id(env: &Env) {
     save_next_position_id(env, get_next_position_id(env) + 1);
 }
 
-// PENDING ACTION (§5.6)
-
 #[allow(dead_code)]
 pub fn try_get_pending_action(env: &Env, id: u64) -> Option<PendingAction> {
     env.storage()
@@ -328,8 +297,6 @@ pub fn save_pending_action(env: &Env, action: &PendingAction) {
         .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
 }
 
-/// §8.13 — removal consumes the ID permanently. A later call with it fails
-/// as nonexistent and cannot replay the transfer or the keeper payment.
 pub fn remove_pending_action(env: &Env, id: u64) {
     env.storage()
         .persistent()
@@ -343,7 +310,6 @@ pub fn get_next_action_id(env: &Env) -> u64 {
         .unwrap_or(1)
 }
 
-/// Reserve the next action ID. Monotonic and never reused (§5.6).
 pub fn take_next_action_id(env: &Env) -> u64 {
     let id = get_next_action_id(env);
     env.storage()
@@ -352,7 +318,19 @@ pub fn take_next_action_id(env: &Env) -> u64 {
     id
 }
 
-// CONFIGURATION PROPOSALS (§12.3)
+pub fn try_get_pending_price_feed(env: &Env) -> Option<shared::PendingPriceFeed> {
+    env.storage().instance().get(&StorageKey::PendingPriceFeed)
+}
+
+pub fn save_pending_price_feed(env: &Env, pending: &shared::PendingPriceFeed) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::PendingPriceFeed, pending);
+}
+
+pub fn clear_pending_price_feed(env: &Env) {
+    env.storage().instance().remove(&StorageKey::PendingPriceFeed);
+}
 
 pub fn try_get_pending_global_config(env: &Env) -> Option<PendingGlobalConfig> {
     env.storage()
@@ -390,13 +368,6 @@ pub fn clear_pending_market_config(env: &Env, market: &Symbol) {
         .remove(&StorageKey::PendingMarketConfig(market.clone()));
 }
 
-// PERMISSIONLESS TTL EXTENSION (§12.4)
-//
-// Every persistent entry must be extendable by anyone: a position whose
-// owner has gone quiet must still be liquidatable, and a referral balance
-// must survive its owner's inactivity. Letting an entry expire destroys a
-// claim, which no rule in §9 permits.
-
 fn extend(env: &Env, key: &StorageKey) {
     env.storage()
         .persistent()
@@ -421,4 +392,11 @@ pub fn bump_referrer(env: &Env, trader: &Address) {
 
 pub fn bump_referral_balance(env: &Env, referrer: &Address) {
     extend(env, &StorageKey::ReferralBalance(referrer.clone()));
+}
+
+pub fn bump_unclaimed_payout(env: &Env, owner: &Address) {
+    let key = StorageKey::UnclaimedPayout(owner.clone());
+    if env.storage().persistent().has(&key) {
+        extend(env, &key);
+    }
 }

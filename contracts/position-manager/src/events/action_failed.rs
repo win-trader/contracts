@@ -2,13 +2,6 @@ use shared::{ActionKind, FailureReason};
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
-/// §8.9 — an eligible market-style attempt failed an expected deterministic
-/// check. This is a **successful transaction**: the reward was paid, the
-/// escrow refunded, and the action consumed. A revert would undo all three
-/// and hand the trader a free retry after they had seen the price.
-///
-/// `reward` is what the keeper was actually paid, which for a position
-/// mutation may be less than the configured amount or zero (§7.0).
 #[contractevent(topics = ["actfail"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionFailed {

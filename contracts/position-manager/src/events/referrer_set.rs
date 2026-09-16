@@ -1,7 +1,6 @@
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
-/// A trader (re-)pointed themselves at a referrer via a code.
 #[contractevent(topics = ["refset"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferrerSet {

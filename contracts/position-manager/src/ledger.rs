@@ -1,20 +1,3 @@
-//! The global accounting ledger — doc §4 "Sources of truth" and §5.1
-//! "Global state" as one aggregate.
-//!
-//! The `Ledger` is loaded once at the start of a state-changing entry point,
-//! mutated in memory, and stored once at the end (the Blend `Pool` cache
-//! pattern). Business logic never touches ledger storage keys directly, so
-//! every mutation of a claim total is visible in this module's call graph.
-//!
-//! Trust note: the ledger stays cached across the external calls an action
-//! makes (vault transfers, oracle reads). Neither the vault nor the
-//! governance-chosen collateral token calls back into this contract, so no
-//! reentrant read can observe the stale stored copy.
-//!
-//! Physical cash is *never* stored here: it is always
-//! `collateral_token.balanceOf(vault)` (§4.1), read via the vault. Cash LP
-//! equity, free capital, and NAV are always derived (§4.3).
-
 use soroban_sdk::{contracttype, panic_with_error, Address, Env};
 
 use shared::{MarketSide, Position, VaultClient};
@@ -22,51 +5,23 @@ use shared::{MarketSide, Position, VaultClient};
 use crate::errors::PositionManagerError;
 use crate::{math, storage};
 
-/// §12.4 — the state layout version this build understands. A stored ledger
-/// at any other version rejects every operation until a migration advances
-/// it. No migration routine is written for the settlement-spec change
-/// itself: that is a redeploy, not an upgrade.
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
-/// §5.2 global accounting state: the **five** non-LP claim totals of §2.5,
-/// the risk counters, the migration guard, and the global borrow clock. The
-/// receiver-funding liability total is fed per-market by `funding::accrue`
-/// (§5.12).
-///
-/// The record is loaded once, changed as one in-memory unit, and saved once
-/// at the end of an atomic action. Ownership totals are never updated
-/// through independent storage paths.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Ledger {
-    // -- Non-LP claims (§4.2): each is a label on the one vault balance. --
     pub position_collateral_total: i128,
-    /// §5.12 — the sum of `market.pending_receiver_funding` across active
-    /// markets, **not** the sum of current position credits.
     pub pending_receiver_funding_total: i128,
-    /// §5.7 — collateral committed to pending trader actions and held
-    /// inside the vault.
     pub action_escrow_total: i128,
     pub protocol_claimable_total: i128,
-    /// §11.1 referral rewards accrued but not yet claimed — the aggregate
-    /// backing the per-referrer `ReferralBalance` map (their sum is this
-    /// total). Like every claim here it is a label on cash already in the
-    /// vault, so NAV and the solvency checks net it out automatically.
     pub referral_claimable_total: i128,
-    // -- Risk counters. --
+    pub unclaimed_payout_total: i128,
     pub total_risk_units: i128,
     pub open_position_count: u64,
-    /// §5.2 — market sides latched in `Warning`, `ADL`, or `HardCap`.
     pub restricted_market_side_count: u32,
-    /// §12.4 migration guard. Every operation requires it to equal
-    /// `STATE_VERSION`; a half-migrated vault whose aggregates no longer
-    /// equal the sum of their records violates §5.11, and there is no safe
-    /// way to keep trading through that.
     pub state_version: u32,
-    // -- Global borrow accrual (§9.2). --
     pub borrow_index: i128,
     pub borrow_index_remainder: i128,
-    /// `INDEX_PRECISION`-scaled bps/day rate for the current interval.
     pub current_borrow_rate: i128,
     pub last_global_checkpoint: u64,
 }
@@ -79,6 +34,7 @@ impl Ledger {
             action_escrow_total: 0,
             protocol_claimable_total: 0,
             referral_claimable_total: 0,
+            unclaimed_payout_total: 0,
             total_risk_units: 0,
             open_position_count: 0,
             restricted_market_side_count: 0,
@@ -90,16 +46,15 @@ impl Ledger {
         }
     }
 
-    /// §4.2 — complete non-LP claims on the vault's physical cash.
     pub fn non_lp_claims(&self, env: &Env) -> i128 {
         let mut total = self.position_collateral_total;
         total = math::add(env, total, self.pending_receiver_funding_total);
         total = math::add(env, total, self.action_escrow_total);
         total = math::add(env, total, self.protocol_claimable_total);
-        math::add(env, total, self.referral_claimable_total)
+        total = math::add(env, total, self.referral_claimable_total);
+        math::add(env, total, self.unclaimed_payout_total)
     }
 
-    /// §4.3 — `max(physical_cash - non_lp_claims, 0)`, never stored.
     pub fn cash_lp_equity(&self, env: &Env, physical_cash: i128) -> i128 {
         let claims = self.non_lp_claims(env);
         core::cmp::max(
@@ -109,9 +64,6 @@ impl Ledger {
     }
 }
 
-/// Read `collateral_token.balanceOf(vault)` — the only authoritative cash
-/// balance (§4.1). Costs a vault + token hop; actions read it once per
-/// distinct balance state, not per use.
 pub fn physical_cash(env: &Env) -> i128 {
     VaultClient::new(env, &storage::get_vault(env)).physical_cash()
 }
@@ -120,26 +72,13 @@ fn vault(env: &Env) -> VaultClient<'_> {
     VaultClient::new(env, &storage::get_vault(env))
 }
 
-// ---------------------------------------------------------------------------
-// Claim-bucket verbs.
-//
-// Every dollar in the vault carries exactly one label: one of the claim
-// totals below, position collateral (its own three-leg choke point further
-// down), or the LP-equity residual. Money moves in exactly two ways — a
-// label move (`credit`/`release`, cash stays put) or a boundary move
-// (`payout*`/`receive`, cash crosses the vault wall together with its
-// label). Nothing outside this module writes a claim total, so "show every
-// money movement" is a grep for these verbs.
-// ---------------------------------------------------------------------------
-
-/// The label-only claim buckets. Position collateral keeps its dedicated
-/// three-leg choke point; LP equity is the residual and never stored.
 #[derive(Clone, Copy, Debug)]
 pub enum Bucket {
     ReceiverFunding,
     ActionEscrow,
     ProtocolClaimable,
     Referral,
+    UnclaimedPayout,
 }
 
 impl Ledger {
@@ -149,11 +88,10 @@ impl Ledger {
             Bucket::ActionEscrow => &mut self.action_escrow_total,
             Bucket::ProtocolClaimable => &mut self.protocol_claimable_total,
             Bucket::Referral => &mut self.referral_claimable_total,
+            Bucket::UnclaimedPayout => &mut self.unclaimed_payout_total,
         }
     }
 
-    /// Label move LP equity → `bucket`: cash stays put, the claim grows and
-    /// the residual shrinks by construction.
     pub fn credit(&mut self, env: &Env, bucket: Bucket, amount: i128) {
         if amount == 0 {
             return;
@@ -165,8 +103,6 @@ impl Ledger {
         *total = math::add(env, *total, amount);
     }
 
-    /// Label move `bucket` → LP equity, capped at the held amount (the
-    /// `collect_stored_collateral` contract). Returns what was released.
     pub fn release(&mut self, env: &Env, bucket: Bucket, amount: i128) -> i128 {
         let total = self.bucket_mut(bucket);
         let released = core::cmp::min(*total, amount);
@@ -177,9 +113,6 @@ impl Ledger {
         released
     }
 
-    /// Exact debit backing a cash payout. Unlike `release`, a shortfall here
-    /// means a pre-computed payout exceeds its claim — an invariant
-    /// violation, never a cap.
     fn debit(&mut self, env: &Env, bucket: Bucket, amount: i128) {
         let total = self.bucket_mut(bucket);
         if amount < 0 || *total < amount {
@@ -189,8 +122,6 @@ impl Ledger {
     }
 }
 
-/// Boundary move out: debit `bucket` and transfer the same cash to
-/// `recipient`, one atomic call (the safety-claim path). No-op at zero.
 pub fn payout(env: &Env, ledger: &mut Ledger, bucket: Bucket, recipient: &Address, amount: i128) {
     if amount <= 0 {
         return;
@@ -199,9 +130,6 @@ pub fn payout(env: &Env, ledger: &mut Ledger, bucket: Bucket, recipient: &Addres
     vault(env).transfer_safety_claim(&env.current_contract_address(), recipient, &amount);
 }
 
-/// Boundary move out on the conservation-checked vault path: debit the
-/// bucket FIRST, hand the vault the post-debit claim total as
-/// `claims_after`, then transfer.
 pub fn payout_checked(
     env: &Env,
     ledger: &mut Ledger,
@@ -222,8 +150,19 @@ pub fn payout_checked(
     );
 }
 
-/// Trader payout from stored collateral: three-leg collect (capped at the
-/// held amount) plus the cash transfer, one call. Returns what was paid.
+pub fn payout_collateral_to_owner(
+    env: &Env,
+    ledger: &mut Ledger,
+    position: &mut Position,
+    side: &mut MarketSide,
+    amount: i128,
+) -> i128 {
+    let collected = collect_stored_collateral(env, ledger, position, side, amount);
+    let owner = position.owner.clone();
+    deliver_to_owner(env, ledger, &owner, collected);
+    collected
+}
+
 pub fn payout_collateral(
     env: &Env,
     ledger: &mut Ledger,
@@ -239,10 +178,34 @@ pub fn payout_collateral(
     collected
 }
 
-/// Boundary move out of LP residual equity, which carries no claim label:
-/// nothing is debited because nothing was labelled. Used only by §6.12's
-/// liquidation backstop, where the caller has already capped the amount at
-/// current cash LP equity.
+pub fn deliver_to_owner(env: &Env, ledger: &mut Ledger, owner: &Address, amount: i128) -> i128 {
+    if amount <= 0 {
+        return 0;
+    }
+    // A failed push (e.g. no trustline) is held as a claim so the recipient can't veto the settlement.
+    let delivered = vault(env)
+        .try_transfer_safety_claim(&env.current_contract_address(), owner, &amount)
+        .is_ok();
+    if delivered {
+        return amount;
+    }
+    ledger.credit(env, Bucket::UnclaimedPayout, amount);
+    let held = storage::get_unclaimed_payout(env, owner);
+    storage::save_unclaimed_payout(env, owner, math::add(env, held, amount));
+    crate::events::emit_payout_deferred(env, owner, amount);
+    0
+}
+
+pub fn claim_unclaimed_payout(env: &Env, ledger: &mut Ledger, owner: &Address) -> i128 {
+    let amount = storage::get_unclaimed_payout(env, owner);
+    if amount <= 0 {
+        panic_with_error!(env, PositionManagerError::InvalidAmount);
+    }
+    storage::save_unclaimed_payout(env, owner, 0);
+    payout(env, ledger, Bucket::UnclaimedPayout, owner, amount);
+    amount
+}
+
 pub fn payout_lp_residual(env: &Env, recipient: &Address, amount: i128) {
     if amount <= 0 {
         return;
@@ -250,17 +213,6 @@ pub fn payout_lp_residual(env: &Env, recipient: &Address, amount: i128) {
     vault(env).transfer_safety_claim(&env.current_contract_address(), recipient, &amount);
 }
 
-// ---------------------------------------------------------------------------
-// Action escrow (§5.7).
-//
-// Escrow is trader-owned cash sitting in the vault under its own claim
-// label. It is not LP equity, not position collateral, not risk backing, and
-// it earns nothing (§9.11). Every terminal transition distributes it through
-// exactly one combination of the four verbs below, and §9.11's identities
-// are checkable by reading which of them a path calls.
-// ---------------------------------------------------------------------------
-
-/// Boundary move in: pull `amount` from `owner` and label it action escrow.
 pub fn escrow_in(env: &Env, ledger: &mut Ledger, owner: &Address, amount: i128) {
     if amount <= 0 {
         return;
@@ -269,19 +221,14 @@ pub fn escrow_in(env: &Env, ledger: &mut Ledger, owner: &Address, amount: i128) 
     ledger.credit(env, Bucket::ActionEscrow, amount);
 }
 
-/// Boundary move out: refund escrow to the owner frozen in the action.
-///
-/// The safety path, deliberately: a refund returns cash the trader put in
-/// and the protocol never spent, so physical cash and the claim fall by the
-/// same amount and the refund cannot create or deepen a shortfall. Routing
-/// it through the conservation check would let a shortfall someone else
-/// caused strand a trader's own money.
 pub fn refund_escrow(env: &Env, ledger: &mut Ledger, owner: &Address, amount: i128) {
-    payout(env, ledger, Bucket::ActionEscrow, owner, amount);
+    if amount <= 0 {
+        return;
+    }
+    ledger.debit(env, Bucket::ActionEscrow, amount);
+    deliver_to_owner(env, ledger, owner, amount);
 }
 
-/// Label move escrow → position collateral: the cash is already in the
-/// vault, only its owner label changes.
 pub fn escrow_to_collateral(
     env: &Env,
     ledger: &mut Ledger,
@@ -293,17 +240,11 @@ pub fn escrow_to_collateral(
         return;
     }
     ledger.debit(env, Bucket::ActionEscrow, amount);
-    // The three collateral legs move together; the escrow debit above is
-    // the fourth leg of the same transition.
     position.stored_collateral = math::add(env, position.stored_collateral, amount);
     side.stored_collateral_total = math::add(env, side.stored_collateral_total, amount);
     ledger.position_collateral_total = math::add(env, ledger.position_collateral_total, amount);
 }
 
-/// Label move escrow → LP residual, in full or not at all. The opening-fee
-/// leg of a successful entry: `distribute_open_close_revenue` then carves
-/// the protocol and referral shares out of the residual, which is what
-/// leaves the LP share behind.
 pub fn spend_escrow(env: &Env, ledger: &mut Ledger, amount: i128) {
     if amount <= 0 {
         return;
@@ -311,23 +252,10 @@ pub fn spend_escrow(env: &Env, ledger: &mut Ledger, amount: i128) {
     ledger.debit(env, Bucket::ActionEscrow, amount);
 }
 
-/// Boundary move in: pull `amount` from `from` into the vault. Labeling
-/// stays with the caller — open pulls the collateral, and recapitalize
-/// deliberately labels nothing (a pure LP-equity donation).
 pub fn receive(env: &Env, from: &Address, amount: i128) {
     vault(env).receive_collateral(&env.current_contract_address(), from, &amount);
 }
 
-// ---------------------------------------------------------------------------
-// Stored-collateral choke point.
-//
-// Every mutation of position collateral moves three legs together — the
-// position's stored collateral, its market side's collateral aggregate, and
-// the global claim total — so aggregate conservation (§18.2) cannot be
-// broken by a call site updating one leg and forgetting another.
-// ---------------------------------------------------------------------------
-
-/// Add `amount` to a position's stored collateral (all three legs).
 pub fn add_stored_collateral(
     env: &Env,
     ledger: &mut Ledger,
@@ -346,8 +274,6 @@ pub fn add_stored_collateral(
     ledger.position_collateral_total = math::add(env, ledger.position_collateral_total, amount);
 }
 
-/// Take up to `amount` from a position's stored collateral (all three legs).
-/// Returns the amount actually collected — never more than the position has.
 pub fn collect_stored_collateral(
     env: &Env,
     ledger: &mut Ledger,

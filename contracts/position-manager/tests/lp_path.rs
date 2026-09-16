@@ -157,17 +157,28 @@ fn a_failed_withdrawal_pays_no_reward_and_returns_every_share() {
 /// §7.17 — a failed *deposit* still pays the executor, out of its escrow,
 /// and refunds only the remainder. The two failure paths differ because
 /// their escrows are different kinds of thing.
+///
+/// The failure used here is the vault being short of its claims — a real
+/// resolution gate. A pause is not one: while paused, requests wait rather
+/// than fail (§12.2).
 #[test]
 fn a_failed_deposit_still_pays_its_reward_and_refunds_the_remainder() {
     let w = World::new();
+    let c = w.client();
     let lp = Address::generate(&w.env);
     let executor = Address::generate(&w.env);
     w.mint(&lp, DEPOSIT);
     let id = w.router().request_deposit(&lp, &DEPOSIT);
 
-    // A paused vault resolves LP requests as failures rather than freezing
-    // the queue behind an unpause that may never come.
-    w.vault_client().pause(&w.admin);
+    // A position's collateral is a claim on vault cash; burn every unit of
+    // LP equity and one more, and the vault is short of what it owes.
+    let action_id = c.create_market_open(&w.trader, &w.market, &w.request(100_000_0000, 0, 120));
+    w.observe(10, PRICE);
+    c.settle_market_open(&w.keeper, &action_id);
+    let equity = c.accounting_snapshot(&w.physical()).cash_lp_equity;
+    mock_token::MockTokenClient::new(&w.env, &w.token).burn(&w.vault, &(equity + 1));
+    assert!(c.accounting_snapshot(&w.physical()).cash_shortfall > 0);
+
     w.observe(defaults::LP_REQUEST_DELAY_LOCAL, PRICE);
     let result = w.router().resolve_next(&executor);
 

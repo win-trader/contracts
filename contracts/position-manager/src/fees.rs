@@ -1,10 +1,3 @@
-//! Position fee accounting — doc §11.
-//!
-//! Capitalization settles every accrued amount against stored collateral in
-//! the §11.4 collection order (receiver-backed funding, then negative price
-//! PnL, then LP-backed funding, then borrow) so a shortfall lands on the
-//! least-protected claim, then resets the debt baselines.
-
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::BPS;
@@ -17,35 +10,16 @@ use crate::ledger::{self, Ledger};
 use crate::referral;
 use crate::{math, storage};
 
-/// What one capitalization actually moved. Feeds the settlement events and
-/// the close waterfall's bad-debt calculation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CollectedFees {
-    /// Funding credit moved from the guaranteed receiver claim into stored
-    /// collateral (label move — total non-LP claims unchanged, §8.3).
     pub receiver_credit: i128,
-    /// Receiver-backed payer funding collected from collateral.
     pub receiver_funding_paid: i128,
-    /// LP-backed payer funding collected from collateral.
     pub lp_funding_paid: i128,
-    /// Borrow fee collected from collateral.
     pub borrow_paid: i128,
-    /// Negative price PnL collected from collateral.
     pub loss_collected: i128,
-    /// Accrued obligations the position value could not cover.
     pub unpaid: i128,
 }
 
-/// §6.11 — distribute a collected **opening or closing** fee.
-///
-/// The LP share is computed off the full collected amount and receives no
-/// stored credit: leaving it in the residual is what credits LPs. The
-/// referral share is carved from the protocol slice, so the LP share is
-/// never diluted, and the protocol takes the **exact remainder** — there is
-/// no configured protocol percentage to disagree with it.
-///
-/// The fee must already have been removed from position collateral or action
-/// escrow before this runs.
 #[allow(clippy::too_many_arguments)]
 pub fn distribute_open_close_revenue(
     env: &Env,
@@ -62,8 +36,6 @@ pub fn distribute_open_close_revenue(
     }
     let config = storage::get_global_config(env);
     let lp = math::mul_div_floor(env, collected, config.fee_lp_revenue_share_bps as i128, BPS);
-    // §3.6 — a referred trader diverts a share of **both** the opening and
-    // the closing fee. The superseded implementation accrued only on close.
     let referral = referral::accrue(env, ledger, owner, collected, position_id);
     let protocol = math::sub(env, math::sub(env, collected, lp), referral);
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
@@ -73,9 +45,6 @@ pub fn distribute_open_close_revenue(
     protocol
 }
 
-/// §6.11 — distribute collected **borrow**. A separate split, with its own
-/// LP share and no referral component. Funding never calls either
-/// distribution function.
 pub fn distribute_borrow_revenue(
     env: &Env,
     ledger: &mut Ledger,
@@ -109,10 +78,6 @@ pub fn distribute_borrow_revenue(
     );
 }
 
-/// §6.8 — the opening fee on added size.
-///
-/// Applied to an initial open's full size and to an increase's added size
-/// only. A collateral-only addition never calls this.
 pub fn calculate_opening_fee(env: &Env, added_size: i128, config: &MarketConfig) -> i128 {
     if added_size <= 0 {
         panic_with_error!(env, PositionManagerError::InvalidAmount);
@@ -120,30 +85,17 @@ pub fn calculate_opening_fee(env: &Env, added_size: i128, config: &MarketConfig)
     math::mul_div_ceil(env, added_size, config.open_fee_bps as i128, BPS)
 }
 
-/// §6.9 — the closing fee, in its four parts.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClosingFee {
-    /// Reported for §12.6's fee event, which P9-07 requires to distinguish
-    /// the charged target from what was actually collected.
     #[allow(dead_code)]
     pub size_component: i128,
     #[allow(dead_code)]
     pub pnl_component: i128,
-    /// What the schedule asks for, capped at payable profit.
     #[allow(dead_code)]
     pub nominal: i128,
-    /// What can actually be taken after every senior item. Only this is
-    /// debited; `nominal - collectible` is waived immediately, is never
-    /// stored, and is **not** bad debt.
     pub collectible: i128,
 }
 
-/// §6.9 — `max(size component, PnL component)`, capped at payable profit,
-/// then capped again at the profit left after every senior item.
-///
-/// The two components have no ordering relationship by design: the charged
-/// target is their maximum and the profit caps provide the economic bound.
-/// A loser pays nothing, so there is no shortfall path.
 #[allow(clippy::too_many_arguments)]
 pub fn calculate_closing_fee(
     env: &Env,
@@ -163,10 +115,6 @@ pub fn calculate_closing_fee(
         payable_pnl,
         core::cmp::max(size_component, pnl_component),
     );
-    // The senior items: funding received is a credit, the two funding
-    // obligations and borrow are debits, and the keeper reward outranks the
-    // fee. A settlement that cannot pay its own fee waives it rather than
-    // eating into the trader's original collateral.
     let mut after_senior = math::add(env, payable_pnl, pending.funding_received);
     after_senior = math::sub(env, after_senior, pending.funding_paid_to_receivers);
     after_senior = math::sub(env, after_senior, pending.funding_paid_to_lps);
@@ -181,22 +129,6 @@ pub fn calculate_closing_fee(
     }
 }
 
-/// §6.4 `credit_received_funding` — move a receiver's accrued funding from
-/// the guaranteed claim into their position: an ownership relabel, not a
-/// cash movement.
-///
-/// **Both** the market's share and the global total are decremented, and
-/// sufficiency is required on both. The superseded implementation moved only
-/// the global total and capped the credit at it; per §5.12 the global total
-/// is the sum of the per-market amounts, so leaving the market's share
-/// untouched would let it drift above the global figure it is supposed to
-/// compose.
-///
-/// These are `require`s, not caps, because §9.4 guarantees the backing
-/// exists — the distribution remainder is reset whenever the divisor changes
-/// (§4.5.1), which is precisely what keeps a credit from outrunning the
-/// accrual that justifies it. Reaching this check means that reset did not
-/// run, and a clamp here would hide it.
 fn credit_received_funding(env: &Env, ledger: &mut Ledger, market: &mut Market, amount: i128) {
     if amount <= 0 {
         return;
@@ -210,18 +142,6 @@ fn credit_received_funding(env: &Env, ledger: &mut Ledger, market: &mut Market, 
     ledger.release(env, ledger::Bucket::ReceiverFunding, amount);
 }
 
-/// §11.4 — capitalize all accrued amounts plus `negative_pnl` against the
-/// position's stored collateral, in the specified collection order, then
-/// reset the debt baselines. Collateral from the current action and realized
-/// positive PnL must already be in stored collateral when this runs.
-/// §6.10 `capitalize_for_surviving_mutation` — credit received funding,
-/// then require stored collateral to cover **every** obligation in full
-/// before collecting any of it.
-///
-/// The check is up front rather than per-leg: collecting greedily and
-/// discovering the shortfall on the last leg would leave the position
-/// stripped of collateral by an action that must not complete at all. A
-/// survivor that cannot pay its window is not a survivor.
 pub fn capitalize_for_surviving_mutation(
     env: &Env,
     ledger: &mut Ledger,
@@ -263,7 +183,7 @@ pub fn capitalize_for_surviving_mutation(
         )
     };
     distribute_borrow_revenue(env, ledger, market_id, actor, borrow_collected, position.id);
-    funding::reset_debts(env, position, market);
+    funding::snapshot_funding_indices(position, market);
     CollectedFees {
         receiver_credit: pending.funding_received,
         receiver_funding_paid: receiver_collected,
@@ -274,8 +194,6 @@ pub fn capitalize_for_surviving_mutation(
     }
 }
 
-/// §6.10 terminal capitalization: the same collection order, but it may
-/// collect less than is owed and reports the remainder as bad debt.
 pub fn capitalize(
     env: &Env,
     ledger: &mut Ledger,
@@ -322,7 +240,7 @@ pub fn capitalize(
     };
 
     distribute_borrow_revenue(env, ledger, market_id, actor, borrow_collected, position.id);
-    funding::reset_debts(env, position, market);
+    funding::snapshot_funding_indices(position, market);
 
     let guaranteed_and_loss = math::add(
         env,
@@ -347,4 +265,3 @@ pub fn capitalize(
         unpaid,
     }
 }
-

@@ -1,8 +1,6 @@
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env};
 
-/// A referral reward was accrued to a referrer out of a position's closing
-/// fee (attribution for the indexer; the money move is in `RevenueSplit`).
 #[contractevent(topics = ["refaccr"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferralAccrued {

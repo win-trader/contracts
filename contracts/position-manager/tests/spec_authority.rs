@@ -52,9 +52,12 @@ fn the_authority_gates_refuse_an_outsider_and_the_open_ones_do_not() {
     assert!(c.try_disable_market(&outsider, &p.market).is_err());
     assert!(c.try_enable_market(&outsider, &p.market).is_err());
     assert!(
-        c.try_set_price_feed(&outsider, &p.feed).is_err(),
+        c.try_propose_price_feed(&outsider, &p.feed).is_err(),
         "§12.3 — oracle_authority"
     );
+    assert!(c.try_cancel_price_feed(&outsider).is_err());
+    assert!(c.try_cancel_global_config(&outsider).is_err());
+    assert!(c.try_cancel_market_config(&outsider, &p.market).is_err());
     assert!(
         c.try_claim_protocol(&outsider, &outsider, &1).is_err(),
         "§12.3 — protocol_recipient"
@@ -119,7 +122,6 @@ fn the_vaults_cash_moving_entry_points_admit_only_their_one_caller() {
         "PositionManager only — and this one skips the conservation check"
     );
     assert!(v.try_receive_collateral(&thief, &thief, &usd(100)).is_err());
-    assert!(v.try_pull_from_allowance(&thief, &thief, &usd(100)).is_err());
     assert!(
         v.try_settle_deposit(&thief, &thief, &usd(100)).is_err(),
         "RequestRouter only"
@@ -147,7 +149,6 @@ fn the_position_managers_vault_only_entry_points_admit_only_the_vault() {
 
     assert!(c.try_prepare_lp_snapshot(&outsider, &physical).is_err());
     assert!(c.try_refresh_borrow_rate(&outsider, &physical).is_err());
-    assert!(c.try_can_create_lp_request(&outsider, &physical).is_err());
 
     // The read-only sibling is open to anyone, which is the distinction: it
     // persists nothing.

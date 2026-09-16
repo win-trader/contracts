@@ -1,8 +1,6 @@
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env, Symbol};
 
-/// §7.5 — the owner cancelled a pending limit entry before its expiry. No
-/// fee, no keeper reward, complete refund.
 #[contractevent(topics = ["actcancel"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionCancelled {

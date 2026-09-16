@@ -2,8 +2,6 @@ use super::EventHeader;
 use shared::Position;
 use soroban_sdk::{contractevent, Address, Env};
 
-/// Take-profit / stop-loss triggers changed on an open position. Zero means
-/// no trigger set.
 #[contractevent(topics = ["tpsl"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TpSlUpdated {

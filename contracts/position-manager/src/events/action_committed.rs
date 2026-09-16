@@ -2,9 +2,6 @@ use shared::{ActionKind, PendingAction};
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env};
 
-/// §12.6 — a trader committed a price-sensitive action. Nothing economic
-/// has happened yet: no capacity is reserved, no price is chosen, no fee is
-/// collected. The two cursors are what settlement is held to.
 #[contractevent(topics = ["actcommit"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionCommitted {
@@ -15,17 +12,14 @@ pub struct ActionCommitted {
     pub kind: ActionKind,
     pub created_at: u64,
     pub execute_after: u64,
-    /// The observation cursor a fill must be strictly newer than (§8.6).
     pub commit_observed_at: u64,
     pub escrowed_collateral: i128,
-    /// `0` for a mutation; the entry's expiry boundary otherwise.
     pub expires_at: u64,
 }
 
 pub fn emit_action_committed(env: &Env, action: &PendingAction) {
     ActionCommitted {
         action_id: action.action_id,
-        // The owner is the actor: a commitment is theirs, not a keeper's.
         header: super::header(env, &action.market_id, &action.owner),
         owner: action.owner.clone(),
         kind: action.kind,

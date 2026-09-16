@@ -2,10 +2,6 @@ use super::EventHeader;
 use shared::Position;
 use soroban_sdk::{contractevent, Address, Env};
 
-/// §7.7 — an immediate collateral top-up. It settles nothing and charges
-/// nothing, so the only cash movement to report is the deposit itself; the
-/// resulting stored collateral is carried so an indexer can reconcile the
-/// position without a second read.
 #[contractevent(topics = ["colladd"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollateralAdded {
@@ -20,7 +16,6 @@ pub struct CollateralAdded {
 pub fn emit_collateral_added(env: &Env, position: &Position, amount: i128) {
     CollateralAdded {
         position_id: position.id,
-        // The owner is the actor: §7.7 needs no keeper.
         header: super::header(env, &position.market, &position.owner),
         owner: position.owner.clone(),
         amount,

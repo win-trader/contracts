@@ -1,12 +1,3 @@
-//! Position-lifecycle and governance events.
-//!
-//! One file per event: the `#[contractevent]` type and the `emit_*` function
-//! that builds it from the aggregates a caller already holds. Nothing outside
-//! this module assembles an event struct. The settlement events double as the
-//! on-chain audit trail for the cash-transition table (doc §6), and the
-//! offchain indexer keys on the topic literals. Wide settlement events use
-//! `data_format = "map"` so fields are self-describing and can grow.
-
 mod action_cancelled;
 mod action_committed;
 mod action_expired;
@@ -26,11 +17,14 @@ mod market_checkpoint;
 mod market_config_updated;
 mod market_status_changed;
 mod pause_changed;
+mod payout_deferred;
 mod price_feed_changed;
+mod price_feed_proposed;
 mod position_closed;
 mod position_decreased;
 mod position_increased;
 mod position_opened;
+mod proposal_cancelled;
 mod protocol_claimed;
 mod recapitalized;
 mod referral_accrued;
@@ -60,11 +54,14 @@ pub use market_checkpoint::*;
 pub use market_config_updated::*;
 pub use market_status_changed::*;
 pub use pause_changed::*;
+pub use payout_deferred::*;
 pub use price_feed_changed::*;
+pub use price_feed_proposed::*;
 pub use position_closed::*;
 pub use position_decreased::*;
 pub use position_increased::*;
 pub use position_opened::*;
+pub use proposal_cancelled::*;
 pub use protocol_claimed::*;
 pub use recapitalized::*;
 pub use referral_accrued::*;

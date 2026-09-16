@@ -2,9 +2,6 @@ use crate::settle::SettleHeader;
 use super::EventHeader;
 use soroban_sdk::{contractevent, Address, Env};
 
-/// A partial close (§12.2). Fee fields are the amounts actually collected in
-/// this settlement; `funding_received` is the credit capitalized from the
-/// guaranteed receiver claim.
 #[contractevent(topics = ["posdec"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PositionDecreased {
@@ -15,12 +12,8 @@ pub struct PositionDecreased {
     pub size_removed: i128,
     pub price: i128,
     pub raw_pnl: i128,
-    /// §2.8's signed payable PnL: negative on a loss.
     pub payable_pnl: i128,
-    /// §7.9 — realized profit stays in the position as stored collateral;
-    /// there is no withdrawal leg. This is the resulting balance.
     pub stored_collateral: i128,
-    /// §11.1 closing fee collected out of the realized winnings.
     pub closing_fee: i128,
     pub keeper_reward: i128,
     pub receiver_funding_paid: i128,
