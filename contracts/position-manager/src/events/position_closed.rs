@@ -16,6 +16,7 @@ pub struct PositionClosed {
     pub size: i128,
     pub price: i128,
     pub raw_pnl: i128,
+    /// §2.8's signed payable PnL: negative on a loss.
     pub payable_pnl: i128,
     /// Residual collateral paid to the owner after the waterfall.
     pub collateral_payout: i128,
@@ -65,7 +66,7 @@ pub fn emit_closed(
         size: s.size_removed,
         price: s.price,
         raw_pnl: s.raw_pnl,
-        payable_pnl: s.payable_pnl,
+        payable_pnl: s.signed_payable_pnl(),
         collateral_payout: tail.collateral_payout,
         bad_debt: tail.bad_debt,
         unpaid_profit: s.unpaid_profit,

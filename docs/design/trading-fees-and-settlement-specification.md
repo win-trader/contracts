@@ -6494,6 +6494,30 @@ replaced. Triggers attached during an entry fill use that fill's observation as
 their cursor, so they require a later observation before closing the new
 position.
 
+Freshness relative to the commitment is one of two tests an observation must
+pass. The second is absolute age, and its boundary is inclusive:
+
+```text
+acceptable = now - observed_at <= max_price_age_seconds
+too_old    = now - observed_at >  max_price_age_seconds
+```
+
+An observation exactly `max_price_age_seconds` old is still acceptable, which
+is what "how old the observation may be" means in §10.1. The two tests are
+independent and neither substitutes for the other: a strictly newer
+observation can still be too old to act on if the feed has since gone quiet,
+and an observation well inside the age bound is still not fresh for a
+commitment made against it.
+
+Failing the age test is not a terminal outcome. Unlike the conditions of §8.9
+it is a property of the feed rather than of the action, it applies equally to
+every action in the protocol at that instant, and it clears by itself when the
+feed publishes again. Refusing the call leaves the action, its escrow, and its
+cursor exactly as they were; terminating it would consume a commitment for an
+outage the trader did not cause. Read-only accounting and fee quotes refuse on
+the same bound, so a quote never reports a value the protocol would decline to
+act on.
+
 ### 8.7 Slippage failure
 
 The acceptable-price predicate protects the trader independently of any
@@ -8429,8 +8453,17 @@ Each contract owns a disjoint numeric range, assigned once and never reused:
 |---|---|
 | `1–99` | Position manager |
 | `100–199` | Vault |
-| `200–299` | Oracle router |
+| `200–299` | *Vacant* — the deleted oracle router's range |
 | `300–399` | Configuration manager |
+| `400–499` | Request router |
+
+The request router takes a range of its own rather than sharing the vault's.
+`resolve_next` calls straight into the vault, so one range across both would
+make a returned code ambiguous between the two halves of the LP path —
+precisely the collision disjoint ranges exist to prevent. `200–299` stays
+empty rather than being recycled: a code that once meant one thing and later
+means another is worse than a gap, because old clients and old logs keep
+resolving it the old way.
 
 Two rules follow:
 
@@ -8440,9 +8473,11 @@ Two rules follow:
    caller receiving it could not tell a rejected price bound from a loss of
    oracle quorum — two conditions with opposite remedies.
 2. **A cross-contract error is wrapped, never passed through.** When the
-   position manager calls the oracle router and the call fails, it returns its
-   own error carrying the underlying one. Propagating the inner code unchanged
-   is what makes a foreign code look native.
+   position manager calls the external price feed and the call fails, it
+   returns its own error — `PriceUnavailable` or `StalePrice` — rather than
+   whatever the feed raised. Propagating the inner code unchanged is what
+   makes a foreign code look native, and the feed is a third party whose
+   numbering this protocol does not control at all.
 
 Codes are grouped by cause so a caller can react to a class without
 enumerating every member:
@@ -8453,7 +8488,7 @@ enumerating every member:
 | Not found | The identifier does not exist or was already consumed |
 | State | The vault or market is in a state that forbids this operation, including paused |
 | Validation | The arguments are structurally invalid |
-| Oracle | No qualifying price: stale, unavailable, or insufficiently corroborated |
+| Oracle | No qualifying price: the feed had none, or its latest observation is too old |
 | Accounting | An invariant from §9 would be violated; always a bug or corruption |
 | Arithmetic | Overflow or a failed narrowing check from §2.1.1 |
 

@@ -116,6 +116,25 @@ pub struct SettleHeader {
     pub unpaid_profit: i128,
 }
 
+impl SettleHeader {
+    /// §2.8's payable PnL, signed — which is the quantity §12.6 requires a
+    /// settlement event to report.
+    ///
+    /// The stored `payable_pnl` is the **positive part alone**, because both
+    /// the closing-fee base (§6.9) and the credit step need it clamped at
+    /// zero. A loss passes through unreduced under §2.8 and has to reach a
+    /// consumer as a negative number: an indexer summing the emitted field
+    /// would otherwise see winners only, and §12.6 makes the event stream the
+    /// only durable record there is.
+    pub fn signed_payable_pnl(&self) -> i128 {
+        if self.raw_pnl <= 0 {
+            self.raw_pnl
+        } else {
+            self.payable_pnl
+        }
+    }
+}
+
 /// What only a full close produces.
 #[derive(Clone, Debug, Default)]
 pub struct ClosedTail {

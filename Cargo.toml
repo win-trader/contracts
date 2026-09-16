@@ -10,15 +10,6 @@ members = [
     "mocks/mock-oracle",
 ]
 
-# `test-suites` is deliberately out of the workspace until it is rewritten.
-# Its 4.9k lines exercise the superseded API — `open_position`,
-# `place_entry_order`, execution budgets, and the deleted oracle router — and
-# it has not compiled since that router was removed. Carrying a member that
-# cannot build makes `cargo check` and `cargo test` report on a subset while
-# appearing to report on the whole, which is worse than an honest gap. See
-# P6-32 in docs/design/2026-09-settlement-spec-implementation-plan.md.
-exclude = ["test-suites"]
-
 [workspace.dependencies]
 soroban-sdk = { version = "=23.5.2" }
 shared = { path = "contracts/shared" }

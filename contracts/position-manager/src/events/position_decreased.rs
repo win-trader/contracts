@@ -15,6 +15,7 @@ pub struct PositionDecreased {
     pub size_removed: i128,
     pub price: i128,
     pub raw_pnl: i128,
+    /// §2.8's signed payable PnL: negative on a loss.
     pub payable_pnl: i128,
     /// §7.9 — realized profit stays in the position as stored collateral;
     /// there is no withdrawal leg. This is the resulting balance.
@@ -37,7 +38,7 @@ pub fn emit_decreased(env: &Env, actor: &Address, s: &SettleHeader) {
         size_removed: s.size_removed,
         price: s.price,
         raw_pnl: s.raw_pnl,
-        payable_pnl: s.payable_pnl,
+        payable_pnl: s.signed_payable_pnl(),
         stored_collateral: s.stored_collateral,
         closing_fee: s.closing_fee,
         keeper_reward: s.keeper_reward,
