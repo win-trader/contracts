@@ -18,6 +18,7 @@ stellar-contract-utils = { workspace = true }
 stellar-macros = { workspace = true }
 
 [dev-dependencies]
+position-manager = { path = ".", features = ["testutils"] }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 shared = { workspace = true, features = ["testutils"] }
 config-manager = { path = "../config-manager", features = ["testutils"] }

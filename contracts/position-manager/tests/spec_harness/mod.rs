@@ -7,9 +7,10 @@
 
 #![allow(dead_code)]
 
+use position_manager::PositionManagerContractClient;
 use shared::constants::{PRICE_PRECISION, ROLE_PAUSER, ROLE_UNPAUSER};
 use shared::{
-    defaults, ActionOutcome, LpConfig, OpenPayload, PositionManagerClient, RequestRouterClient,
+    defaults, ActionOutcome, LpConfig, OpenPayload,  RequestRouterClient,
     VaultClient,
 };
 use soroban_sdk::{
@@ -164,8 +165,8 @@ impl Protocol {
         p
     }
 
-    pub fn pm(&self) -> PositionManagerClient<'_> {
-        PositionManagerClient::new(&self.env, &self.pm)
+    pub fn pm(&self) -> PositionManagerContractClient<'_> {
+        PositionManagerContractClient::new(&self.env, &self.pm)
     }
 
     pub fn vault_client(&self) -> VaultClient<'_> {

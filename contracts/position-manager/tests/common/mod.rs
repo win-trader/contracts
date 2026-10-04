@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use position_manager::PositionManagerContractClient;
 use position_manager::PositionManagerContract;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
@@ -14,7 +15,7 @@ use soroban_sdk::{
 
 use shared::constants::{ROLE_PAUSER, ROLE_UNPAUSER};
 use shared::{
-    defaults, GlobalConfig, LpConfig, OpenPayload, PositionManagerClient,
+    defaults, GlobalConfig, LpConfig, OpenPayload, 
 };
 
 pub const PRICE: i128 = 100_000_0000000; // $100_000 at PRICE_PRECISION
@@ -82,7 +83,7 @@ impl World {
             request_router::RequestRouterContract,
             (token.clone(), vault.clone(), config_manager.clone()),
         );
-        let client = PositionManagerClient::new(&env, &pm);
+        let client = PositionManagerContractClient::new(&env, &pm);
         client.set_vault(&admin, &vault);
         shared::VaultClient::new(&env, &vault).set_request_router(&admin, &router);
 
@@ -110,8 +111,8 @@ impl World {
         }
     }
 
-    pub fn client(&self) -> PositionManagerClient<'_> {
-        PositionManagerClient::new(&self.env, &self.pm)
+    pub fn client(&self) -> PositionManagerContractClient<'_> {
+        PositionManagerContractClient::new(&self.env, &self.pm)
     }
 
     pub fn balance(&self, who: &Address) -> i128 {

@@ -414,18 +414,6 @@ impl PositionManager for PositionManagerContract {
         storage::get_position(&env, position_id)
     }
 
-    fn pending_fees(env: Env, position_id: u64, now: u64) -> shared::PendingFeesView {
-        let position = storage::get_position(&env, position_id);
-        let market = storage::get_market(&env, &position.market);
-        let ledger = storage::get_ledger(&env);
-        let pending = funding::preview_pending_fees(&env, &ledger, &position, &market, now);
-        shared::PendingFeesView {
-            funding_paid_to_receivers: pending.funding_paid_to_receivers,
-            funding_paid_to_lps: pending.funding_paid_to_lps,
-            funding_received: pending.funding_received,
-            borrow: pending.borrow,
-        }
-    }
 
     fn get_market(env: Env, market: Symbol) -> Market {
         storage::get_market(&env, &market)
@@ -524,6 +512,25 @@ impl PositionManager for PositionManagerContract {
 
     fn cancel_upgrade(env: Env, caller: Address) {
         <Self as TimelockedUpgradeable>::cancel(&env, caller);
+    }
+}
+
+// Test-only: off-chain previews come from @win-trader/protocol-math, and the
+// release build cannot spare the bytes.
+#[cfg(feature = "testutils")]
+#[contractimpl]
+impl PositionManagerContract {
+    pub fn pending_fees(env: Env, position_id: u64, now: u64) -> shared::PendingFeesView {
+        let position = storage::get_position(&env, position_id);
+        let market = storage::get_market(&env, &position.market);
+        let ledger = storage::get_ledger(&env);
+        let pending = funding::preview_pending_fees(&env, &ledger, &position, &market, now);
+        shared::PendingFeesView {
+            funding_paid_to_receivers: pending.funding_paid_to_receivers,
+            funding_paid_to_lps: pending.funding_paid_to_lps,
+            funding_received: pending.funding_received,
+            borrow: pending.borrow,
+        }
     }
 }
 

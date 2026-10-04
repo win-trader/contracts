@@ -266,6 +266,7 @@ pub fn snapshot_funding_indices(position: &mut Position, market: &Market) {
     position.receiver_index_snapshot = indices.receiver;
 }
 
+#[cfg(feature = "testutils")]
 pub fn preview_pending_fees(
     env: &Env,
     ledger: &Ledger,

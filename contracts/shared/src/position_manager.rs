@@ -2,7 +2,7 @@ use soroban_sdk::{contractclient, Address, BytesN, Env, Symbol, Vec};
 
 use crate::types::{
     AccountingSnapshot, ActionOutcome, GlobalConfig, Market, MarketConfig, OpenPayload,
-    PendingAction, PendingFeesView, Position,
+    PendingAction, Position,
 };
 
 /// Accounting ledger of the protocol: markets, positions, non-LP claims, and fee indices.
@@ -146,8 +146,6 @@ pub trait PositionManager {
     /// A position.
     fn get_position(env: Env, position_id: u64) -> Position;
 
-    /// A position's accrued fees as of `now`, without writing state.
-    fn pending_fees(env: Env, position_id: u64, now: u64) -> PendingFeesView;
 
     /// A market's configuration and accounting.
     fn get_market(env: Env, market: Symbol) -> Market;
