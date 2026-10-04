@@ -19,7 +19,7 @@ This is one of four repos:
 - `packages/protocol-math/` — `@win-trader/protocol-math`: pure TS mirror of on-chain math (quotes, fees, PnL, liquidation price), no network calls
 - `packages/protocol-clients/` — `@win-trader/protocol-clients`: helpers to instantiate a binding against a network + signer
 - `packages/config/` — `@win-trader/config`: network/address registry (`addresses.json`) + protocol constants
-- `scripts/` — deploy and admin scripts (deploy, upgrade, grant-keepers, add-market, provision-keys)
+- `scripts/` — deploy and admin scripts (deploy, upgrade, add-market, provision-keys); `scripts/lib/protocol.sh` holds the network parameters and config JSON they share
 
 ## Prerequisites
 
@@ -44,10 +44,10 @@ TS packages:
 Local network + deploy:
 
 - `make up` / `make down` / `make reset` — local Stellar network
-- `make deploy` / `make deploy-testnet` / `make deploy-mainnet` — deploy and record addresses
-- `make cex-oracles-testnet` — deploy and wire Binance/KuCoin oracle contracts on testnet
-- `make deploy-testnet-full` — provision testnet keys, deploy core contracts, then deploy/wire CEX oracles
-- `make upgrade-local` / `make upgrade-testnet`, `make grant-keepers`, `make add-market`
+- `make deploy` / `make deploy-testnet` / `make deploy-mainnet` — deploy and record addresses. Local deploys the mock oracle and mock token. Testnet needs `PRICE_FEED_ADDR` (the feed comes from the oracles repo). Mainnet also needs `ASSET_ADDR` (the USDC SAC) and `UPGRADER_ADDR`, `PAUSER_ADDR`, `UNPAUSER_ADDR`, `ORACLE_ADDR`, `PROTOCOL_ADDR`, none of which may be the admin
+- `make deploy-testnet-full` — provision testnet keys, then deploy the core contracts
+- `make upgrade-propose` / `make upgrade-execute` — timelocked upgrade in two steps (set `NETWORK_KEY`, and `UPGRADE_SOURCE` to the UPGRADER identity)
+- `make add-market SYMBOL=…` — register a market the price feed already serves
 
 The fee and vault rewrite requires a fresh deployment. Its economic state is
 not compatible with contracts deployed before the request router was added.
@@ -80,8 +80,10 @@ config loader falls back to the in-package combined file.
 Run the on-chain testnet deploy from this repo:
 
 ```bash
-make deploy-testnet-full
+PRICE_FEED_ADDR=C... make deploy-testnet-full
 ```
+
+`PRICE_FEED_ADDR` is the SEP-40 feed deployed from the `oracles` repo.
 
 That produces:
 

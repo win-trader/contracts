@@ -7,7 +7,7 @@ PASSPHRASE    ?= Standalone Network ; February 2017
 SOURCE        ?= admin
 DEPLOY_CONTRACTS = config-manager vault request-router position-manager
 
-.PHONY: build optimize bind check clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-local upgrade-testnet grant-keepers add-market cex-oracles cex-oracles-testnet local
+.PHONY: build optimize bind check clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-propose upgrade-execute add-market local
 
 build:
 	cargo build --target wasm32v1-none --release \
@@ -71,42 +71,29 @@ deploy-testnet: optimize
 deploy-mainnet: optimize
 	NETWORK_KEY=mainnet bash scripts/deploy.sh
 
-# Push freshly-built WASM to existing on-chain contracts via the OZ
-# Upgradeable `upgrade(operator, new_wasm_hash)` entrypoint.
-upgrade-local: build
-	NETWORK_KEY=local bash scripts/upgrade.sh
+# Timelocked upgrade: propose, wait out the timelock, then execute from the
+# same build. NETWORK_KEY defaults to local; UPGRADE_SOURCE names the UPGRADER.
+upgrade-propose:
+	PHASE=propose bash scripts/upgrade.sh
 
-upgrade-testnet: build
-	NETWORK_KEY=testnet bash scripts/upgrade.sh
+upgrade-execute:
+	PHASE=execute bash scripts/upgrade.sh
 
-grant-keepers:
-	bash scripts/grant-keepers.sh
-
-# Incrementally add a market (oracle sources + risk configuration) to a live
-# deployment, no redeploy. Usage: `make add-market SYMBOL=XLMUSD`.
+# Register a market on a live deployment, no redeploy. The price feed must
+# already serve the symbol. Usage: `make add-market SYMBOL=XLMUSD`.
 add-market:
 	@if [ -z "$(SYMBOL)" ]; then echo "usage: make add-market SYMBOL=XLMUSD"; exit 1; fi
 	bash scripts/add-market.sh $(SYMBOL)
 
-# ---- CEX oracle contract instances (on-chain) ----
-# Deploys two `oracle` contract instances, generates per-source publisher
-# keypairs, binds each as the instance publisher, and registers them as
-# primaries on the OracleRouter. The publisher *services* live in the
-# win-trader/oracles repo and run against these instances.
-cex-oracles:
-	bash scripts/deploy-cex-oracles.sh
-
-cex-oracles-testnet:
-	NETWORK_KEY=testnet bash scripts/deploy-cex-oracles.sh
-
-deploy-testnet-full: provision-keys-testnet deploy-testnet cex-oracles-testnet
+# Testnet needs PRICE_FEED_ADDR: the feed is deployed from the oracles repo.
+deploy-testnet-full: provision-keys-testnet deploy-testnet
 	@echo ""
 	@echo "Testnet on-chain environment ready. Runtime artifact: deployments/testnet.json"
 
 # Full local bootstrap (on-chain only): network -> identities -> core
-# contracts -> CEX oracle instances. The off-chain stack (indexer, keeper,
+# contracts, priced by the mock oracle. The off-chain stack (indexer, keeper,
 # api, frontend, oracle publishers) lives in the offchain / app / oracles
 # repos — run them there against this local network + the recorded addresses.
-local: up provision-keys deploy cex-oracles
+local: up provision-keys deploy
 	@echo ""
 	@echo "Local on-chain environment ready. Start the off-chain stack from the offchain / app / oracles repos."

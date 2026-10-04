@@ -11,8 +11,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NETWORK="${1:?usage: split-deployments.sh <network>}"
-SRC="$ROOT/packages/config/addresses.json"
-OUT_DIR="$ROOT/deployments"
+SRC="${ADDRESSES_FILE:-$ROOT/packages/config/addresses.json}"
+OUT_DIR="${DEPLOYMENTS_DIR:-$ROOT/deployments}"
 
 mkdir -p "$OUT_DIR"
 # `-e` makes jq exit non-zero if the network key is absent / null, so a typo
