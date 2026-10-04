@@ -263,6 +263,7 @@ fn eligible(
     let pending = funding::pending_fees(env, &ledger, &position, &market);
     let assessment = risk::evaluate_liquidation(env, &ledger, &position, &market, fill.price);
     if assessment.liquidatable {
+        action::persist_accrual(env, &mut ledger, &action.market_id, &market, physical);
         return Err(ActionOutcome::RequiresLiquidation);
     }
 

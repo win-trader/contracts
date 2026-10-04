@@ -418,6 +418,7 @@ impl PositionManager for PositionManagerContract {
 
     fn disable_market(env: Env, caller: Address, market: Symbol) {
         require_role(&env, &caller, ROLE_PAUSER);
+        storage::get_market(&env, &market);
         storage::set_market_disabled(&env, &market, true);
         events::emit_market_status_changed(&env, &market, &caller, true);
     }

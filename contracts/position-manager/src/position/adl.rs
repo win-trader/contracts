@@ -6,7 +6,7 @@ use crate::auth::require_initialized;
 use crate::errors::PositionManagerError;
 use crate::events::CloseReason;
 use crate::settle::{self, ClosingFee};
-use crate::{borrow, funding, keeper, ledger, math, risk, snapshot, storage};
+use crate::{action, borrow, funding, keeper, ledger, math, risk, snapshot, storage};
 
 pub fn execute_adl(env: Env, keeper_address: Address, position_id: u64) -> ActionOutcome {
     require_initialized(&env);
@@ -54,6 +54,7 @@ pub fn execute_adl(env: Env, keeper_address: Address, position_id: u64) -> Actio
     );
 
     if risk::evaluate_liquidation(&env, &ledger, &position, &market, price).liquidatable {
+        action::persist_accrual(&env, &mut ledger, &position.market, &market, physical);
         return ActionOutcome::RequiresLiquidation;
     }
 

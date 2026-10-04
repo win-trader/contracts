@@ -9,6 +9,7 @@ const MAX_BOUNDED_DURATION: u64 = 86_400;
 const MAX_ORDER_LIFETIME_CEILING: u64 = 2_592_000;
 const MIN_MARKET_ORDER_LIFETIME: u64 = 60;
 const MAX_FUNDING_HALF_LIFE: u64 = 31_536_000;
+const MIN_CONFIG_TIMELOCK: u64 = 86_400;
 
 fn reward_bounds(r: &KeeperRewards) -> (i128, i128) {
     let all = [
@@ -68,7 +69,7 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
         || c.global_hard_cap_limit_bps > BPS as u32
         || c.hard_cap_relatch_band_bps == 0
         || c.hard_cap_relatch_band_bps > BPS as u32
-        || c.config_timelock_seconds == 0
+        || c.config_timelock_seconds < MIN_CONFIG_TIMELOCK
     {
         panic_with_error!(env, PositionManagerError::InvalidConfig);
     }

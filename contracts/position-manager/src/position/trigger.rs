@@ -157,6 +157,7 @@ fn execute(
     );
 
     if risk::evaluate_liquidation(env, &ledger, &position, &market, fill.price).liquidatable {
+        action::persist_accrual(env, &mut ledger, &position.market, &market, physical);
         return ActionOutcome::RequiresLiquidation;
     }
 

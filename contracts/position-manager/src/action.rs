@@ -1,4 +1,4 @@
-use soroban_sdk::{panic_with_error, Address, Env};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::{
     ActionKind, ActionOutcome, FailureReason, GlobalConfig, Market, PendingAction, Position,
@@ -50,6 +50,19 @@ pub fn exit_trigger_crossed(is_long: bool, take_profit: bool, price: i128, trigg
     } else {
         price <= trigger
     }
+}
+
+// A non-consuming return keeps its accrual: the checkpoint and risk events are already published.
+pub fn persist_accrual(
+    env: &Env,
+    ledger: &mut Ledger,
+    market_id: &Symbol,
+    market: &Market,
+    physical: i128,
+) {
+    storage::save_market(env, market_id, market);
+    borrow::refresh_rate(env, ledger, physical);
+    storage::save_ledger(env, ledger);
 }
 
 pub fn load(env: &Env, action_id: u64, kind: ActionKind) -> PendingAction {

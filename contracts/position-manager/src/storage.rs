@@ -149,9 +149,12 @@ pub fn is_market_disabled(env: &Env, market: &Symbol) -> bool {
 }
 
 pub fn set_market_disabled(env: &Env, market: &Symbol, disabled: bool) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::MarketDisabled(market.clone()), &disabled);
+    let key = StorageKey::MarketDisabled(market.clone());
+    if disabled {
+        env.storage().instance().set(&key, &true);
+    } else {
+        env.storage().instance().remove(&key);
+    }
 }
 
 pub fn get_active_markets(env: &Env) -> Vec<Symbol> {
