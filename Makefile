@@ -24,6 +24,7 @@ optimize: build
 		echo "Optimizing $$wasm..."; \
 		stellar contract optimize --wasm "$$wasm"; \
 	done
+	bash scripts/check-sizes.sh
 
 bind: optimize
 	bash scripts/gen-bindings.sh
