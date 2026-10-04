@@ -63,7 +63,7 @@ invoke() {
 }
 
 echo "=== Building + optimizing WASMs ==="
-(cd "$ROOT" && make optimize)
+(cd "$ROOT" && make "$BUILD_TARGET")
 
 confirm_mainnet "upgrade $PHASE"
 

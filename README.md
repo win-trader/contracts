@@ -33,6 +33,7 @@ Contracts (Rust):
 
 - `make build` — compile contracts to WASM
 - `make optimize` — optimize the WASM with `wasm-opt`, then fail if any contract exceeds the 131,072-byte network limit
+- `make repro` — the canonical build: the same steps inside a pinned `rust:1.98.1` Linux image (needs Docker), output in `target/repro/`. Byte-identical to CI. Host builds differ by platform (Apple-silicon and x86-64 Linux order functions differently), so audited and deployed hashes come from this target, and testnet/mainnet deploys and upgrades use it automatically.
 - `make check` — type-check the Rust workspace
 - `make bind` — `optimize` + generate and build the TS bindings into `packages/bindings/`
 

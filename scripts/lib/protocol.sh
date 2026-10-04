@@ -8,7 +8,15 @@
 # fields are JSON numbers.
 
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-WASM_DIR="$ROOT/target/wasm32v1-none/release"
+# Testnet and mainnet deploy the canonical Linux build (`make repro`), whose
+# hashes anyone can reproduce; local deploys use the host build.
+if [[ "${NETWORK_KEY:-local}" == "local" ]]; then
+  BUILD_TARGET=optimize
+  WASM_DIR="$ROOT/target/wasm32v1-none/release"
+else
+  BUILD_TARGET=repro
+  WASM_DIR="$ROOT/target/repro/wasm32v1-none/release"
+fi
 ADDRESSES_FILE="${ADDRESSES_FILE:-$ROOT/packages/config/addresses.json}"
 NETWORK_KEY="${NETWORK_KEY:-local}"
 

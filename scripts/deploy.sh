@@ -119,7 +119,7 @@ fi
 # ---------- Build ----------
 echo ""
 echo "=== Building + optimizing WASMs ==="
-(cd "$ROOT" && make optimize)
+(cd "$ROOT" && make "$BUILD_TARGET")
 
 # ---------- Helpers ----------
 deploy() {

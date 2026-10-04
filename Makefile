@@ -1,5 +1,5 @@
 CONTRACTS = vault request-router position-manager config-manager market-governor mock-oracle mock-token
-WASM_DIR  = target/wasm32v1-none/release
+WASM_DIR ?= target/wasm32v1-none/release
 
 # Local network
 RPC_URL       ?= http://localhost:8000/soroban/rpc
@@ -7,7 +7,8 @@ PASSPHRASE    ?= Standalone Network ; February 2017
 SOURCE        ?= admin
 DEPLOY_CONTRACTS = config-manager vault request-router position-manager
 
-.PHONY: build optimize bind check clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-propose upgrade-execute add-market local
+
+.PHONY: build optimize repro bind check clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-propose upgrade-execute add-market local
 
 # Panic locations embed absolute source paths. Remap them to fixed prefixes so
 # the same commit builds byte-identical WASM on any machine.
@@ -42,6 +43,19 @@ optimize: build
 	done
 	bash scripts/check-sizes.sh
 	@cd $(WASM_DIR) && shasum -a 256 *.optimized.wasm
+
+# Canonical build. The bytes depend on the host (Apple-silicon and x86-64
+# Linux hosts order functions differently), so the hashes that are audited and
+# deployed come from this pinned Linux image, the same environment CI runs.
+# Output goes to target/repro so it never mixes with host builds.
+REPRO_IMAGE = rust:1.98.1@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546
+
+repro:
+	docker run --rm --platform linux/amd64 -v "$(CURDIR)":/src -w /src $(REPRO_IMAGE) bash -ec '\
+		rustup target add wasm32v1-none >/dev/null; \
+		curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_$(WASM_OPT_VERSION)/binaryen-version_$(WASM_OPT_VERSION)-x86_64-linux.tar.gz | tar xz -C /opt; \
+		export PATH=/opt/binaryen-version_$(WASM_OPT_VERSION)/bin:$$PATH CARGO_TARGET_DIR=target/repro; \
+		make optimize WASM_DIR=target/repro/wasm32v1-none/release'
 
 bind: optimize
 	bash scripts/gen-bindings.sh
