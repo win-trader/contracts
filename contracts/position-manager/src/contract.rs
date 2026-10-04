@@ -1,4 +1,4 @@
-use crate::auth::{require_initialized, require_role, require_vault};
+use crate::auth::{require_role, require_vault};
 use crate::errors::PositionManagerError;
 use crate::events;
 use crate::ledger::{self, Ledger};
@@ -123,10 +123,6 @@ impl PositionManagerContract {
         require_feed_decimals(&env, &price_feed);
         storage::save_price_feed(&env, &price_feed);
         storage::save_global_config(&env, &config);
-        storage::save_initialized(&env);
-        storage::save_paused(&env, false);
-        storage::save_next_position_id(&env, 1);
-        storage::save_active_markets(&env, &Vec::<Symbol>::new(&env));
         let initial_rate = math::mul(&env, config.base_borrow_rate_bps_day, INDEX_PRECISION);
         storage::save_ledger(&env, &Ledger::new(env.ledger().timestamp(), initial_rate));
         shared::bump_instance_ttl(&env);
@@ -136,7 +132,6 @@ impl PositionManagerContract {
 #[contractimpl]
 impl PositionManager for PositionManagerContract {
     fn propose_price_feed(env: Env, caller: Address, price_feed: Address) {
-        require_initialized(&env);
         require_role(&env, &caller, ROLE_ORACLE);
         require_feed_decimals(&env, &price_feed);
         let now = env.ledger().timestamp();
@@ -149,7 +144,6 @@ impl PositionManager for PositionManagerContract {
     }
 
     fn apply_price_feed(env: Env, caller: Address) {
-        require_initialized(&env);
         caller.require_auth();
         let price_feed = governance::take_due_price_feed(&env, env.ledger().timestamp());
         require_feed_decimals(&env, &price_feed);
@@ -158,7 +152,6 @@ impl PositionManager for PositionManagerContract {
     }
 
     fn cancel_price_feed(env: Env, caller: Address) {
-        require_initialized(&env);
         require_role(&env, &caller, ROLE_ORACLE);
         governance::cancel_price_feed_proposal(&env, &caller);
     }
@@ -168,7 +161,6 @@ impl PositionManager for PositionManagerContract {
     }
 
     fn set_vault(env: Env, caller: Address, vault: Address) {
-        require_initialized(&env);
         require_role(&env, &caller, ROLE_ADMIN);
         if storage::try_get_vault(&env).is_some() {
             panic_with_error!(&env, PositionManagerError::AlreadyInitialized);
@@ -316,7 +308,6 @@ impl PositionManager for PositionManagerContract {
     }
 
     fn update_indices(env: Env, caller: Address, market_symbol: Symbol) {
-        require_initialized(&env);
         caller.require_auth();
         let mut ledger = storage::get_ledger(&env);
         let now = env.ledger().timestamp();
@@ -545,7 +536,6 @@ impl PositionManager for PositionManagerContract {
     }
 
     fn claim_payout(env: Env, owner: Address) -> i128 {
-        require_initialized(&env);
         owner.require_auth();
         let mut ledger = storage::get_ledger(&env);
         borrow::accrue(&env, &mut ledger, Some(&owner), env.ledger().timestamp());

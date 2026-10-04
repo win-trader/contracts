@@ -2,7 +2,6 @@ use soroban_sdk::{panic_with_error, Address, Env};
 
 use shared::{ActionOutcome, Trigger, TriggerInstruction};
 
-use crate::auth::require_initialized;
 use crate::errors::PositionManagerError;
 use crate::events::{self, CloseReason};
 use crate::ledger;
@@ -29,7 +28,6 @@ pub(crate) fn attach(
 }
 
 fn set(env: &Env, position_id: u64, trigger_price: i128, acceptable_price: i128, take_profit: bool) {
-    require_initialized(env);
     let mut position = storage::get_position(env, position_id);
     position.owner.require_auth();
     if trigger_price <= 0 || acceptable_price < 0 {
@@ -57,7 +55,6 @@ fn set(env: &Env, position_id: u64, trigger_price: i128, acceptable_price: i128,
 }
 
 fn clear(env: &Env, position_id: u64, take_profit: bool) {
-    require_initialized(env);
     let mut position = storage::get_position(env, position_id);
     position.owner.require_auth();
     if take_profit {
@@ -99,7 +96,6 @@ fn execute(
     position_id: u64,
     take_profit: bool,
 ) -> ActionOutcome {
-    require_initialized(env);
     keeper_address.require_auth();
 
     let position = storage::get_position(env, position_id);

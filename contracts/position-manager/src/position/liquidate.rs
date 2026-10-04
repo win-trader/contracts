@@ -1,13 +1,11 @@
 use soroban_sdk::{panic_with_error, Address, Env};
 
-use crate::auth::require_initialized;
 use crate::errors::PositionManagerError;
 use crate::events::CloseReason;
 use crate::settle::{self, ClosingFee};
 use crate::{borrow, funding, keeper, ledger, risk, snapshot, storage};
 
 pub fn liquidate_position(env: Env, keeper_address: Address, position_id: u64) {
-    require_initialized(&env);
     keeper_address.require_auth();
 
     let position = storage::get_position(&env, position_id);

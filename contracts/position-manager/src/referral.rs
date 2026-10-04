@@ -2,7 +2,6 @@ use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::BPS;
 
-use crate::auth::{require_auth, require_initialized};
 use crate::errors::PositionManagerError;
 use crate::ledger::{self, Bucket, Ledger};
 use crate::{borrow, events, math, storage};
@@ -44,8 +43,7 @@ fn validate_code(env: &Env, code: &Symbol) {
 }
 
 pub fn register_code(env: Env, owner: Address, code: Symbol) {
-    require_initialized(&env);
-    require_auth(&owner);
+    owner.require_auth();
     validate_code(&env, &code);
     if storage::try_get_referral_code_owner(&env, &code).is_some() {
         panic_with_error!(&env, PositionManagerError::ReferralCodeTaken);
@@ -55,8 +53,7 @@ pub fn register_code(env: Env, owner: Address, code: Symbol) {
 }
 
 pub fn set_referrer(env: Env, trader: Address, code: Symbol) {
-    require_initialized(&env);
-    require_auth(&trader);
+    trader.require_auth();
     let referrer = storage::try_get_referral_code_owner(&env, &code)
         .unwrap_or_else(|| panic_with_error!(&env, PositionManagerError::ReferralCodeNotFound));
     if referrer == trader {
@@ -67,8 +64,7 @@ pub fn set_referrer(env: Env, trader: Address, code: Symbol) {
 }
 
 pub fn claim(env: Env, referrer: Address) {
-    require_initialized(&env);
-    require_auth(&referrer);
+    referrer.require_auth();
     let mut ledger = storage::get_ledger(&env);
     borrow::accrue(&env, &mut ledger, Some(&referrer), env.ledger().timestamp());
     let amount = storage::get_referral_balance(&env, &referrer);

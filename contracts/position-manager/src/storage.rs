@@ -14,7 +14,6 @@ pub enum StorageKey {
     PriceFeed,
     Vault,
     GlobalConfig,
-    Initialized,
     Paused,
     NextPositionId,
     ActiveMarkets,
@@ -246,19 +245,6 @@ pub fn save_global_config(env: &Env, config: &GlobalConfig) {
         .set(&StorageKey::GlobalConfig, config);
 }
 
-pub fn get_initialized(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&StorageKey::Initialized)
-        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
-}
-
-pub fn save_initialized(env: &Env) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::Initialized, &true);
-}
-
 pub fn save_version(env: &Env, version: u32) {
     env.storage().instance().set(&StorageKey::Version, &version);
 }
@@ -280,7 +266,6 @@ pub fn update_position_id(env: &Env) {
     save_next_position_id(env, get_next_position_id(env) + 1);
 }
 
-#[allow(dead_code)]
 pub fn try_get_pending_action(env: &Env, id: u64) -> Option<PendingAction> {
     env.storage()
         .persistent()

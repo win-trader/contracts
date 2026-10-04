@@ -247,7 +247,7 @@ pub fn pending_fees(
         funding_paid_to_receivers: math::index_value_ceil(env, position.size, receiver_payer_delta),
         funding_paid_to_lps: math::index_value_ceil(env, position.size, lp_payer_delta),
         funding_received: math::index_value_floor(env, position.size, receiver_delta),
-        borrow: crate::borrow::calculate_pending(env, ledger, position).due,
+        borrow: crate::borrow::calculate_pending(env, ledger, position),
     }
 }
 

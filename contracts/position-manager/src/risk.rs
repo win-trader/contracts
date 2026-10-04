@@ -110,10 +110,9 @@ pub fn evaluate_side_risk_state(
         RiskState::HardCap
     } else if factor >= config.adl_pnl_factor_bps as i128 {
         RiskState::Adl
-    } else if factor >= config.warning_pnl_factor_bps as i128 {
-        RiskState::Warning
-    } else if side.risk_state != RiskState::Normal
-        && factor >= config.recovery_pnl_factor_bps as i128
+    } else if factor >= config.warning_pnl_factor_bps as i128
+        || (side.risk_state != RiskState::Normal
+            && factor >= config.recovery_pnl_factor_bps as i128)
     {
         RiskState::Warning
     } else {
@@ -315,12 +314,8 @@ pub fn effective_collateral(
 #[derive(Clone, Copy, Debug)]
 pub struct LiquidationAssessment {
     pub liquidatable: bool,
-    #[allow(dead_code)]
-    pub insolvent: bool,
     pub effective_collateral: i128,
     pub threshold: i128,
-    #[allow(dead_code)]
-    pub payable_pnl: i128,
 }
 
 pub fn evaluate_liquidation(
@@ -347,10 +342,8 @@ pub fn evaluate_liquidation(
     );
     LiquidationAssessment {
         liquidatable: effective <= threshold,
-        insolvent: effective < 0,
         effective_collateral: effective,
         threshold,
-        payable_pnl,
     }
 }
 

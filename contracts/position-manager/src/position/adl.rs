@@ -2,14 +2,12 @@ use soroban_sdk::{panic_with_error, Address, Env};
 
 use shared::{ActionOutcome, RiskState};
 
-use crate::auth::require_initialized;
 use crate::errors::PositionManagerError;
 use crate::events::CloseReason;
 use crate::settle::{self, ClosingFee};
 use crate::{action, borrow, funding, keeper, ledger, math, risk, snapshot, storage};
 
 pub fn execute_adl(env: Env, keeper_address: Address, position_id: u64) -> ActionOutcome {
-    require_initialized(&env);
     keeper_address.require_auth();
 
     let position = storage::get_position(&env, position_id);

@@ -317,7 +317,7 @@ impl<'a> Settlement<'a> {
             self.keeper_payment.paid(),
             &self.market.config,
         );
-        if fee.collectible <= 0 {
+        if fee <= 0 {
             return;
         }
         let is_long = self.position.is_long;
@@ -326,7 +326,7 @@ impl<'a> Settlement<'a> {
             self.ledger,
             &mut self.position,
             self.market.side_mut(is_long),
-            fee.collectible,
+            fee,
         );
         let owner = self.position.owner.clone();
         let (market_id, actor) = (self.position.market.clone(), self.keeper.recipient.clone());

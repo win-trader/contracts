@@ -6,7 +6,6 @@ use crate::errors::PositionManagerError;
 use crate::ledger::{self, Ledger};
 use crate::math;
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum RewardKind {
     MarketOpen,
@@ -19,7 +18,6 @@ pub enum RewardKind {
     Expiry,
     Liquidation,
     Adl,
-    LpResolve,
 }
 
 pub fn reward_for(config: &GlobalConfig, kind: RewardKind) -> i128 {
@@ -35,7 +33,6 @@ pub fn reward_for(config: &GlobalConfig, kind: RewardKind) -> i128 {
         RewardKind::Expiry => r.expiry,
         RewardKind::Liquidation => r.liquidation,
         RewardKind::Adl => r.adl,
-        RewardKind::LpResolve => r.lp_resolve,
     }
 }
 

@@ -269,10 +269,8 @@ mod tests {
     fn assessment(effective_collateral: i128, threshold: i128) -> LiquidationAssessment {
         LiquidationAssessment {
             liquidatable: effective_collateral <= threshold,
-            insolvent: effective_collateral < 0,
             effective_collateral,
             threshold,
-            payable_pnl: 0,
         }
     }
 

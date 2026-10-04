@@ -6,7 +6,6 @@ use shared::{
     GlobalConfig, IncreasePayload, Market, PendingAction, Position, StampedPrice,
 };
 
-use crate::auth::require_initialized;
 use crate::errors::PositionManagerError;
 use crate::events::{self, CloseReason, FeeSource};
 use crate::funding::PendingFees;
@@ -16,7 +15,6 @@ use crate::settle::{self, ClosingFee};
 use crate::{action, borrow, fees, funding, keeper, math, risk, snapshot, storage};
 
 pub fn add_collateral(env: Env, position_id: u64, amount: i128) {
-    require_initialized(&env);
     let mut position = storage::get_position(&env, position_id);
     position.owner.require_auth();
     if amount <= 0 {
@@ -93,7 +91,6 @@ fn commit(
 }
 
 fn claim_slot(env: &Env, position_id: u64) -> (Position, Market, StampedPrice) {
-    require_initialized(env);
     let position = storage::get_position(env, position_id);
     position.owner.require_auth();
     if position.pending_mutation_action_id.is_some() {
@@ -218,7 +215,6 @@ fn eligible(
     kind: ActionKind,
     removes_exposure: bool,
 ) -> Result<Eligible, ActionOutcome> {
-    require_initialized(env);
     keeper_address.require_auth();
 
     let action = action::load(env, action_id, kind);
@@ -720,7 +716,7 @@ fn decrease_preflight(
         reward,
         &e.market.config,
     );
-    let stored_final = math::sub(env, after_reward, closing.collectible);
+    let stored_final = math::sub(env, after_reward, closing);
 
     if stored_final < e.config.min_collateral {
         return Some(FailureReason::InsufficientCollateral);

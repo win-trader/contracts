@@ -85,17 +85,6 @@ pub fn calculate_opening_fee(env: &Env, added_size: i128, config: &MarketConfig)
     math::mul_div_ceil(env, added_size, config.open_fee_bps as i128, BPS)
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ClosingFee {
-    #[allow(dead_code)]
-    pub size_component: i128,
-    #[allow(dead_code)]
-    pub pnl_component: i128,
-    #[allow(dead_code)]
-    pub nominal: i128,
-    pub collectible: i128,
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn calculate_closing_fee(
     env: &Env,
@@ -105,9 +94,9 @@ pub fn calculate_closing_fee(
     borrow_due: i128,
     keeper_reward: i128,
     config: &MarketConfig,
-) -> ClosingFee {
+) -> i128 {
     if payable_pnl <= 0 {
-        return ClosingFee::default();
+        return 0;
     }
     let size_component = math::mul_div_ceil(env, size_removed, config.close_size_fee_bps as i128, BPS);
     let pnl_component = math::mul_div_ceil(env, payable_pnl, config.close_pnl_fee_bps as i128, BPS);
@@ -120,13 +109,7 @@ pub fn calculate_closing_fee(
     after_senior = math::sub(env, after_senior, pending.funding_paid_to_lps);
     after_senior = math::sub(env, after_senior, borrow_due);
     after_senior = math::sub(env, after_senior, keeper_reward);
-    let profit_after_senior_items = core::cmp::max(after_senior, 0);
-    ClosingFee {
-        size_component,
-        pnl_component,
-        nominal,
-        collectible: core::cmp::min(nominal, profit_after_senior_items),
-    }
+    core::cmp::min(nominal, core::cmp::max(after_senior, 0))
 }
 
 fn credit_received_funding(env: &Env, ledger: &mut Ledger, market: &mut Market, amount: i128) {

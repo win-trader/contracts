@@ -6,7 +6,7 @@ use shared::{
     PendingAction, Position, TriggerCondition,
 };
 
-use crate::auth::{require_initialized, require_market_active};
+use crate::auth::require_market_active;
 use crate::errors::PositionManagerError;
 use crate::events::{self, FeeSource};
 use crate::ledger::{self, Ledger};
@@ -58,7 +58,6 @@ fn create_entry(
     trigger_price: i128,
     entry: &EntryKind,
 ) -> u64 {
-    require_initialized(env);
     owner.require_auth();
     require_market_active(env, &market_symbol);
     if !storage::is_market_registered(env, &market_symbol) {
@@ -172,7 +171,6 @@ fn settle_entry(
     action_id: u64,
     entry: &EntryKind,
 ) -> ActionOutcome {
-    require_initialized(env);
     keeper_address.require_auth();
 
     let mut action = action::load(env, action_id, entry.kind);
@@ -501,7 +499,6 @@ fn execute(
 }
 
 pub fn cancel_limit_open(env: Env, action_id: u64) -> i128 {
-    require_initialized(&env);
     let mut action = action::load(&env, action_id, ActionKind::LimitOpen);
     action.owner.require_auth();
     let expires_at = action
@@ -531,7 +528,6 @@ pub fn cancel_limit_open(env: Env, action_id: u64) -> i128 {
 }
 
 pub fn clean_expired_entry(env: Env, keeper_address: Address, action_id: u64) {
-    require_initialized(&env);
     keeper_address.require_auth();
     let mut action = action::load_entry(&env, action_id);
     let expires_at = action.payload.open().unwrap().expires_at;

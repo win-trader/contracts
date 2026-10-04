@@ -30,8 +30,6 @@ impl RequestRouterContract {
         storage::set(&env, &storage::Key::Asset, &asset_address);
         storage::set(&env, &storage::Key::Vault, &vault_address);
         storage::set(&env, &storage::Key::ConfigManager, &config_manager_address);
-        storage::set(&env, &storage::Key::NextId, &1u64);
-        storage::set(&env, &storage::Key::NextToResolve, &1u64);
         shared::bump_instance_ttl(&env);
     }
 }

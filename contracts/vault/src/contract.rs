@@ -114,8 +114,7 @@ fn config_timelock_seconds(env: &Env) -> u64 {
         .config_timelock_seconds
 }
 
-fn failed(env: &Env) -> SettlementResult {
-    let _ = env;
+fn failed() -> SettlementResult {
     SettlementResult {
         status: SettlementStatus::Failed,
         amount: 0,
@@ -166,8 +165,6 @@ impl VaultContract {
         storage::set(&env, &storage::Key::ConfigManager, &config_manager);
         storage::set(&env, &storage::Key::PositionManager, &position_manager);
         storage::set(&env, &storage::Key::LpConfig, &lp_config);
-        storage::set(&env, &storage::Key::Paused, &false);
-        storage::set(&env, &storage::Key::Initialized, &true);
         shared::bump_instance_ttl(&env);
     }
 }
@@ -239,7 +236,7 @@ impl VaultInterface for VaultContract {
                 >= storage::lp_config(&env).min_deposit_nav_factor_bps as i128
         };
         if vault_is_short(&s) || !eligible {
-            return failed(&env);
+            return failed();
         }
 
         let shares = mul_div_floor(
@@ -249,7 +246,7 @@ impl VaultInterface for VaultContract {
             s.vault_nav + NAV_OFFSET,
         );
         if shares <= 0 {
-            return failed(&env);
+            return failed();
         }
         transfer_asset(&env, &caller, &env.current_contract_address(), assets);
         Base::mint(&env, &owner, shares);
@@ -319,7 +316,7 @@ impl VaultInterface for VaultContract {
             || post_util > config.max_withdraw_utilization_bps as i128
             || (empties_supply && !clean_terminal)
         {
-            return failed(&env);
+            return failed();
         }
 
         let reward = core::cmp::min(lp_resolve_reward(&env), assets);

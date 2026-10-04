@@ -53,23 +53,10 @@ pub fn rate_at(env: &Env, total_risk_units: i128, cash_lp_equity: i128) -> i128 
     )
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct PendingBorrow {
-    #[allow(dead_code)]
-    pub actual: i128,
-    #[allow(dead_code)]
-    pub minimum: i128,
-    pub due: i128,
-}
-
-pub fn calculate_pending(env: &Env, ledger: &Ledger, position: &Position) -> PendingBorrow {
+pub fn calculate_pending(env: &Env, ledger: &Ledger, position: &Position) -> i128 {
     let delta = crate::funding::index_delta(env, ledger.borrow_index, position.borrow_index_snapshot);
-    let raw_actual = math::mul_div_ceil(env, position.risk_units, delta, INDEX_PRECISION);
-    PendingBorrow {
-        actual: raw_actual,
-        minimum: position.stored_minimum_borrow_fee,
-        due: core::cmp::max(raw_actual, position.stored_minimum_borrow_fee),
-    }
+    let actual = math::mul_div_ceil(env, position.risk_units, delta, INDEX_PRECISION);
+    core::cmp::max(actual, position.stored_minimum_borrow_fee)
 }
 
 pub fn initialize_window(env: &Env, ledger: &Ledger, position: &mut Position) {

@@ -37,7 +37,6 @@ impl ConfigManagerContract {
         }
         .publish(&env);
         storage::save_upgrade_timelock(&env, shared::constants::DEFAULT_UPGRADE_TIMELOCK);
-        storage::set_initialized(&env);
         bump_instance_ttl(&env);
     }
 }
