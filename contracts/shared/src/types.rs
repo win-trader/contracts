@@ -293,7 +293,6 @@ pub struct GlobalConfig {
     pub max_variable_borrow_bps_day: i128,
     pub fee_lp_revenue_share_bps: u32,
     pub borrow_lp_revenue_share_bps: u32,
-    pub referral_fee_share_bps: u32,
     pub config_timelock_seconds: u64,
     pub max_active_markets: u32,
     pub global_hard_cap_limit_bps: u32,

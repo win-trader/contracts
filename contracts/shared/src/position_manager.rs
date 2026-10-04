@@ -103,26 +103,12 @@ pub trait PositionManager {
     /// A pending action. Panics `ActionNotFound` once consumed.
     fn get_pending_action(env: Env, action_id: u64) -> PendingAction;
 
-    /// Register a referral code. First come; the owner is immutable.
-    fn register_referral_code(env: Env, owner: Address, code: Symbol);
 
-    /// Attach a trader to the owner of `code`. Self-referral is rejected.
-    fn set_referrer(env: Env, trader: Address, code: Symbol);
 
-    /// Withdraw accrued referral rewards. Blocked during a cash shortfall.
-    fn claim_referral(env: Env, referrer: Address);
 
-    /// The trader's referrer, if any.
-    fn get_referrer(env: Env, trader: Address) -> Option<Address>;
 
-    /// The owner of a referral code, if registered.
-    fn referral_code_owner(env: Env, code: Symbol) -> Option<Address>;
 
-    /// A referrer's unclaimed rewards.
-    fn referral_balance(env: Env, referrer: Address) -> i128;
 
-    /// All unclaimed referral rewards.
-    fn referral_claimable_total(env: Env) -> i128;
 
     /// Checkpoint the borrow index and one market's funding to now. Permissionless.
     fn update_indices(env: Env, caller: Address, market: Symbol);

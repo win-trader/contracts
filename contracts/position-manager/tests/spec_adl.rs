@@ -18,7 +18,7 @@ use spec_harness::*;
 
 use shared::constants::{INDEX_PRECISION, PRICE_PRECISION};
 use shared::{defaults, ActionOutcome, RiskState};
-use soroban_sdk::{testutils::Address as _, Address, Symbol};
+use soroban_sdk::{testutils::Address as _, Address};
 
 /// Two `$100,000` longs are 4 BTC of base against `$200,000` of size. Marked
 /// at `$63,750` that is `$55,000` of side profit on `$1,000,000` of LP
@@ -192,30 +192,4 @@ fn adl_supersedes_a_pending_mutation_and_refunds_its_escrow() {
         "§9.14 — only the forced action's reward, not the increase reward too"
     );
     p.assert_conserved("after ADL superseded the increase");
-}
-
-/// §3.6 — "borrow, funding, keeper rewards, liquidation, and ADL do not
-/// generate referral revenue."
-#[test]
-fn adl_generates_no_referral_revenue() {
-    let p = Protocol::new();
-    let c = p.pm();
-    let (target, _, owner, _) = restricted_side(&p);
-
-    let referrer = Address::generate(&p.env);
-    let code = Symbol::new(&p.env, "ADLCODE");
-    c.register_referral_code(&referrer, &code);
-    c.set_referrer(&owner, &code);
-    assert_eq!(c.get_referrer(&owner), Some(referrer.clone()));
-
-    p.observe(1, ADL_MARK);
-    assert_eq!(c.execute_adl(&p.keeper, &target), ActionOutcome::Executed);
-
-    assert_eq!(
-        c.referral_balance(&referrer),
-        0,
-        "§3.6 — a forced deleverage pays the referrer nothing"
-    );
-    assert_eq!(c.referral_claimable_total(), 0);
-    p.assert_conserved("after an ADL on a referred trader");
 }

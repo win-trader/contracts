@@ -28,7 +28,7 @@ fn two_sided(p: &Protocol) -> (u64, u64, Address) {
 }
 
 /// §9.3 — "funding is a risk-balancing transfer, not protocol revenue. It
-/// never invokes opening-fee, closing-fee, borrow-fee, referral, or keeper
+/// never invokes opening-fee, closing-fee, borrow-fee, or keeper
 /// distribution."
 #[test]
 fn funding_moves_from_the_payer_side_to_the_receiver_side_and_nowhere_else() {
@@ -63,7 +63,6 @@ fn funding_moves_from_the_payer_side_to_the_receiver_side_and_nowhere_else() {
         0,
         "§9.3 — accrued funding is not revenue"
     );
-    assert_eq!(c.referral_claimable_total(), 0, "§9.3 — and carries no referral share");
     p.assert_conserved("with funding accrued both ways");
 }
 

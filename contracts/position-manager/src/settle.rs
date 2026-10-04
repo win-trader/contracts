@@ -328,7 +328,6 @@ impl<'a> Settlement<'a> {
             self.market.side_mut(is_long),
             fee,
         );
-        let owner = self.position.owner.clone();
         let (market_id, actor) = (self.position.market.clone(), self.keeper.recipient.clone());
         fees::distribute_open_close_revenue(
             self.env,
@@ -336,7 +335,6 @@ impl<'a> Settlement<'a> {
             &market_id,
             &actor,
             self.closing_fee,
-            &owner,
             FeeSource::Closing,
             self.position.id,
         );

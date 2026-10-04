@@ -249,7 +249,7 @@ fn a_pseudo_random_sequence_of_operations_conserves_cash() {
             "§9.4 — at step {step}"
         );
         assert!(
-            c.referral_claimable_total() == 0 && c.protocol_claimable_total() >= 0,
+            c.protocol_claimable_total() >= 0,
             "§9.2 — at step {step}"
         );
     }

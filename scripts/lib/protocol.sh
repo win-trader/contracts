@@ -54,7 +54,6 @@ GLOBAL_CONFIG=$(jq -nc \
   --arg max_variable_borrow_bps_day "${MAX_VARIABLE_BORROW_BPS_DAY:-250}" \
   --argjson fee_lp_revenue_share_bps "${FEE_LP_REVENUE_SHARE_BPS:-9000}" \
   --argjson borrow_lp_revenue_share_bps "${BORROW_LP_REVENUE_SHARE_BPS:-9000}" \
-  --argjson referral_fee_share_bps "${REFERRAL_FEE_SHARE_BPS:-250}" \
   --argjson config_timelock_seconds "${CONFIG_TIMELOCK_SECONDS:-172800}" \
   --argjson max_active_markets "${MAX_ACTIVE_MARKETS:-8}" \
   --argjson global_hard_cap_limit_bps "${GLOBAL_HARD_CAP_LIMIT_BPS:-10000}" \

@@ -7,7 +7,6 @@ use crate::errors::PositionManagerError;
 use crate::events::{self, FeeSource};
 use crate::funding;
 use crate::ledger::{self, Ledger};
-use crate::referral;
 use crate::{math, storage};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -27,7 +26,6 @@ pub fn distribute_open_close_revenue(
     market: &Symbol,
     actor: &Address,
     collected: i128,
-    owner: &Address,
     source: FeeSource,
     position_id: u64,
 ) -> i128 {
@@ -36,11 +34,10 @@ pub fn distribute_open_close_revenue(
     }
     let config = storage::get_global_config(env);
     let lp = math::mul_div_floor(env, collected, config.fee_lp_revenue_share_bps as i128, BPS);
-    let referral = referral::accrue(env, ledger, owner, collected, position_id);
-    let protocol = math::sub(env, math::sub(env, collected, lp), referral);
+    let protocol = math::sub(env, collected, lp);
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
     events::emit_revenue_split(
-        env, market, actor, position_id, source, collected, lp, protocol, referral,
+        env, market, actor, position_id, source, collected, lp, protocol,
     );
     protocol
 }
@@ -74,7 +71,6 @@ pub fn distribute_borrow_revenue(
         collected,
         lp,
         protocol,
-        0,
     );
 }
 

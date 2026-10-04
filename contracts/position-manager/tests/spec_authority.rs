@@ -37,7 +37,7 @@ fn the_authority_gates_refuse_an_outsider_and_the_open_ones_do_not() {
     let p = Protocol::new();
     let c = p.pm();
     let outsider = Address::generate(&p.env);
-    let id = p.open_position();
+    p.open_position();
 
     assert!(c.try_pause(&outsider).is_err(), "§12.3 — pause_authority");
     assert!(c.try_unpause(&outsider).is_err(), "§12.3 — unpause_authority");

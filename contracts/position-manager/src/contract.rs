@@ -3,7 +3,7 @@ use crate::errors::PositionManagerError;
 use crate::events;
 use crate::ledger::{self, Ledger};
 use crate::{
-    borrow, funding, governance, math, position, referral, risk, snapshot, storage, validation,
+    borrow, funding, governance, math, position, risk, snapshot, storage, validation,
 };
 use position::{adl, entry, liquidate, mutation, trigger};
 use shared::constants::{
@@ -277,34 +277,6 @@ impl PositionManager for PositionManagerContract {
 
     fn get_pending_action(env: Env, action_id: u64) -> PendingAction {
         storage::get_pending_action(&env, action_id)
-    }
-
-    fn register_referral_code(env: Env, owner: Address, code: Symbol) {
-        referral::register_code(env, owner, code)
-    }
-
-    fn set_referrer(env: Env, trader: Address, code: Symbol) {
-        referral::set_referrer(env, trader, code)
-    }
-
-    fn claim_referral(env: Env, referrer: Address) {
-        referral::claim(env, referrer)
-    }
-
-    fn get_referrer(env: Env, trader: Address) -> Option<Address> {
-        storage::get_referrer(&env, &trader)
-    }
-
-    fn referral_code_owner(env: Env, code: Symbol) -> Option<Address> {
-        storage::try_get_referral_code_owner(&env, &code)
-    }
-
-    fn referral_balance(env: Env, referrer: Address) -> i128 {
-        storage::get_referral_balance(&env, &referrer)
-    }
-
-    fn referral_claimable_total(env: Env) -> i128 {
-        storage::get_ledger(&env).referral_claimable_total
     }
 
     fn update_indices(env: Env, caller: Address, market_symbol: Symbol) {

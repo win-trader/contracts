@@ -5,7 +5,7 @@ use shared::{MarketSide, Position, VaultClient};
 use crate::errors::PositionManagerError;
 use crate::{math, storage};
 
-pub const STATE_VERSION: u32 = 3;
+pub const STATE_VERSION: u32 = 4;
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -14,7 +14,6 @@ pub struct Ledger {
     pub pending_receiver_funding_total: i128,
     pub action_escrow_total: i128,
     pub protocol_claimable_total: i128,
-    pub referral_claimable_total: i128,
     pub unclaimed_payout_total: i128,
     pub total_risk_units: i128,
     pub open_position_count: u64,
@@ -33,7 +32,6 @@ impl Ledger {
             pending_receiver_funding_total: 0,
             action_escrow_total: 0,
             protocol_claimable_total: 0,
-            referral_claimable_total: 0,
             unclaimed_payout_total: 0,
             total_risk_units: 0,
             open_position_count: 0,
@@ -51,7 +49,6 @@ impl Ledger {
         total = math::add(env, total, self.pending_receiver_funding_total);
         total = math::add(env, total, self.action_escrow_total);
         total = math::add(env, total, self.protocol_claimable_total);
-        total = math::add(env, total, self.referral_claimable_total);
         math::add(env, total, self.unclaimed_payout_total)
     }
 
@@ -77,7 +74,6 @@ pub enum Bucket {
     ReceiverFunding,
     ActionEscrow,
     ProtocolClaimable,
-    Referral,
     UnclaimedPayout,
 }
 
@@ -87,7 +83,6 @@ impl Ledger {
             Bucket::ReceiverFunding => &mut self.pending_receiver_funding_total,
             Bucket::ActionEscrow => &mut self.action_escrow_total,
             Bucket::ProtocolClaimable => &mut self.protocol_claimable_total,
-            Bucket::Referral => &mut self.referral_claimable_total,
             Bucket::UnclaimedPayout => &mut self.unclaimed_payout_total,
         }
     }

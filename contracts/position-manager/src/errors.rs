@@ -10,7 +10,6 @@ pub enum PositionManagerError {
     PositionNotFound = 10,
     MarketNotConfigured = 11,
     ActionNotFound = 12,
-    ReferralCodeNotFound = 13,
     TriggerNotAttached = 14,
     NoPendingConfig = 15,
     UpgradeNoPending = 16,
@@ -34,9 +33,6 @@ pub enum PositionManagerError {
     InvalidAmount = 40,
     InvalidConfig = 41,
     InvalidOrder = 42,
-    ReferralCodeTaken = 43,
-    ReferralCodeInvalid = 44,
-    SelfReferral = 45,
     WrongActionKind = 46,
     UpgradeHashMismatch = 47,
 

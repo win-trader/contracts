@@ -12,7 +12,6 @@ pub const BASE_BORROW_RATE_BPS_DAY: i128 = 25;
 pub const MAX_VARIABLE_BORROW_BPS_DAY: i128 = 250;
 pub const FEE_LP_REVENUE_SHARE_BPS: u32 = 9_000;
 pub const BORROW_LP_REVENUE_SHARE_BPS: u32 = 9_000;
-pub const REFERRAL_FEE_SHARE_BPS: u32 = 250;
 pub const CONFIG_TIMELOCK_SECONDS: u64 = 172_800;
 pub const MAX_ACTIVE_MARKETS: u32 = 8;
 pub const GLOBAL_HARD_CAP_FACTOR_LIMIT_BPS: u32 = 10_000;
@@ -74,7 +73,6 @@ pub fn global_config() -> GlobalConfig {
         max_variable_borrow_bps_day: MAX_VARIABLE_BORROW_BPS_DAY,
         fee_lp_revenue_share_bps: FEE_LP_REVENUE_SHARE_BPS,
         borrow_lp_revenue_share_bps: BORROW_LP_REVENUE_SHARE_BPS,
-        referral_fee_share_bps: REFERRAL_FEE_SHARE_BPS,
         config_timelock_seconds: CONFIG_TIMELOCK_SECONDS,
         max_active_markets: MAX_ACTIVE_MARKETS,
         global_hard_cap_limit_bps: GLOBAL_HARD_CAP_FACTOR_LIMIT_BPS,

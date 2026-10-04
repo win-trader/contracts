@@ -407,7 +407,6 @@ fn execute(
             &action.market_id,
             keeper_address,
             opening_fee,
-            &action.owner,
             FeeSource::Opening,
             position_id,
         );

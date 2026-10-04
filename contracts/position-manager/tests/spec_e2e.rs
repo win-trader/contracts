@@ -77,9 +77,8 @@ fn the_worked_market_open_of_11_1_produces_the_documents_numbers() {
         c.try_get_pending_action(&action).is_err(),
         "§5.6 — a terminal outcome removes the record"
     );
-    // "LP, protocol, and referral opening-fee revenue are all zero"
+    // "LP and protocol opening-fee revenue are both zero"
     assert_eq!(c.protocol_claimable_total(), 0, "§11.1 — open_fee_bps is 0");
-    assert_eq!(c.referral_claimable_total(), 0);
 
     p.assert_conserved("after the §11.1 open");
 }
@@ -236,7 +235,7 @@ fn non_lp_claims_equals_the_sum_of_its_five_labels() {
     assert_eq!(
         c.non_lp_claims(),
         p.claims_from_parts(&[id], &[pending]),
-        "§9.1 — position collateral + escrow + receiver funding + protocol + referral"
+        "§9.1 — position collateral + escrow + receiver funding + protocol"
     );
     assert_eq!(
         c.non_lp_claims(),

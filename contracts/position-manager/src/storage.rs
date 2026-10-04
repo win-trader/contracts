@@ -26,9 +26,6 @@ pub enum StorageKey {
     NextActionId,
     PendingGlobalConfig,
     PendingMarketConfig(Symbol),
-    ReferralCode(Symbol),
-    Referrer(Address),
-    ReferralBalance(Address),
     UnclaimedPayout(Address),
     PendingPriceFeed,
 }
@@ -61,49 +58,6 @@ pub fn save_position(env: &Env, position: &Position) {
 
 pub fn remove_position(env: &Env, id: u64) {
     env.storage().persistent().remove(&StorageKey::Position(id));
-}
-
-pub fn try_get_referral_code_owner(env: &Env, code: &Symbol) -> Option<Address> {
-    env.storage()
-        .persistent()
-        .get(&StorageKey::ReferralCode(code.clone()))
-}
-
-pub fn save_referral_code_owner(env: &Env, code: &Symbol, owner: &Address) {
-    let key = StorageKey::ReferralCode(code.clone());
-    env.storage().persistent().set(&key, owner);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
-}
-
-pub fn get_referrer(env: &Env, trader: &Address) -> Option<Address> {
-    env.storage()
-        .persistent()
-        .get(&StorageKey::Referrer(trader.clone()))
-}
-
-pub fn save_referrer(env: &Env, trader: &Address, referrer: &Address) {
-    let key = StorageKey::Referrer(trader.clone());
-    env.storage().persistent().set(&key, referrer);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
-}
-
-pub fn get_referral_balance(env: &Env, referrer: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&StorageKey::ReferralBalance(referrer.clone()))
-        .unwrap_or(0)
-}
-
-pub fn save_referral_balance(env: &Env, referrer: &Address, amount: i128) {
-    let key = StorageKey::ReferralBalance(referrer.clone());
-    env.storage().persistent().set(&key, &amount);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
 }
 
 pub fn get_unclaimed_payout(env: &Env, owner: &Address) -> i128 {

@@ -494,14 +494,12 @@ fn execute_increase(
         if charged < opening_fee {
             panic_with_error!(env, PositionManagerError::InsufficientCollateral);
         }
-        let owner = e.position.owner.clone();
         fees::distribute_open_close_revenue(
             env,
             &mut e.ledger,
             &e.action.market_id,
             keeper_address,
             charged,
-            &owner,
             FeeSource::Opening,
             e.position.id,
         );

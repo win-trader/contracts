@@ -40,7 +40,6 @@ fn reward_bounds(r: &KeeperRewards) -> (i128, i128) {
 
 pub fn validate_global(env: &Env, c: &GlobalConfig) {
     let (lowest_reward, highest_reward) = reward_bounds(&c.keeper_rewards);
-    let fee_split = c.fee_lp_revenue_share_bps as u64 + c.referral_fee_share_bps as u64;
     if c.min_collateral <= 0
         || lowest_reward < 0
         || highest_reward > c.min_collateral
@@ -62,7 +61,7 @@ pub fn validate_global(env: &Env, c: &GlobalConfig) {
         || c.base_borrow_rate_bps_day > BPS
         || c.max_variable_borrow_bps_day < 0
         || c.max_variable_borrow_bps_day > BPS
-        || fee_split > BPS as u64
+        || c.fee_lp_revenue_share_bps > BPS as u32
         || c.borrow_lp_revenue_share_bps > BPS as u32
         || c.max_active_markets == 0
         || c.global_hard_cap_limit_bps == 0

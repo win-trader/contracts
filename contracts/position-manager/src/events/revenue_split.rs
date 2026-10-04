@@ -10,7 +10,6 @@ pub struct RevenueSplit {
     pub collected: i128,
     pub lp_share: i128,
     pub protocol_share: i128,
-    pub referral_share: i128,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -23,7 +22,6 @@ pub fn emit_revenue_split(
     collected: i128,
     lp_share: i128,
     protocol_share: i128,
-    referral_share: i128,
 ) {
     RevenueSplit {
         header: super::header(env, market, actor),
@@ -32,7 +30,6 @@ pub fn emit_revenue_split(
         collected,
         lp_share,
         protocol_share,
-        referral_share,
     }
     .publish(env);
 }

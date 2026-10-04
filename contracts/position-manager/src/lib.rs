@@ -13,7 +13,6 @@ mod keeper;
 mod ledger;
 mod math;
 mod position;
-mod referral;
 mod risk;
 mod settle;
 mod snapshot;

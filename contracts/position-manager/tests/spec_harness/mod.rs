@@ -338,7 +338,6 @@ impl Protocol {
         let c = self.pm();
         let mut total = c.pending_receiver_funding_total()
             + c.protocol_claimable_total()
-            + c.referral_claimable_total()
             + c.unclaimed_payout_total();
         for id in positions {
             total += c.get_position(id).stored_collateral;
