@@ -25,7 +25,7 @@ build:
 WASM_OPT_VERSION = 133
 
 optimize: build
-	@wasm-opt --version | grep -q "version $(WASM_OPT_VERSION)$$" || \
+	@wasm-opt --version | grep -qE "version $(WASM_OPT_VERSION)( |$$)" || \
 		{ echo "wasm-opt (binaryen) $(WASM_OPT_VERSION) is required: brew install binaryen"; exit 1; }
 	@for contract in $(CONTRACTS); do \
 		wasm="$(WASM_DIR)/$$(echo $$contract | tr '-' '_').wasm"; \
