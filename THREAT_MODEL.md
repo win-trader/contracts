@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Scope** | `contracts/{config-manager,position-manager,vault,request-router,shared}` (~10.6k LOC Soroban/Rust, `soroban-sdk 23.5.2`) plus the deploy/upgrade scripts in `scripts/` |
-| **Commit** | Modelled at `48c846e`; findings re-checked at `b6ffbe8` (branch `fix/review-findings`) — see §9 |
+| **Commit** | Modelled at `48c846e`; findings re-checked at `af8fe56` after the governor split (branch `fix/review-findings`) — see §9 |
 | **Line references** | Point at `48c846e` unless a row says otherwise |
 | **Date** | 2026-10-04 |
 | **Purpose** | Pre-audit threat model: give auditors the system's trust boundaries, privileged surfaces, and the highest-risk areas to focus on, and list what to fix before handing over the code |
@@ -20,7 +20,8 @@ WinTrader is a perpetual-futures DEX. Liquidity providers deposit a single colla
 | Contract | Role | Holds funds? |
 |---|---|---|
 | **ConfigManager** | Root of trust: role registry (ADMIN, UPGRADER, PAUSER, UNPAUSER, ORACLE, PROTOCOL), two-step admin transfer, global upgrade timelock | No |
-| **PositionManager (PM)** | Accounting ledger: markets, positions, pending actions, fee and funding indices, risk states, referral, and the non-LP claim buckets. Directs every cash movement. | No (directs the vault) |
+| **MarketGovernor** | Owns configuration *changes*: proposals, timelocks, the conservative fast path, pending proposals. Installs into the PM, which is the only contract that accepts it. Added in `10c845d`. | No |
+| **PositionManager (PM)** | Accounting ledger: markets, positions, pending actions, fee and funding indices, risk states, the live configuration, and the non-LP claim buckets. Directs every cash movement. Since `10c845d` it accepts configuration only from the MarketGovernor and re-validates it. | No (directs the vault) |
 | **Vault** | Holds all collateral cash and issues the LP share token (`sLP`, SEP-41). Moves cash only on PM or router instruction. Prices LP shares from the PM snapshot. | **Yes — all protocol cash** |
 | **RequestRouter** | FIFO queue for delayed LP deposits and withdrawals. Escrows assets and shares while requests are pending, and holds LP payouts that could not be delivered. | Yes (in-flight LP escrow) |
 | **Price feed** (external, `oracles` repo) | SEP-40 `lastprice(symbol)` and `decimals()`. Called "oracle-router" in deployments. | No |
@@ -47,6 +48,7 @@ flowchart LR
 
   subgraph CHAIN["On-chain protocol (TB-3: contract ↔ contract)"]
     CM[(ConfigManager)]
+    GOV[(MarketGovernor)]
     PM[(PositionManager)]
     V[(Vault — holds cash + sLP)]
     RR[(RequestRouter)]
@@ -58,6 +60,8 @@ flowchart LR
     TOK[[USDC SAC + issuer]]
   end
 
+  GOV -- install_* (governor only) --> PM
+  GOV -- has_role --> CM
   T -- commit/cancel/TP-SL/add collateral --> PM
   K -- settle/liquidate/ADL/expire --> PM
   K -- resolve_next --> RR
@@ -110,11 +114,12 @@ flowchart LR
 | Trader | Untrusted | Commit and settle-own orders, cancel limit orders, TP/SL, add collateral, claim deferred payouts | — |
 | LP | Untrusted | Queue deposits and withdrawals, transfer `sLP`, claim deferred LP payouts | Delay `lp_request_delay_seconds` (default 24h) |
 | Keeper | Untrusted, economically motivated | All settlements, liquidation, ADL, expiry cleanup, LP resolution, index checkpoints, applying due proposals | — |
-| **ADMIN** (CM) | Highly trusted | Grant or revoke every role except ADMIN; propose admin; set upgrade timelock; PM global and market config; deregister market; `set_vault` / `set_request_router` (once); **vault `set_lp_config`** | Role grants: **no**. Upgrade-timelock change: **no**. PM config: yes, except "conservative" changes and new or re-registered markets. LP config: **no** |
+| **ADMIN** (CM) | Highly trusted | Grant or revoke every role except ADMIN; propose admin; set upgrade timelock; global and market config and market deregistration (through the MarketGovernor); `set_vault` / `set_request_router` (once); **vault `set_lp_config`** | Role grants: **no**. Upgrade-timelock change: **no**. Config: yes, except "conservative" changes and brand-new markets (re-registration is timelocked since `10c845d`). LP config: **no** |
 | **UPGRADER** | Highly trusted | Propose **and** execute WASM upgrades; `migrate` | Yes (CM: ≥1 day; others: `max(CM timelock, config_timelock)`, default 2 days) |
 | PAUSER | Trusted | Pause PM and vault, disable markets, **cancel upgrades** | No (by design) |
 | UNPAUSER | Trusted | Unpause, enable markets | No |
-| ORACLE | Trusted | Propose and cancel price-feed replacement | Yes (`config_timelock_seconds`) |
+| ORACLE | Trusted | Propose and cancel price-feed replacement (through the MarketGovernor; ADMIN can also cancel) | Yes (`config_timelock_seconds`) |
+| **MarketGovernor** (contract) | Trusted by the PM | Install global/market config and price feed into the PM; deregister markets | Its own proposals are timelocked; its upgrade delay is `max(CM timelock, config_timelock)` |
 | PROTOCOL | Trusted | `claim_protocol` to any recipient, up to `protocol_claimable_total` | No |
 | Price publishers | **Fully trusted, implicitly** | Set every price the protocol uses | No |
 | USDC issuer | External, trusted | Freeze or deauthorize the vault's balance | — |
@@ -144,7 +149,7 @@ Severity reflects likelihood × impact for a mainnet deployment holding meaningf
 | S-3 | Impersonating the vault to call `prepare_lp_snapshot` / `refresh_borrow_rate` with a forged `physical_cash` | `require_vault` (`position-manager/src/auth.rs:23`) | None | Low |
 | S-4 | Redirecting a keeper reward to an address that did not do the work | `keeper.require_auth()` on every settlement, so the reward goes to the signer | None | Info |
 | S-5 | **Spoofed or manipulated price data** | Price must be `> 0`, `timestamp ≤ now`, and `now − timestamp ≤ max_price_age_seconds` (`snapshot.rs:11-29`); feed decimals checked on propose and apply | **No deviation bound, confidence check, TWAP, or second source inside the protocol.** The publisher sets `timestamp`, so freshness is self-attested. A compromised publisher key or oracle-router can mint arbitrary PnL, liquidate any position, or drain the vault through a winning position. **→ T-01** | **Critical** |
-| S-6 | Referral self-referral through a sybil address | `referrer != trader` check (`referral.rs:62`) | Sybils get up to `referral_fee_share_bps` (2.5%) of their own fees back. Accepted by design. | Info |
+| ~~S-6~~ | *Retired: the referral program was removed in `5fad1d6`.* Referral self-referral through a sybil address | `referrer != trader` check (`referral.rs:62`) | Sybils get up to `referral_fee_share_bps` (2.5%) of their own fees back. Accepted by design. | Info |
 
 ### 5.2 Tampering
 
@@ -210,14 +215,14 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 
 | ID | Title | Sev. | Status | Recommendation |
 |---|---|---|---|---|
-| **T-00** | **PositionManager WASM exceeds the network contract-size limit — undeployable on testnet and mainnet** | **Critical** | **Confirmed, open** | Optimized `position_manager.wasm` is 148,136 bytes (148,247 at `48c846e`). `contract_max_size_bytes` is 131,072 on testnet and mainnet. A deploy to a local quickstart network with those limits fails with `HostError: Error(Budget, ExceededLimit)`. Breakdown: code 108 KB, contract spec 26 KB, data 11 KB. Dead-code removal (`b6ffbe8`) recovered 405 bytes. Closing the 17 KB gap needs a structural change: split the PM (for example move governance and referral into a separate contract), shrink the spec (interface doc strings, event types), or cut features. Add a CI check that fails when any contract's optimized WASM exceeds 128 KiB. |
+| **T-00** | PositionManager WASM exceeded the network contract-size limit | Critical | **Fixed** (`03dee9b`…`d60cae9`) | Was 148,136 bytes against the 131,072-byte cap. Fixed by removing the `bump_*` entry points, the referral program and position increase; splitting configuration changes into the MarketGovernor; making four preview/total views test-only; and optimizing with pinned binaryen 133. Now **120,727 bytes (10,345 headroom)**; the governor is 38,543. `make optimize` and CI fail above the cap and warn below 10 KB of headroom. Verified end to end on a local quickstart network (§9.1). Upload costs 102.6M instructions against the real 400M per-transaction budget. |
 | **T-01** | Single oracle is fully trusted; no in-protocol sanity bounds | Critical | Design/Residual | Document the oracle-router's security model (quorum, publisher key custody, deviation logic) and include it in audit scope, or name it explicitly as out of scope. Consider per-market max-deviation-per-update or circuit breakers in PM, and monitoring that pauses on outliers. |
 | **T-14** | Deploy and upgrade tooling is out of sync with the contracts and deploys mocks unconditionally | High | **Fixed in `eba596b`** | `deploy.sh:80-82` builds `GlobalConfig`, `LpConfig` and `MarketConfig` JSON with **fields that no longer exist** (`borrow_exponent_bps`, `lp_request_delay`, `close_fee_low_bps`, …). Lines 234-245 deploy **mock oracles published by the admin key, and a mock token**, regardless of network. Lines 330/336 grant a `KEEPER` role the contracts no longer use. `upgrade.sh:146` calls `upgrade` with no `propose_upgrade` first. **Done:** `deploy.sh` was rebuilt on a shared `scripts/lib/protocol.sh` that mirrors `shared::types`. It needs `PRICE_FEED_ADDR` off local and `ASSET_ADDR` on mainnet. Mocks never reach mainnet, and the mock oracle (unauthenticated) is local-only. Every mainnet role needs a separate non-admin holder, with UPGRADER ≠ PAUSER. After deploying, the script verifies wiring, roles and per-market prices. The WASM hash check now fails closed; it previously called a removed CLI command and always passed. `upgrade.sh` is now two-phase (propose, then execute). The dead `grant-keepers.sh` and `deploy-cex-oracles.sh` were removed. Verified end to end on a local quickstart network. **Remaining:** the multisig custody runbook, and see T-23. |
 | **T-02** | LP queue halts if any market's price is unavailable | High | Confirmed | Allow an LP snapshot to skip or haircut markets that are both disabled and empty. Add a guarded `skip_head` (PAUSER) that refunds the head request. Alert when the head is stuck. |
 | **T-03** | Upgrade authority is the dominant risk; CM has the weakest timelock | High | Design/Residual | Hold UPGRADER and ADMIN in Stellar native multisig accounts. Split proposer and executor. Give CM `max(own, config_timelock)` or a longer floor. Publish reproducible builds and verify `wasm_hash`. Run 24/7 monitoring on `upgprp` events. |
 | **I-2** | Hot keys for admin and oracle publishers in plaintext CLI store and `.env` files | High | Operational | Move ADMIN, UPGRADER and ORACLE to hardware or multisig. Keep publisher keys in a KMS or HSM. Keep `.env.*` out of shared hosts. |
 | **D-2** | Oracle outage stops liquidations | High | Design/Residual | Runbook, staleness alerting, and a documented `max_price_age_seconds` policy |
-| **T-04** | Instant privileged changes: role grants, `set_lp_config`, new or re-registered market config, `set_upgrade_timelock` | Medium | Confirmed | Timelock `set_lp_config` changes that worsen LP exit terms and re-registration of previously deregistered symbols (or reject re-registration while pending actions reference the symbol). Document which paths are instant. |
+| **T-04** | Instant privileged changes: role grants, `set_lp_config`, new or re-registered market config, `set_upgrade_timelock` | Medium | Partly fixed (`10c845d`) | Re-registering a deregistered market now waits out the timelock (`10c845d`). **Remaining:** timelock `set_lp_config` changes that worsen LP exit terms; document which paths are instant. |
 | **T-05** | No floor on `config_timelock_seconds` | Medium | **Fixed in `e077d2d`** | `validate_global` rejects values below 86,400s. Regression test: `tests/threat_model.rs`. |
 | **T-06** | PAUSER can bloat PM instance storage through arbitrary-symbol `disable_market` | Medium | **Fixed in `e077d2d`** | `disable_market` requires a configured market (`MarketNotConfigured` otherwise), and enabling removes the entry. Regression test: `tests/threat_model.rs`. |
 | **T-08** | Events emitted for state that is not persisted on `RequiresLiquidation` returns | Medium | **Fixed in `e077d2d`** | All three returns (TP/SL, ADL, mutation settle) now persist the market and ledger, with a refreshed borrow rate, before returning. Regression test: `tests/threat_model.rs`. |
@@ -225,12 +230,14 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 | **T-10** | Mutation slot can lock permanently if settle reverts unexpectedly | Medium | Design/Residual | Differential-fuzz preflight against settle. Consider an owner cancel after N seconds without settlement. |
 | **T-12** | Asymmetric NAV favours depositors when traders are net losing | Medium | Design/Residual | Have auditors quantify the value transfer. Consider including net-negative side PnL (haircut) and accrued receivables in NAV for deposits only. |
 | T-f | Funding manipulation through the instant-weight term | Medium | Design/Residual | Economic review; consider a lower `instant_weight_bps` cap in `validate_market`. |
-| **T-07** | Pending price-feed proposal survives ORACLE revocation | Low–Med | Confirmed | Let ADMIN or PAUSER cancel price-feed proposals, or clear pending proposals on role revocation. Add to the runbook. |
-| **T-13** | Unbounded `max_active_markets` versus Soroban resource limits | Low–Med | Confirmed | Benchmark the worst case `resolve_next` → `prepare_lp_snapshot` and enforce a hard ceiling in `validate_global`. |
+| **T-07** | Pending price-feed proposal survives ORACLE revocation | Low–Med | **Fixed in `10c845d`** | ADMIN can cancel a price-feed proposal on the MarketGovernor, so revoking the ORACLE key and cancelling is enough. |
+| **T-13** | Unbounded `max_active_markets` versus Soroban resource limits | Low–Med | Confirmed (bound kept in the PM) | Benchmark the worst case `resolve_next` → `prepare_lp_snapshot` and enforce a hard ceiling in `validate_global`. |
+| **T-24** | MarketGovernor compromise equals config compromise | Medium | Design/Residual | A compromised governor can install any config that passes the PM's own checks: fees, margins and caps anywhere within their validated bounds, at once. Bounds: the PM re-validates every install (per-config validity, market count, hard-cap sum), the governor's address is fixed in the PM constructor, and the governor's upgrade delay is never shorter than the config timelock. Hold UPGRADER for the governor as tightly as for the PM, and monitor `upgprp` on it too. |
+| T-25 | Governor and PM must be wired to each other | Low | Mitigated | No setter on either side. `deploy.sh` derives the governor's address from a salt, deploys the PM pinned to it, deploys the governor at that salt, and fails unless `PM.governor()` and `governor.position_manager()` match. |
 | T-15 | `set_vault` and `set_request_router` are one-shot with no back-reference check | Low | Mitigated off-chain | `deploy.sh` now checks the wiring after deploy: the feed and asset addresses, and a simulated `update_indices` that only succeeds through PM's stored vault. The contracts still expose no vault or router getters and do no on-chain back-reference check. |
 | T-16 | Collateral token is only checked by decimals | Low | Design | Pin the expected SAC address in the deploy runbook; document the issuer-freeze risk. |
 | T-22 | LP resolve reward is read at resolution, not at request time (`requests.rs:191`) | Low | Confirmed | Snapshot the reward into `LpRequest` at creation. |
-| T-23 | Binding generation and the published bindings are stale | Low | Confirmed | `scripts/gen-bindings.sh` still lists the deleted `oracle-router` and `oracle` contracts, so `make bind` fails. The committed `packages/bindings/*` predate the current interface (for example no `propose_market_config`). Regenerate before the next `@win-trader/bindings` release. Off-chain consumers otherwise build against a wrong ABI. |
+| T-23 | Binding generation and the published bindings were stale | Low | **Fixed in `af8fe56`** | `gen-bindings.sh` now builds vault, request-router, position-manager, config-manager, market-governor, mock-token and mock-oracle from the current WASM. `@win-trader/bindings` is 0.2.0 (oracle-router and oracle exports removed). The `offchain` indexer must be updated to match before the next deploy. |
 | R-1 | No events for `set_vault`, `set_request_router` or `migrate` | Low | Confirmed | Add events. |
 | T-18 | Vault, router and ConfigManager have no crate-local tests; no property or invariant fuzzing | Info | Confirmed | Add an invariant suite: `Σ buckets + LP equity == physical cash`, `open_position_count` and `total_risk_units` consistency, no value created on round-trip open→close at the same price. Consider `cargo-fuzz` on the maths and waterfall. |
 
@@ -242,7 +249,7 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 1. **Oracle trust boundary (T-01, D-2).** Decide whether the oracle-router and publishers are in scope. If not, the report should state the full trust assumption.
 2. **Settlement waterfall and rounding** (`settle.rs`, `fees.rs`, `ledger.rs`, `funding.rs`, `window.rs`). Check conservation of cash across every terminal path (close, liquidation, ADL, TP/SL, partial decrease), including bad debt and the LP keeper backstop in `keeper::pay_liquidation`.
 3. **`transfer_safety_claim` callers.** This vault entrypoint skips the conservation check (`vault/src/contract.rs:209`). Every PM caller must have debited a ledger bucket or position collateral first. Check that this holds on every path.
-4. **Preflight and settle parity** for increase and decrease (D-4 / T-10).
+4. **Preflight and settle parity** for decrease and close (D-4 / T-10). Position increase was removed in `b42e5fe`, taking the hardest parity path with it.
 5. **Risk-state machine**: HardCap latch and relatch band, ADL gating, the `restricted_market_side_count` bookkeeping, and the cross-market `hard_cap_factor_sum` bound.
 6. **LP pricing** (T-12) and withdrawal gating (`min_equity_clear_of_adl`, utilization, `clean_terminal`).
 7. **Governance and timelocks** (E-1…E-5): verify the conservative-change predicates cannot be abused.
@@ -266,8 +273,26 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 | `e077d2d` | Floor of 1 day on `config_timelock_seconds`. `disable_market` limited to configured markets, with the entry removed on enable. `RequiresLiquidation` returns persist the accrual they announced. Three regression tests in `contracts/position-manager/tests/threat_model.rs`, each verified to fail without its fix. | T-05, T-06, T-08 (and E-3, D-3, R-2) |
 | `eba596b` | Deploy, upgrade and add-market tooling rebuilt for the current contracts; mocks and roles gated by network; two-phase upgrade; fail-closed WASM hash check. | T-14; mitigates T-15 and E-4 |
 | `b6ffbe8` | Dead-code and redundancy cleanup (§9.2). | — |
+| `03dee9b` | Removed the `bump_*` TTL entry points (native `ExtendFootprintTTL` covers them). | T-00 |
+| `5fad1d6` | Removed the referral program. | T-00; retires S-6 |
+| `b42e5fe` | Removed position increase. | T-00; shrinks D-4/T-10 |
+| `b03a55d` | Size guard in `make optimize`. | T-00 |
+| `91e12c0` | `pending_fees` made test-only. | T-00 |
+| `10c845d` | MarketGovernor split; per-config validation and `EventHeader` moved to `shared`; re-registration timelocked; ADMIN can cancel feed proposals. | T-00, T-04 (partly), T-07; adds T-24, T-25 |
+| `d60cae9` | Pinned binaryen `wasm-opt -Oz`; three ledger-total views made test-only. | T-00 |
+| `af8fe56` | Deploy, add-market and upgrade tooling for the governor; regenerated bindings; pinned Rust toolchain; contracts CI; local quickstart on testnet limits. | T-23, T-25 |
 
-Workspace tests: 168 passed, 0 failed, at every commit above.
+Workspace tests: 168 passed through `b6ffbe8`; 159 after removing referral and increase (their tests went with them); 164 after the governor split added five governor tests.
+
+End-to-end check (`af8fe56` contracts) on a local quickstart network. It used `--limits unlimited`, because quickstart's presets, including `--limits testnet`, allow only 100M instructions per transaction against real testnet's and mainnet's 400M; the 131,072-byte size cap is enforced at build time instead. Results from the binaryen-optimized WASM:
+- `deploy.sh` deployed every contract and all wiring and role checks passed.
+- A market order settled into a position.
+- A conservative global-config change installed through the governor, and the `cfgglobal` event named the ADMIN as actor. A direct `install_global_config` from ADMIN was refused with `InvalidCaller`.
+- An LP deposit resolved through the router, pricing all three markets.
+
+Measured upload cost (instructions): PositionManager 102.6M, Vault 62.4M, MarketGovernor 33.5M, RequestRouter 28.3M, ConfigManager 24.6M. All are well under 400M.
+
+Not measured: runtime CPU of settlement and LP resolution, because the CLI's cost report shows fees, not instruction counts. Measure both on testnet before mainnet, with all markets registered (see T-13).
 
 ### 9.2 Code-quality ("ponytail") review
 
@@ -284,6 +309,6 @@ The goal was less code for the auditor to read, with no behaviour change.
 - One file per event (36 modules): verbose, but each one is the indexer's ABI.
 - The PM `math.rs` wrappers that turn `Option` into a panic: a single place for the `ArithmeticError` mapping.
 - Error enum variants that are now unused (for example `NotInitialized` in the vault). Error codes are part of the published ABI, and `tests/taxonomy.rs` pins their uniqueness.
-- Two clippy `too_many_arguments` warnings (`settle.rs`, `events/position_increased.rs`). Fixing them means parameter structs, which add code.
+- Clippy `too_many_arguments` warnings (`settle.rs`). Fixing them means parameter structs, which add code.
 
 **Size impact:** the PositionManager shrank by 405 bytes optimized, which is not material against T-00.
