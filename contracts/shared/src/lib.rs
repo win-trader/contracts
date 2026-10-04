@@ -22,7 +22,7 @@ pub use price_feed::{PriceData, PriceFeed, PriceFeedClient, StampedPrice};
 pub use request_router::{RequestRouter, RequestRouterClient};
 pub use types::{
     AccountingSnapshot, ActionKind, ActionOutcome, ActionPayload, ClosePayload, DecreasePayload,
-    FailureReason, FundingIndices, GlobalConfig, IncreasePayload,
+    FailureReason, FundingIndices, GlobalConfig,
     KeeperRewards, LpConfig, LpRequest, LpRequestKind, LpRequestStatus, Market, MarketConfig,
     MarketSide, MigrationData, OpenPayload, PayerSide, PendingAction,
     PendingFeesView, PendingGlobalConfig, PendingMarketConfig, PendingPriceFeed, PendingUpgrade,

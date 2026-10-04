@@ -70,27 +70,6 @@ pub struct AddedExposure {
     pub risk_added: i128,
 }
 
-pub fn derive_added_exposure(
-    env: &Env,
-    is_long: bool,
-    current_size: i128,
-    current_risk_units: i128,
-    size_added: i128,
-    price: i128,
-    factor_bps: u32,
-) -> AddedExposure {
-    try_added_exposure(
-        env,
-        is_long,
-        current_size,
-        current_risk_units,
-        size_added,
-        price,
-        factor_bps,
-    )
-    .unwrap_or_else(|| fail(env))
-}
-
 pub fn try_added_exposure(
     env: &Env,
     is_long: bool,

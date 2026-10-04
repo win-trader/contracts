@@ -156,40 +156,33 @@ fn adl_refuses_a_losing_position_even_on_a_restricted_side() {
 }
 
 /// §8.12 — when a forced action removes a position it must "remove the
-/// ordinary pending mutation, if present", "refund its complete added-
-/// collateral escrow", and "pay only the forced action's keeper reward".
-/// Covered for liquidation already; this is the ADL twin.
+/// ordinary pending mutation, if present" and "pay only the forced action's
+/// keeper reward". Covered for liquidation already; this is the ADL twin.
 #[test]
-fn adl_supersedes_a_pending_mutation_and_refunds_its_escrow() {
+fn adl_supersedes_a_pending_mutation() {
     let p = Protocol::new();
     let c = p.pm();
-    let (target, _, owner, _) = restricted_side(&p);
+    let (target, _, _, _) = restricted_side(&p);
 
     p.wait(defaults::MIN_POSITION_LIFETIME);
-    let added = usd(1_000);
-    let increase = c.create_increase(&target, &usd(10_000), &added, &0);
+    let close = c.create_close(&target, &0);
     assert_eq!(
         c.get_position(&target).pending_mutation_action_id,
-        Some(increase)
+        Some(close)
     );
-    let owner_before = p.cash(&owner);
     let keeper_before = p.cash(&p.keeper);
 
     p.observe(1, ADL_MARK);
     assert_eq!(c.execute_adl(&p.keeper, &target), ActionOutcome::Executed);
 
     assert!(
-        c.try_get_pending_action(&increase).is_err(),
+        c.try_get_pending_action(&close).is_err(),
         "§8.12 — the superseded mutation is removed"
-    );
-    assert!(
-        p.cash(&owner) - owner_before >= added,
-        "§8.10 — the complete added-collateral escrow comes back"
     );
     assert_eq!(
         p.cash(&p.keeper) - keeper_before,
         defaults::KEEPER_REWARD,
-        "§9.14 — only the forced action's reward, not the increase reward too"
+        "§9.14 — only the forced action's reward, not the close reward too"
     );
-    p.assert_conserved("after ADL superseded the increase");
+    p.assert_conserved("after ADL superseded the close");
 }

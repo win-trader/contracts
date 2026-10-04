@@ -17,7 +17,6 @@ pub struct Position {
     pub lp_payer_index_snapshot: i128,
     pub receiver_index_snapshot: i128,
     pub opened_at: u64,
-    pub last_size_increase_at: u64,
     pub pending_mutation_action_id: Option<u64>,
     pub take_profit: Trigger,
     pub stop_loss: Trigger,
@@ -65,7 +64,6 @@ pub struct TriggerInstruction {
 pub enum ActionKind {
     MarketOpen,
     LimitOpen,
-    Increase,
     Decrease,
     Close,
 }
@@ -75,7 +73,6 @@ pub enum ActionKind {
 pub enum ActionPayload {
     MarketOpen(OpenPayload),
     LimitOpen(OpenPayload, TriggerCondition),
-    Increase(IncreasePayload),
     Decrease(DecreasePayload),
     Close(ClosePayload),
 }
@@ -97,15 +94,6 @@ pub struct OpenPayload {
 pub struct TriggerCondition {
     pub trigger_price: i128,
     pub trigger_above: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct IncreasePayload {
-    pub position_id: u64,
-    pub size_added: i128,
-    pub collateral_added: i128,
-    pub acceptable_price: i128,
 }
 
 #[contracttype]
@@ -147,7 +135,6 @@ impl ActionPayload {
 
     pub fn position_id(&self) -> Option<u64> {
         match self {
-            ActionPayload::Increase(p) => Some(p.position_id),
             ActionPayload::Decrease(p) => Some(p.position_id),
             ActionPayload::Close(p) => Some(p.position_id),
             _ => None,
@@ -157,7 +144,6 @@ impl ActionPayload {
     pub fn acceptable_price(&self) -> i128 {
         match self {
             ActionPayload::MarketOpen(o) | ActionPayload::LimitOpen(o, _) => o.acceptable_price,
-            ActionPayload::Increase(p) => p.acceptable_price,
             ActionPayload::Decrease(p) => p.acceptable_price,
             ActionPayload::Close(p) => p.acceptable_price,
         }
@@ -267,7 +253,6 @@ pub struct MarketConfig {
 pub struct KeeperRewards {
     pub open: i128,
     pub limit_order: i128,
-    pub increase: i128,
     pub decrease: i128,
     pub close: i128,
     pub tp: i128,

@@ -121,58 +121,6 @@ fn credit_received_funding(env: &Env, ledger: &mut Ledger, market: &mut Market, 
     ledger.release(env, ledger::Bucket::ReceiverFunding, amount);
 }
 
-pub fn capitalize_for_surviving_mutation(
-    env: &Env,
-    ledger: &mut Ledger,
-    market_id: &Symbol,
-    actor: &Address,
-    position: &mut Position,
-    market: &mut Market,
-) -> CollectedFees {
-    let pending = funding::pending_fees(env, ledger, position, market);
-    credit_received_funding(env, ledger, market, pending.funding_received);
-    {
-        let is_long = position.is_long;
-        let side = market.side_mut(is_long);
-        if pending.funding_received > 0 {
-            ledger::add_stored_collateral(env, ledger, position, side, pending.funding_received);
-        }
-    }
-    let owed = math::add(
-        env,
-        math::add(env, pending.funding_paid_to_receivers, pending.funding_paid_to_lps),
-        pending.borrow,
-    );
-    if position.stored_collateral < owed {
-        panic_with_error!(env, PositionManagerError::InsufficientCollateral);
-    }
-    let (receiver_collected, lp_collected, borrow_collected) = {
-        let is_long = position.is_long;
-        let side = market.side_mut(is_long);
-        (
-            ledger::collect_stored_collateral(
-                env,
-                ledger,
-                position,
-                side,
-                pending.funding_paid_to_receivers,
-            ),
-            ledger::collect_stored_collateral(env, ledger, position, side, pending.funding_paid_to_lps),
-            ledger::collect_stored_collateral(env, ledger, position, side, pending.borrow),
-        )
-    };
-    distribute_borrow_revenue(env, ledger, market_id, actor, borrow_collected, position.id);
-    funding::snapshot_funding_indices(position, market);
-    CollectedFees {
-        receiver_credit: pending.funding_received,
-        receiver_funding_paid: receiver_collected,
-        lp_funding_paid: lp_collected,
-        borrow_paid: borrow_collected,
-        loss_collected: 0,
-        unpaid: 0,
-    }
-}
-
 pub fn capitalize(
     env: &Env,
     ledger: &mut Ledger,

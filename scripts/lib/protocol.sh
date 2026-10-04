@@ -61,7 +61,7 @@ GLOBAL_CONFIG=$(jq -nc \
   --arg reward "$KEEPER_REWARD" \
   '$ARGS.named
    | del(.reward)
-   | .keeper_rewards = ({open:0, limit_order:0, increase:0, decrease:0, close:0,
+   | .keeper_rewards = ({open:0, limit_order:0, decrease:0, close:0,
                           tp:0, sl:0, expiry:0, liquidation:0, adl:0, lp_resolve:0}
                          | map_values($reward))')
 

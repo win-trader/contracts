@@ -22,7 +22,6 @@ fn a_pause_closes_risk_and_protocol_revenue_but_not_exits() {
     assert!(c
         .try_create_market_open(&w.trader, &w.market, &w.request(100_000_0000, 0, 120))
         .is_err());
-    assert!(c.try_create_increase(&1, &100_0000000, &0, &0).is_err());
     // Closed: protocol revenue. The same authority can generally reach both,
     // and leaving this open is a pause-and-drain path that costs nothing to
     // close.

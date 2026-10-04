@@ -47,7 +47,6 @@ pub fn keeper_rewards() -> KeeperRewards {
     KeeperRewards {
         open: KEEPER_REWARD,
         limit_order: KEEPER_REWARD,
-        increase: KEEPER_REWARD,
         decrease: KEEPER_REWARD,
         close: KEEPER_REWARD,
         tp: KEEPER_REWARD,

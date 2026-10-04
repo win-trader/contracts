@@ -20,7 +20,7 @@ pub fn delay_satisfied(now: u64, execute_after: u64) -> bool {
 
 pub fn lifetime_satisfied(now: u64, position: &Position, config: &GlobalConfig) -> bool {
     now >= position
-        .last_size_increase_at
+        .opened_at
         .saturating_add(config.min_position_lifetime)
 }
 
@@ -259,7 +259,6 @@ mod tests {
             lp_payer_index_snapshot: 0,
             receiver_index_snapshot: 0,
             opened_at: 0,
-            last_size_increase_at: 0,
             pending_mutation_action_id: None,
             take_profit: Trigger::None,
             stop_loss: Trigger::None,

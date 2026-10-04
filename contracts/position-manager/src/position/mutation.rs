@@ -1,13 +1,12 @@
 use soroban_sdk::{panic_with_error, Address, Env};
 
-use shared::constants::{BPS, PRICE_PRECISION};
 use shared::{
     ActionKind, ActionOutcome, ActionPayload, ClosePayload, DecreasePayload, FailureReason,
-    GlobalConfig, IncreasePayload, Market, PendingAction, Position, StampedPrice,
+    GlobalConfig, Market, PendingAction, Position, StampedPrice,
 };
 
 use crate::errors::PositionManagerError;
-use crate::events::{self, CloseReason, FeeSource};
+use crate::events::{self, CloseReason};
 use crate::funding::PendingFees;
 use crate::ledger::{self, Ledger};
 use crate::risk::LiquidationAssessment;
@@ -58,18 +57,10 @@ fn commit(
     market: &Market,
     kind: ActionKind,
     payload: ActionPayload,
-    escrow: i128,
     commit_observed_at: u64,
 ) -> u64 {
     let now = env.ledger().timestamp();
     let delay = market.config.order_execution_delay_seconds;
-
-    let mut ledger = storage::get_ledger(env);
-    borrow::accrue(env, &mut ledger, Some(&position.owner), now);
-    if escrow > 0 {
-        ledger::escrow_in(env, &mut ledger, &position.owner, escrow);
-    }
-
     let action = PendingAction {
         action_id: storage::take_next_action_id(env),
         owner: position.owner.clone(),
@@ -78,14 +69,12 @@ fn commit(
         created_at: now,
         execute_after: now.saturating_add(delay),
         commit_observed_at,
-        escrowed_collateral: escrow,
+        escrowed_collateral: 0,
         payload,
     };
     storage::save_pending_action(env, &action);
     position.pending_mutation_action_id = Some(action.action_id);
     storage::save_position(env, position);
-    borrow::refresh_rate(env, &mut ledger, ledger::physical_cash(env));
-    storage::save_ledger(env, &ledger);
     events::emit_action_committed(env, &action);
     action.action_id
 }
@@ -99,50 +88,6 @@ fn claim_slot(env: &Env, position_id: u64) -> (Position, Market, StampedPrice) {
     let market = storage::get_market(env, &position.market);
     let commit_price = snapshot::read_stamped_price(env, &position.market);
     (position, market, commit_price)
-}
-
-pub fn create_increase(
-    env: Env,
-    position_id: u64,
-    size_added: i128,
-    collateral_added: i128,
-    acceptable_price: i128,
-) -> u64 {
-    let (mut position, market, commit_price) = claim_slot(&env, position_id);
-    if size_added <= 0 || collateral_added < 0 || acceptable_price < 0 {
-        panic_with_error!(&env, PositionManagerError::InvalidAmount);
-    }
-    if storage::is_paused(&env) {
-        panic_with_error!(&env, PositionManagerError::Paused);
-    }
-    if !storage::is_market_registered(&env, &position.market) {
-        panic_with_error!(&env, PositionManagerError::MarketNotConfigured);
-    }
-    let base_added = math::mul_div_floor(&env, size_added, PRICE_PRECISION, commit_price.price);
-    let risk_after = math::risk_units_for(
-        &env,
-        math::add(&env, position.size, size_added),
-        market.config.market_risk_factor_bps,
-    );
-    if base_added <= 0 || risk_after <= position.risk_units {
-        panic_with_error!(&env, PositionManagerError::InvalidAmount);
-    }
-
-    let payload = ActionPayload::Increase(IncreasePayload {
-        position_id,
-        size_added,
-        collateral_added,
-        acceptable_price,
-    });
-    commit(
-        &env,
-        &mut position,
-        &market,
-        ActionKind::Increase,
-        payload,
-        collateral_added,
-        commit_price.observed_at,
-    )
 }
 
 pub fn create_decrease(
@@ -171,7 +116,6 @@ pub fn create_decrease(
         &market,
         ActionKind::Decrease,
         payload,
-        0,
         commit_price.observed_at,
     )
 }
@@ -191,7 +135,6 @@ pub fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64 {
         &market,
         ActionKind::Close,
         payload,
-        0,
         commit_price.observed_at,
     )
 }
@@ -213,7 +156,6 @@ fn eligible(
     keeper_address: &Address,
     action_id: u64,
     kind: ActionKind,
-    removes_exposure: bool,
 ) -> Result<Eligible, ActionOutcome> {
     keeper_address.require_auth();
 
@@ -225,7 +167,7 @@ fn eligible(
     if !action::delay_satisfied(now, action.execute_after) {
         return Err(ActionOutcome::NotReady);
     }
-    if removes_exposure && !action::lifetime_satisfied(now, &position, &config) {
+    if !action::lifetime_satisfied(now, &position, &config) {
         return Err(ActionOutcome::NotReady);
     }
     let fill = snapshot::read_stamped_price(env, &action.market_id);
@@ -276,312 +218,8 @@ fn eligible(
     })
 }
 
-fn lp_share(env: &Env, collected: i128, share_bps: u32) -> i128 {
-    math::mul_div_floor(env, collected, share_bps as i128, BPS)
-}
-
-pub fn settle_increase(env: Env, keeper_address: Address, action_id: u64) -> ActionOutcome {
-    let mut e = match eligible(
-        &env,
-        &keeper_address,
-        action_id,
-        ActionKind::Increase,
-        false,
-    ) {
-        Ok(e) => e,
-        Err(outcome) => return outcome,
-    };
-    let ActionPayload::Increase(payload) = e.action.payload.clone() else {
-        panic_with_error!(&env, PositionManagerError::WrongActionKind);
-    };
-    let reward = keeper::reward_for(&e.config, keeper::RewardKind::Increase);
-
-    if let Some(reason) = increase_preflight(&env, &e, &payload, reward) {
-        return action::fail_position_action(
-            &env,
-            &mut e.ledger,
-            &mut e.market,
-            &mut e.position,
-            &mut e.action,
-            &keeper_address,
-            reward,
-            reason,
-            &e.assessment,
-            e.price,
-        );
-    }
-
-    execute_increase(&env, &mut e, &payload, &keeper_address, reward);
-    ActionOutcome::Executed
-}
-
-fn increase_preflight(
-    env: &Env,
-    e: &Eligible,
-    payload: &IncreasePayload,
-    reward: i128,
-) -> Option<FailureReason> {
-    if !action::entry_price_allowed(e.position.is_long, e.price, payload.acceptable_price) {
-        return Some(FailureReason::PriceBoundExceeded);
-    }
-    if storage::is_market_disabled(env, &e.action.market_id) {
-        return Some(FailureReason::MarketPaused);
-    }
-    let side = e.market.side(e.position.is_long);
-    if !risk::side_accepts_new_exposure(env, side) {
-        return Some(if storage::is_paused(env) {
-            FailureReason::MarketPaused
-        } else {
-            FailureReason::SideRestricted
-        });
-    }
-
-    let Some(exposure) = math::try_added_exposure(
-        env,
-        e.position.is_long,
-        e.position.size,
-        e.position.risk_units,
-        payload.size_added,
-        e.price,
-        e.market.config.market_risk_factor_bps,
-    ) else {
-        return Some(FailureReason::SizeTooSmall);
-    };
-    let opening_fee = fees::calculate_opening_fee(env, payload.size_added, &e.market.config);
-
-    let owed = math::add(
-        env,
-        math::add(
-            env,
-            e.pending.funding_paid_to_receivers,
-            e.pending.funding_paid_to_lps,
-        ),
-        e.pending.borrow,
-    );
-    let after_window = math::sub(
-        env,
-        math::add(env, e.position.stored_collateral, e.pending.funding_received),
-        owed,
-    );
-    if after_window < 0 {
-        return Some(FailureReason::InsufficientCollateral);
-    }
-    let after_charges = math::sub(
-        env,
-        math::sub(
-            env,
-            math::add(env, after_window, payload.collateral_added),
-            opening_fee,
-        ),
-        reward,
-    );
-    if after_charges < e.config.min_collateral {
-        return Some(FailureReason::InsufficientCollateral);
-    }
-
-    let resulting_size = math::add(env, e.position.size, payload.size_added);
-    let resulting_base = math::add(env, e.position.base_exposure, exposure.base_added);
-    let resulting_risk = math::add(env, e.position.risk_units, exposure.risk_added);
-    let effective = math::add(
-        env,
-        after_charges,
-        risk::payable_pnl(
-            env,
-            math::pnl(env, e.position.is_long, resulting_size, resulting_base, e.price),
-            side,
-        ),
-    );
-
-    let projected_equity = projected_equity_after_increase(env, e, opening_fee);
-    let projected_total_risk = math::add(env, e.ledger.total_risk_units, exposure.risk_added);
-    let projected_minimum = borrow::projected_minimum(
-        env,
-        borrow::rate_at(env, projected_total_risk, projected_equity),
-        resulting_risk,
-    );
-    let required = math::add(
-        env,
-        risk::initial_requirement(env, resulting_size, &e.market.config),
-        projected_minimum,
-    );
-    if effective < required {
-        return Some(FailureReason::InsufficientCollateral);
-    }
-
-    let capacity = math::mul_div_floor(
-        env,
-        projected_equity,
-        e.config.risk_capacity_limit_bps as i128,
-        BPS,
-    );
-    if projected_total_risk > capacity {
-        return Some(FailureReason::CapacityExceeded);
-    }
-
-    let (size_cap, base_cap) = if e.position.is_long {
-        (
-            e.market.config.max_long_size_open_interest,
-            e.market.config.max_long_base_exposure,
-        )
-    } else {
-        (
-            e.market.config.max_short_size_open_interest,
-            e.market.config.max_short_base_exposure,
-        )
-    };
-    if math::add(env, side.size_open_interest, payload.size_added) > size_cap
-        || math::add(env, side.base_exposure, exposure.base_added) > base_cap
-    {
-        return Some(FailureReason::ExposureCapExceeded);
-    }
-    None
-}
-
-fn projected_equity_after_increase(env: &Env, e: &Eligible, opening_fee: i128) -> i128 {
-    let equity = e
-        .ledger
-        .cash_lp_equity(env, ledger::physical_cash(env));
-    let mut projected = math::add(env, equity, e.pending.funding_paid_to_receivers);
-    projected = math::add(env, projected, e.pending.funding_paid_to_lps);
-    projected = math::add(
-        env,
-        projected,
-        lp_share(env, e.pending.borrow, e.config.borrow_lp_revenue_share_bps),
-    );
-    math::add(
-        env,
-        projected,
-        lp_share(env, opening_fee, e.config.fee_lp_revenue_share_bps),
-    )
-}
-
-fn execute_increase(
-    env: &Env,
-    e: &mut Eligible,
-    payload: &IncreasePayload,
-    keeper_address: &Address,
-    reward: i128,
-) {
-    let is_long = e.position.is_long;
-    let collected = fees::capitalize_for_surviving_mutation(
-        env,
-        &mut e.ledger,
-        &e.action.market_id,
-        keeper_address,
-        &mut e.position,
-        &mut e.market,
-    );
-
-    let escrow = e.action.escrowed_collateral;
-    e.action.escrowed_collateral = 0;
-    ledger::escrow_to_collateral(
-        env,
-        &mut e.ledger,
-        &mut e.position,
-        e.market.side_mut(is_long),
-        escrow,
-    );
-
-    let opening_fee = fees::calculate_opening_fee(env, payload.size_added, &e.market.config);
-    if opening_fee > 0 {
-        let charged = ledger::collect_stored_collateral(
-            env,
-            &mut e.ledger,
-            &mut e.position,
-            e.market.side_mut(is_long),
-            opening_fee,
-        );
-        if charged < opening_fee {
-            panic_with_error!(env, PositionManagerError::InsufficientCollateral);
-        }
-        fees::distribute_open_close_revenue(
-            env,
-            &mut e.ledger,
-            &e.action.market_id,
-            keeper_address,
-            charged,
-            FeeSource::Opening,
-            e.position.id,
-        );
-    }
-    keeper::pay_from_position(
-        env,
-        &mut e.ledger,
-        &mut e.position,
-        e.market.side_mut(is_long),
-        keeper_address,
-        reward,
-    );
-
-    let exposure = math::derive_added_exposure(
-        env,
-        is_long,
-        e.position.size,
-        e.position.risk_units,
-        payload.size_added,
-        e.price,
-        e.market.config.market_risk_factor_bps,
-    );
-    funding::reset_receiver_distribution_remainder(&mut e.market, is_long);
-    e.position.size = math::add(env, e.position.size, payload.size_added);
-    e.position.base_exposure = math::add(env, e.position.base_exposure, exposure.base_added);
-    e.position.risk_units = math::add(env, e.position.risk_units, exposure.risk_added);
-    e.position.last_size_increase_at = env.ledger().timestamp();
-    {
-        let side = e.market.side_mut(is_long);
-        side.size_open_interest = math::add(env, side.size_open_interest, payload.size_added);
-        side.base_exposure = math::add(env, side.base_exposure, exposure.base_added);
-        side.risk_units = math::add(env, side.risk_units, exposure.risk_added);
-    }
-    risk::register_exposure(env, &mut e.ledger, exposure.risk_added);
-
-    funding::snapshot_funding_indices(&mut e.position, &e.market);
-    funding::refresh_display(env, &mut e.ledger, &mut e.market);
-    let physical = ledger::physical_cash(env);
-    let equity = e.ledger.cash_lp_equity(env, physical);
-    risk::evaluate_market_risk(
-        env,
-        &mut e.ledger,
-        &e.action.market_id,
-        keeper_address,
-        &mut e.market,
-        e.price,
-        equity,
-    );
-    storage::save_market(env, &e.action.market_id, &e.market);
-    borrow::refresh_rate(env, &mut e.ledger, physical);
-    borrow::initialize_window(env, &e.ledger, &mut e.position);
-
-    e.position.pending_mutation_action_id = None;
-    storage::remove_pending_action(env, e.action.action_id);
-    storage::save_position(env, &e.position);
-    storage::save_ledger(env, &e.ledger);
-    events::emit_action_settled(
-        env,
-        &e.action.market_id,
-        keeper_address,
-        e.action.action_id,
-        &e.action.owner,
-        e.action.kind,
-        e.position.id,
-        e.price,
-        e.observed_at,
-        reward,
-    );
-    events::emit_increased(
-        env,
-        keeper_address,
-        &e.position,
-        payload.size_added,
-        exposure.base_added,
-        escrow,
-        e.price,
-        &collected,
-    );
-}
-
 pub fn settle_decrease(env: Env, keeper_address: Address, action_id: u64) -> ActionOutcome {
-    let mut e = match eligible(&env, &keeper_address, action_id, ActionKind::Decrease, true) {
+    let mut e = match eligible(&env, &keeper_address, action_id, ActionKind::Decrease) {
         Ok(e) => e,
         Err(outcome) => return outcome,
     };
@@ -753,7 +391,7 @@ fn decrease_preflight(
 }
 
 pub fn settle_close(env: Env, keeper_address: Address, action_id: u64) -> ActionOutcome {
-    let mut e = match eligible(&env, &keeper_address, action_id, ActionKind::Close, true) {
+    let mut e = match eligible(&env, &keeper_address, action_id, ActionKind::Close) {
         Ok(e) => e,
         Err(outcome) => return outcome,
     };

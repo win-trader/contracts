@@ -202,22 +202,6 @@ impl PositionManager for PositionManagerContract {
         mutation::add_collateral(env, position_id, amount)
     }
 
-    fn create_increase(
-        env: Env,
-        position_id: u64,
-        size_added: i128,
-        collateral_added: i128,
-        acceptable_price: i128,
-    ) -> u64 {
-        mutation::create_increase(
-            env,
-            position_id,
-            size_added,
-            collateral_added,
-            acceptable_price,
-        )
-    }
-
     fn create_decrease(
         env: Env,
         position_id: u64,
@@ -229,10 +213,6 @@ impl PositionManager for PositionManagerContract {
 
     fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64 {
         mutation::create_close(env, position_id, acceptable_price)
-    }
-
-    fn settle_increase(env: Env, keeper: Address, action_id: u64) -> ActionOutcome {
-        mutation::settle_increase(env, keeper, action_id)
     }
 
     fn settle_decrease(env: Env, keeper: Address, action_id: u64) -> ActionOutcome {

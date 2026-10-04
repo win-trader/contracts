@@ -15,7 +15,6 @@ fn reward_bounds(r: &KeeperRewards) -> (i128, i128) {
     let all = [
         r.open,
         r.limit_order,
-        r.increase,
         r.decrease,
         r.close,
         r.tp,

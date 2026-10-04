@@ -10,7 +10,6 @@ use crate::math;
 pub enum RewardKind {
     MarketOpen,
     LimitOpen,
-    Increase,
     Decrease,
     Close,
     TakeProfit,
@@ -25,7 +24,6 @@ pub fn reward_for(config: &GlobalConfig, kind: RewardKind) -> i128 {
     match kind {
         RewardKind::MarketOpen => r.open,
         RewardKind::LimitOpen => r.limit_order,
-        RewardKind::Increase => r.increase,
         RewardKind::Decrease => r.decrease,
         RewardKind::Close => r.close,
         RewardKind::TakeProfit => r.tp,

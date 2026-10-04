@@ -51,24 +51,12 @@ pub trait PositionManager {
     /// Add collateral to a position immediately. No fee, reward, or window reset.
     fn add_collateral(env: Env, position_id: u64, amount: i128);
 
-    /// Commit a size increase, escrowing any added collateral.
-    fn create_increase(
-        env: Env,
-        position_id: u64,
-        size_added: i128,
-        collateral_added: i128,
-        acceptable_price: i128,
-    ) -> u64;
-
     /// Commit a partial decrease of `size_removed`.
     fn create_decrease(env: Env, position_id: u64, size_removed: i128, acceptable_price: i128)
         -> u64;
 
     /// Commit a full close of whatever size remains at settlement.
     fn create_close(env: Env, position_id: u64, acceptable_price: i128) -> u64;
-
-    /// Settle a committed increase.
-    fn settle_increase(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;
 
     /// Settle a committed decrease.
     fn settle_decrease(env: Env, keeper: Address, action_id: u64) -> ActionOutcome;

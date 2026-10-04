@@ -280,7 +280,7 @@ fn a_pending_action_reserves_no_exposure_and_no_lp_equity() {
 
     // §9.11 — "cannot be used by a different action or position".
     assert!(
-        c.try_settle_increase(&p.keeper, &action).is_err(),
+        c.try_settle_decrease(&p.keeper, &action).is_err(),
         "§8.9 — a settlement call naming the wrong action kind reverts"
     );
     p.assert_conserved("with escrow pending");
@@ -532,13 +532,12 @@ fn a_pause_drains_the_risk_adding_queue_and_leaves_exits_open() {
 
     c.pause(&p.admin);
 
-    // "Create any entry order or increase: rejected at creation."
+    // "Create any entry order: rejected at creation."
     assert!(c
         .try_create_market_open(&p.trader, &p.market, &p.open_payload(300))
         .is_err());
-    assert!(c.try_create_increase(&id, &usd(10_000), &usd(1_000), &0).is_err());
 
-    // "Settle a pending entry or increase: terminates as an expected
+    // "Settle a pending entry: terminates as an expected
     //  failure" — reward paid, escrow refunded, no opening fee, no position.
     p.observe(6, FILL);
     assert_eq!(c.settle_market_open(&p.keeper, &pending), ActionOutcome::Failed);
@@ -645,7 +644,6 @@ fn a_position_holds_one_pending_mutation_at_a_time() {
     assert_eq!(c.get_position(&id).pending_mutation_action_id, Some(close));
     assert!(c.try_create_close(&id, &0).is_err(), "§8.4 — the slot is occupied");
     assert!(c.try_create_decrease(&id, &usd(10_000), &0).is_err());
-    assert!(c.try_create_increase(&id, &usd(10_000), &usd(1_000), &0).is_err());
 
     p.observe(6, FILL);
     c.settle_close(&p.keeper, &close);

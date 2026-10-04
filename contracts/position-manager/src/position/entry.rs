@@ -428,7 +428,6 @@ fn execute(
         lp_payer_index_snapshot: 0,
         receiver_index_snapshot: 0,
         opened_at: now,
-        last_size_increase_at: now,
         pending_mutation_action_id: None,
         take_profit: trigger::attach(
             open.take_profit,

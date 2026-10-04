@@ -223,35 +223,6 @@ fn a_crossed_limit_order_settles_and_pays_the_limit_reward() {
     );
 }
 
-/// §7.8/§8.4 — a position holds at most one ordinary pending mutation, and
-/// an increase re-locks the minimum-lifetime clock.
-#[test]
-fn a_position_holds_one_pending_mutation_at_a_time() {
-    let w = World::new();
-    let c = w.client();
-    let action_id = c.create_market_open(&w.trader, &w.market, &w.request(100_000_0000, 0, 120));
-    w.observe(10, PRICE);
-    c.settle_market_open(&w.keeper, &action_id);
-
-    let increase = c.create_increase(&1, &100_0000000, &50_000_0000, &0);
-    assert_eq!(c.get_position(&1).pending_mutation_action_id, Some(increase));
-    // §8.4 — the slot is occupied; a second commitment would assume the same
-    // pre-action state.
-    assert!(c.try_create_close(&1, &0).is_err());
-
-    w.observe(10, PRICE);
-    assert_eq!(
-        c.settle_increase(&w.keeper, &increase),
-        ActionOutcome::Executed
-    );
-    assert_eq!(c.get_position(&1).pending_mutation_action_id, None);
-    assert_eq!(
-        c.get_position(&1).last_size_increase_at,
-        w.env.ledger().timestamp(),
-        "a size increase restarts the minimum-lifetime clock (§8.5)"
-    );
-}
-
 /// §8.5 — the lifetime gate applies to a close, is read at settlement, and
 /// is non-terminal.
 #[test]
@@ -279,17 +250,15 @@ fn a_close_before_the_minimum_lifetime_is_not_ready_rather_than_an_error() {
     assert!(c.try_get_position(&1).is_err());
 }
 
-/// §7.7 — adding collateral is immediate, charges nothing, and does not
-/// restart the lifetime clock.
+/// §7.7 — adding collateral is immediate and charges nothing.
 #[test]
-fn adding_collateral_is_immediate_and_does_not_relock_the_position() {
+fn adding_collateral_is_immediate_and_free() {
     let w = World::new();
     let c = w.client();
     let action_id = c.create_market_open(&w.trader, &w.market, &w.request(100_000_0000, 0, 120));
     w.observe(10, PRICE);
     c.settle_market_open(&w.keeper, &action_id);
 
-    let opened_lock = c.get_position(&1).last_size_increase_at;
     let before = c.get_position(&1).stored_collateral;
     w.observe(10, PRICE);
     c.add_collateral(&1, &25_000_0000);
@@ -299,10 +268,6 @@ fn adding_collateral_is_immediate_and_does_not_relock_the_position() {
         position.stored_collateral,
         before + 25_000_0000,
         "the whole amount lands in collateral — no fee, no reward"
-    );
-    assert_eq!(
-        position.last_size_increase_at, opened_lock,
-        "a top-up is not a size increase (§7.7)"
     );
     assert_eq!(position.pending_mutation_action_id, None);
 }
@@ -387,48 +352,6 @@ fn a_crossed_trigger_outside_its_bound_stays_attached() {
         "and pays only the take-profit reward (§8.11)"
     );
     assert!(c.try_get_position(&1).is_err());
-}
-
-/// §8.12 — a forced action removes the position out from under a pending
-/// voluntary mutation: the mutation is superseded, its complete escrow is
-/// refunded, and the caller receives **only** the liquidation reward.
-#[test]
-fn liquidation_supersedes_a_pending_increase_and_refunds_its_escrow() {
-    let w = World::new();
-    let c = w.client();
-    let action_id = c.create_market_open(&w.trader, &w.market, &w.request(100_000_0000, 0, 120));
-    w.observe(10, PRICE);
-    c.settle_market_open(&w.keeper, &action_id);
-
-    let added = 20_000_0000;
-    let increase = c.create_increase(&1, &100_0000000, &added, &0);
-    let trader_after_commit = w.balance(&w.trader);
-    let keeper_before = w.balance(&w.keeper);
-
-    // 11% down on 10x leverage wipes the position's collateral outright, so
-    // the only cash the trader can receive is the escrow itself — which is
-    // what makes the refund assertion exact rather than a lower bound.
-    w.observe(30, 89_000_0000000);
-    c.liquidate_position(&w.keeper, &1);
-
-    assert!(c.try_get_position(&1).is_err(), "the position is gone");
-    assert!(
-        c.try_get_pending_action(&increase).is_err(),
-        "and so is the superseded mutation"
-    );
-    assert_eq!(
-        w.balance(&w.trader),
-        trader_after_commit + added,
-        "its complete added-collateral escrow goes back to the owner (§8.10)"
-    );
-    // §6.12 — the position had nothing left, so the whole reward came from
-    // LP residual. It is the one payment allowed to, and the reason is
-    // liveness: a position nobody will liquidate keeps accruing losses.
-    assert_eq!(
-        w.balance(&w.keeper),
-        keeper_before + global_config().keeper_rewards.liquidation,
-        "and the liquidator is paid in full from the LP backstop"
-    );
 }
 
 /// §7.14/§7.0 — ADL is permissionless, and the state gate is what bounds it.
