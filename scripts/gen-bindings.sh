@@ -10,9 +10,9 @@ CONTRACTS=(
   request-router
   position-manager
   config-manager
-  oracle-router
-  oracle
+  market-governor
   mock-token
+  mock-oracle
 )
 
 # --- Clean ---
@@ -39,18 +39,18 @@ done
 cat > "$BIND_OUT/package.json" <<'EOF'
 {
   "name": "@win-trader/bindings",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "exports": {
     "./vault": "./vault/dist/index.js",
     "./request-router": "./request-router/dist/index.js",
     "./position-manager": "./position-manager/dist/index.js",
     "./config-manager": "./config-manager/dist/index.js",
-    "./oracle-router": "./oracle-router/dist/index.js",
-    "./oracle": "./oracle/dist/index.js",
-    "./mock-token": "./mock-token/dist/index.js"
+    "./market-governor": "./market-governor/dist/index.js",
+    "./mock-token": "./mock-token/dist/index.js",
+    "./mock-oracle": "./mock-oracle/dist/index.js"
   },
-  "files": ["vault/dist", "request-router/dist", "position-manager/dist", "config-manager/dist", "oracle-router/dist", "oracle/dist", "mock-token/dist"],
+  "files": ["vault/dist", "request-router/dist", "position-manager/dist", "config-manager/dist", "market-governor/dist", "mock-token/dist", "mock-oracle/dist"],
   "publishConfig": { "access": "public" },
   "repository": { "type": "git", "url": "git+https://github.com/win-trader/contracts.git", "directory": "packages/bindings" },
   "dependencies": {

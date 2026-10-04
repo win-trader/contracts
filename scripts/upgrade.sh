@@ -43,6 +43,7 @@ fi
 # wasm name : addresses.json key
 DEFAULT_CONTRACTS=(
   "config-manager:configManager"
+  "market-governor:governor"
   "vault:vault"
   "request-router:requestRouter"
   "position-manager:positionManager"

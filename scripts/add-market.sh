@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# add-market.sh — Register a new market on a live PositionManager. A first
-# registration applies immediately; re-running for an existing market proposes
-# a change that applies after `config_timelock_seconds`.
+# add-market.sh — Register a new market through the MarketGovernor. A
+# first registration installs immediately; re-running for a known market
+# (including a deregistered one) proposes a change that installs after
+# `config_timelock_seconds`, via `apply_market_config`.
 #
 # The price feed must already serve the symbol: every registered market is
 # priced on each LP settlement, so an unpriced market blocks the LP queue.
@@ -27,10 +28,10 @@ if ! stellar keys address "$SOURCE" >/dev/null 2>&1; then
   exit 1
 fi
 ADMIN_ADDR=$(stellar keys address "$SOURCE")
-PM_ID=$(contract_addr positionManager)
+GOV_ID=$(contract_addr governor)
 FEED_ID=$(contract_addr oracleRouter)
-if [[ -z "$PM_ID" || -z "$FEED_ID" ]]; then
-  echo "❌ PositionManager / price feed addresses missing for '$NETWORK_KEY' in $ADDRESSES_FILE"
+if [[ -z "$GOV_ID" || -z "$FEED_ID" ]]; then
+  echo "❌ MarketGovernor / price feed addresses missing for '$NETWORK_KEY' in $ADDRESSES_FILE"
   exit 1
 fi
 
@@ -49,7 +50,7 @@ fi
 confirm_mainnet "add market $SYMBOL"
 
 echo "=== Registering market '$SYMBOL' on '$NETWORK_KEY' ==="
-invoke --id "$PM_ID" -- propose_market_config \
+invoke --id "$GOV_ID" -- propose_market_config \
   --caller "$ADMIN_ADDR" \
   --market_symbol "$SYMBOL" \
   --config "$MARKET_CONFIG"
@@ -63,4 +64,4 @@ mv "$TMP" "$ADDRESSES_FILE"
 bash "$ROOT/scripts/split-deployments.sh" "$NETWORK_KEY"
 
 echo ""
-echo "=== Done: $SYMBOL registered (or a change proposed) on the PositionManager ==="
+echo "=== Done: $SYMBOL registered (or a change proposed) through the MarketGovernor ==="

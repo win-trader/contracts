@@ -23,7 +23,7 @@ This is one of four repos:
 
 ## Prerequisites
 
-- Rust + `wasm32v1-none` target, and the `stellar` CLI
+- Rust 1.98.1 with the `wasm32v1-none` target (pinned in `rust-toolchain.toml`), and the `stellar` CLI
 - binaryen `wasm-opt` version 133 (`brew install binaryen`), pinned so optimized WASM hashes are reproducible
 - Node ≥ 18 and `pnpm`
 

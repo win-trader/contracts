@@ -33,86 +33,22 @@ if (typeof window !== "undefined") {
 
 
 
-export const ConfigManagerError = {
-  300: {message:"Unauthorized"},
-  301: {message:"NotPendingAdmin"},
-  310: {message:"NoPendingAdmin"},
-  311: {message:"NoPendingUpgrade"},
-  320: {message:"NotInitialized"},
-  321: {message:"AlreadyInitialized"},
-  322: {message:"UpgradeTimelockNotElapsed"},
-  323: {message:"AdminProposalExpired"},
-  330: {message:"InvalidAdminProposal"},
-  331: {message:"UpgradeTimelockTooShort"},
-  332: {message:"UpgradeTimelockTooLong"},
-  333: {message:"UpgradeHashMismatch"}
+export const MarketGovernorError = {
+  500: {message:"Unauthorized"},
+  510: {message:"NoPendingConfig"},
+  520: {message:"ConfigTimelockNotElapsed"},
+  521: {message:"ConfigProposalExpired"},
+  530: {message:"InvalidConfig"},
+  531: {message:"PriceUnavailable"},
+  540: {message:"UpgradeNoPending"},
+  541: {message:"UpgradeTimelockNotElapsed"},
+  542: {message:"UpgradeHashMismatch"}
 }
 
 
 
 
-
-export type StorageKey = {tag: "UpgradeTimelock", values: void} | {tag: "PendingAdmin", values: void} | {tag: "Version", values: void};
-
-
-export interface PendingAdminProposal {
-  admin: string;
-  proposed_at: u64;
-}
-
-export const RoleTransferError = {
-  2200: {message:"NoPendingTransfer"},
-  2201: {message:"InvalidLiveUntilLedger"},
-  2202: {message:"InvalidPendingAccount"}
-}
-
-
-
-
-
-export const AccessControlError = {
-  2000: {message:"Unauthorized"},
-  2001: {message:"AdminNotSet"},
-  2002: {message:"IndexOutOfBounds"},
-  2003: {message:"AdminRoleNotFound"},
-  2004: {message:"RoleCountIsNotZero"},
-  2005: {message:"RoleNotFound"},
-  2006: {message:"AdminAlreadySet"},
-  2007: {message:"RoleNotHeld"},
-  2008: {message:"RoleIsEmpty"},
-  2009: {message:"TransferInProgress"},
-  2010: {message:"MaxRolesExceeded"}
-}
-
-
-
-export const OwnableError = {
-  2100: {message:"OwnerNotSet"},
-  2101: {message:"TransferInProgress"},
-  2102: {message:"OwnerAlreadySet"}
-}
-
-
-
-
-
-/**
- * Storage key for enumeration of accounts per role.
- */
-export interface RoleAccountKey {
-  index: u32;
-  role: string;
-}
-
-/**
- * Storage keys for the data associated with the access control
- */
-export type AccessControlStorageKey = {tag: "ExistingRoles", values: void} | {tag: "RoleAccounts", values: readonly [RoleAccountKey]} | {tag: "HasRole", values: readonly [string, string]} | {tag: "RoleAccountsCount", values: readonly [string]} | {tag: "RoleAdmin", values: readonly [string]} | {tag: "Admin", values: void} | {tag: "PendingAdmin", values: void};
-
-/**
- * Storage keys for `Ownable` utility.
- */
-export type OwnableStorageKey = {tag: "Owner", values: void} | {tag: "PendingOwner", values: void};
+export type Key = {tag: "ConfigManager", values: void} | {tag: "PositionManager", values: void} | {tag: "PendingGlobalConfig", values: void} | {tag: "PendingMarketConfig", values: readonly [string]} | {tag: "PendingPriceFeed", values: void} | {tag: "Version", values: void};
 
 
 export interface PriceData {
@@ -492,31 +428,6 @@ export interface Client {
   upgrade: ({new_wasm_hash, operator}: {new_wasm_hash: Buffer, operator: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
-   * Construct and simulate a has_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  has_role: ({role, account}: {role: string, account: string}, options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
-
-  /**
-   * Construct and simulate a grant_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  grant_role: ({caller, role, account}: {caller: string, role: string, account: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
-   * Construct and simulate a revoke_role transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  revoke_role: ({caller, role, account}: {caller: string, role: string, account: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
-   * Construct and simulate a accept_admin transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  accept_admin: ({new_admin}: {new_admin: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
-   * Construct and simulate a propose_admin transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   */
-  propose_admin: ({caller, new_admin}: {caller: string, new_admin: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
-
-  /**
    * Construct and simulate a cancel_upgrade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   cancel_upgrade: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
@@ -527,30 +438,65 @@ export interface Client {
   propose_upgrade: ({caller, wasm_hash}: {caller: string, wasm_hash: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
-   * Construct and simulate a get_pending_admin transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a apply_price_feed transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  get_pending_admin: (options?: MethodOptions) => Promise<AssembledTransaction<Option<string>>>
+  apply_price_feed: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
-   * Construct and simulate a get_upgrade_timelock transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a position_manager transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  get_upgrade_timelock: (options?: MethodOptions) => Promise<AssembledTransaction<u64>>
+  position_manager: (options?: MethodOptions) => Promise<AssembledTransaction<string>>
 
   /**
-   * Construct and simulate a set_upgrade_timelock transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a cancel_price_feed transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  set_upgrade_timelock: ({caller, seconds}: {caller: string, seconds: u64}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+  cancel_price_feed: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
-   * Construct and simulate a cancel_admin_proposal transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Construct and simulate a deregister_market transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  cancel_admin_proposal: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+  deregister_market: ({caller, market_symbol}: {caller: string, market_symbol: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a propose_price_feed transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  propose_price_feed: ({caller, price_feed}: {caller: string, price_feed: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a apply_global_config transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  apply_global_config: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a apply_market_config transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  apply_market_config: ({caller, market_symbol}: {caller: string, market_symbol: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a cancel_global_config transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  cancel_global_config: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a cancel_market_config transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  cancel_market_config: ({caller, market_symbol}: {caller: string, market_symbol: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a propose_global_config transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  propose_global_config: ({caller, config}: {caller: string, config: GlobalConfig}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a propose_market_config transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  propose_market_config: ({caller, market_symbol, config}: {caller: string, market_symbol: string, config: MarketConfig}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
         /** Constructor/Initialization Args for the contract's `__constructor` method */
-        {admin}: {admin: string},
+        {config_manager, position_manager}: {config_manager: string, position_manager: string},
     /** Options for initializing a Client as well as for calling a method, with extras specific to deploying. */
     options: MethodOptions &
       Omit<ContractClientOptions, "contractId"> & {
@@ -562,46 +508,31 @@ export class Client extends ContractClient {
         format?: "hex" | "base64";
       }
   ): Promise<AssembledTransaction<T>> {
-    return ContractClient.deploy({admin}, options)
+    return ContractClient.deploy({config_manager, position_manager}, options)
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAAEkNvbmZpZ01hbmFnZXJFcnJvcgAAAAAADAAAAAAAAAAMVW5hdXRob3JpemVkAAABLAAAAAAAAAAPTm90UGVuZGluZ0FkbWluAAAAAS0AAAAAAAAADk5vUGVuZGluZ0FkbWluAAAAAAE2AAAAAAAAABBOb1BlbmRpbmdVcGdyYWRlAAABNwAAAAAAAAAOTm90SW5pdGlhbGl6ZWQAAAAAAUAAAAAAAAAAEkFscmVhZHlJbml0aWFsaXplZAAAAAABQQAAAAAAAAAZVXBncmFkZVRpbWVsb2NrTm90RWxhcHNlZAAAAAAAAUIAAAAAAAAAFEFkbWluUHJvcG9zYWxFeHBpcmVkAAABQwAAAAAAAAAUSW52YWxpZEFkbWluUHJvcG9zYWwAAAFKAAAAAAAAABdVcGdyYWRlVGltZWxvY2tUb29TaG9ydAAAAAFLAAAAAAAAABZVcGdyYWRlVGltZWxvY2tUb29Mb25nAAAAAAFMAAAAAAAAABNVcGdyYWRlSGFzaE1pc21hdGNoAAAAAU0=",
-        "AAAABQAAAAAAAAAAAAAAClJvbGVDaGFuZ2UAAAAAAAEAAAAEcm9sZQAAAAMAAAAAAAAABHJvbGUAAAARAAAAAAAAAAAAAAAHYWNjb3VudAAAAAATAAAAAAAAAAAAAAAIaXNfZ3JhbnQAAAABAAAAAAAAAAE=",
-        "AAAABQAAAAAAAAAAAAAADUFkbWluUHJvcG9zZWQAAAAAAAABAAAACWFkbWlucHJvcAAAAAAAAAIAAAAAAAAACHByb3Bvc2VyAAAAEwAAAAAAAAAAAAAACW5ld19hZG1pbgAAAAAAABMAAAAAAAAAAQ==",
-        "AAAABQAAAAAAAAAAAAAAFVVwZ3JhZGVUaW1lbG9ja1VwZGF0ZQAAAAAAAAEAAAAFdXBndGwAAAAAAAABAAAAAAAAABB0aW1lbG9ja19zZWNvbmRzAAAABgAAAAAAAAAB",
-        "AAAABQAAAAAAAAAAAAAAFkFkbWluUHJvcG9zYWxDYW5jZWxsZWQAAAAAAAEAAAAIYWRtaW5jeGwAAAABAAAAAAAAAAljYW5jZWxsZXIAAAAAAAATAAAAAAAAAAE=",
-        "AAAAAgAAAAAAAAAAAAAAClN0b3JhZ2VLZXkAAAAAAAMAAAAAAAAAAAAAAA9VcGdyYWRlVGltZWxvY2sAAAAAAAAAAAAAAAAMUGVuZGluZ0FkbWluAAAAAAAAAAAAAAAHVmVyc2lvbgA=",
-        "AAAAAQAAAAAAAAAAAAAAFFBlbmRpbmdBZG1pblByb3Bvc2FsAAAAAgAAAAAAAAAFYWRtaW4AAAAAAAATAAAAAAAAAAtwcm9wb3NlZF9hdAAAAAAG",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAAE01hcmtldEdvdmVybm9yRXJyb3IAAAAACQAAAAAAAAAMVW5hdXRob3JpemVkAAAB9AAAAAAAAAAPTm9QZW5kaW5nQ29uZmlnAAAAAf4AAAAAAAAAGENvbmZpZ1RpbWVsb2NrTm90RWxhcHNlZAAAAggAAAAAAAAAFUNvbmZpZ1Byb3Bvc2FsRXhwaXJlZAAAAAAAAgkAAAAAAAAADUludmFsaWRDb25maWcAAAAAAAISAAAAAAAAABBQcmljZVVuYXZhaWxhYmxlAAACEwAAAAAAAAAQVXBncmFkZU5vUGVuZGluZwAAAhwAAAAAAAAAGVVwZ3JhZGVUaW1lbG9ja05vdEVsYXBzZWQAAAAAAAIdAAAAAAAAABNVcGdyYWRlSGFzaE1pc21hdGNoAAAAAh4=",
+        "AAAABQAAAAAAAAAAAAAAEVByaWNlRmVlZFByb3Bvc2VkAAAAAAAAAQAAAAhmZWVkcHJvcAAAAAMAAAAAAAAABmhlYWRlcgAAAAAH0AAAAAtFdmVudEhlYWRlcgAAAAAAAAAAAAAAAApwcmljZV9mZWVkAAAAAAATAAAAAAAAAAAAAAAMZWZmZWN0aXZlX2F0AAAABgAAAAAAAAAB",
+        "AAAABQAAAAAAAAAAAAAAEVByb3Bvc2FsQ2FuY2VsbGVkAAAAAAAAAQAAAAljZmdjYW5jZWwAAAAAAAADAAAAAAAAAAZoZWFkZXIAAAAAB9AAAAALRXZlbnRIZWFkZXIAAAAAAAAAAAAAAAAGbWFya2V0AAAAAAPoAAAAEQAAAAAAAAAAAAAACnByaWNlX2ZlZWQAAAAAAAEAAAAAAAAAAQ==",
+        "AAAABQAAAAAAAAAAAAAAFUNvbmZpZ3VyYXRpb25Qcm9wb3NlZAAAAAAAAAEAAAAHY2ZncHJvcAAAAAADAAAAAAAAAAZoZWFkZXIAAAAAB9AAAAALRXZlbnRIZWFkZXIAAAAAAAAAAAAAAAAGbWFya2V0AAAAAAPoAAAAEQAAAAAAAAAAAAAADGVmZmVjdGl2ZV9hdAAAAAYAAAAAAAAAAQ==",
+        "AAAAAgAAAAAAAAAAAAAAA0tleQAAAAAGAAAAAAAAAAAAAAANQ29uZmlnTWFuYWdlcgAAAAAAAAAAAAAAAAAAD1Bvc2l0aW9uTWFuYWdlcgAAAAAAAAAAAAAAABNQZW5kaW5nR2xvYmFsQ29uZmlnAAAAAAEAAAAAAAAAE1BlbmRpbmdNYXJrZXRDb25maWcAAAAAAQAAABEAAAAAAAAAAAAAABBQZW5kaW5nUHJpY2VGZWVkAAAAAAAAAAAAAAAHVmVyc2lvbgA=",
         "AAAAAAAAAAAAAAAHbWlncmF0ZQAAAAACAAAAAAAAAARkYXRhAAAH0AAAAA1NaWdyYXRpb25EYXRhAAAAAAAAAAAAAAhvcGVyYXRvcgAAABMAAAAA",
         "AAAAAAAAAAAAAAAHdXBncmFkZQAAAAACAAAAAAAAAA1uZXdfd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAAAAAACG9wZXJhdG9yAAAAEwAAAAA=",
-        "AAAAAAAAAAAAAAAIaGFzX3JvbGUAAAACAAAAAAAAAARyb2xlAAAAEQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAQAAAAE=",
-        "AAAAAAAAAAAAAAAKZ3JhbnRfcm9sZQAAAAAAAwAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAARyb2xlAAAAEQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAA==",
-        "AAAAAAAAAAAAAAALcmV2b2tlX3JvbGUAAAAAAwAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAARyb2xlAAAAEQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAA==",
-        "AAAAAAAAAAAAAAAMYWNjZXB0X2FkbWluAAAAAQAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAA=",
-        "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAEAAAAAAAAABWFkbWluAAAAAAAAEwAAAAA=",
-        "AAAAAAAAAAAAAAANcHJvcG9zZV9hZG1pbgAAAAAAAAIAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAA=",
+        "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAIAAAAAAAAADmNvbmZpZ19tYW5hZ2VyAAAAAAATAAAAAAAAABBwb3NpdGlvbl9tYW5hZ2VyAAAAEwAAAAA=",
         "AAAAAAAAAAAAAAAOY2FuY2VsX3VwZ3JhZGUAAAAAAAEAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAA=",
         "AAAAAAAAAAAAAAAPcHJvcG9zZV91cGdyYWRlAAAAAAIAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAJd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAA",
-        "AAAAAAAAAAAAAAARZ2V0X3BlbmRpbmdfYWRtaW4AAAAAAAAAAAAAAQAAA+gAAAAT",
-        "AAAAAAAAAAAAAAAUZ2V0X3VwZ3JhZGVfdGltZWxvY2sAAAAAAAAAAQAAAAY=",
-        "AAAAAAAAAAAAAAAUc2V0X3VwZ3JhZGVfdGltZWxvY2sAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAAB3NlY29uZHMAAAAABgAAAAA=",
-        "AAAAAAAAAAAAAAAVY2FuY2VsX2FkbWluX3Byb3Bvc2FsAAAAAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAA==",
-        "AAAABAAAAAAAAAAAAAAAEVJvbGVUcmFuc2ZlckVycm9yAAAAAAAAAwAAAAAAAAARTm9QZW5kaW5nVHJhbnNmZXIAAAAAAAiYAAAAAAAAABZJbnZhbGlkTGl2ZVVudGlsTGVkZ2VyAAAAAAiZAAAAAAAAABVJbnZhbGlkUGVuZGluZ0FjY291bnQAAAAAAAia",
-        "AAAABQAAACVFdmVudCBlbWl0dGVkIHdoZW4gYSByb2xlIGlzIGdyYW50ZWQuAAAAAAAAAAAAAAtSb2xlR3JhbnRlZAAAAAABAAAADHJvbGVfZ3JhbnRlZAAAAAMAAAAAAAAABHJvbGUAAAARAAAAAQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAI=",
-        "AAAABQAAACVFdmVudCBlbWl0dGVkIHdoZW4gYSByb2xlIGlzIHJldm9rZWQuAAAAAAAAAAAAAAtSb2xlUmV2b2tlZAAAAAABAAAADHJvbGVfcmV2b2tlZAAAAAMAAAAAAAAABHJvbGUAAAARAAAAAQAAAAAAAAAHYWNjb3VudAAAAAATAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAI=",
-        "AAAABQAAAC9FdmVudCBlbWl0dGVkIHdoZW4gdGhlIGFkbWluIHJvbGUgaXMgcmVub3VuY2VkLgAAAAAAAAAADkFkbWluUmVub3VuY2VkAAAAAAABAAAAD2FkbWluX3Jlbm91bmNlZAAAAAABAAAAAAAAAAVhZG1pbgAAAAAAABMAAAABAAAAAg==",
-        "AAAABQAAACtFdmVudCBlbWl0dGVkIHdoZW4gYSByb2xlIGFkbWluIGlzIGNoYW5nZWQuAAAAAAAAAAAQUm9sZUFkbWluQ2hhbmdlZAAAAAEAAAAScm9sZV9hZG1pbl9jaGFuZ2VkAAAAAAADAAAAAAAAAARyb2xlAAAAEQAAAAEAAAAAAAAAE3ByZXZpb3VzX2FkbWluX3JvbGUAAAAAEQAAAAAAAAAAAAAADm5ld19hZG1pbl9yb2xlAAAAAAARAAAAAAAAAAI=",
-        "AAAABAAAAAAAAAAAAAAAEkFjY2Vzc0NvbnRyb2xFcnJvcgAAAAAACwAAAAAAAAAMVW5hdXRob3JpemVkAAAH0AAAAAAAAAALQWRtaW5Ob3RTZXQAAAAH0QAAAAAAAAAQSW5kZXhPdXRPZkJvdW5kcwAAB9IAAAAAAAAAEUFkbWluUm9sZU5vdEZvdW5kAAAAAAAH0wAAAAAAAAASUm9sZUNvdW50SXNOb3RaZXJvAAAAAAfUAAAAAAAAAAxSb2xlTm90Rm91bmQAAAfVAAAAAAAAAA9BZG1pbkFscmVhZHlTZXQAAAAH1gAAAAAAAAALUm9sZU5vdEhlbGQAAAAH1wAAAAAAAAALUm9sZUlzRW1wdHkAAAAH2AAAAAAAAAASVHJhbnNmZXJJblByb2dyZXNzAAAAAAfZAAAAAAAAABBNYXhSb2xlc0V4Y2VlZGVkAAAH2g==",
-        "AAAABQAAADJFdmVudCBlbWl0dGVkIHdoZW4gYW4gYWRtaW4gdHJhbnNmZXIgaXMgY29tcGxldGVkLgAAAAAAAAAAABZBZG1pblRyYW5zZmVyQ29tcGxldGVkAAAAAAABAAAAGGFkbWluX3RyYW5zZmVyX2NvbXBsZXRlZAAAAAIAAAAAAAAACW5ld19hZG1pbgAAAAAAABMAAAABAAAAAAAAAA5wcmV2aW91c19hZG1pbgAAAAAAEwAAAAAAAAAC",
-        "AAAABQAAADJFdmVudCBlbWl0dGVkIHdoZW4gYW4gYWRtaW4gdHJhbnNmZXIgaXMgaW5pdGlhdGVkLgAAAAAAAAAAABZBZG1pblRyYW5zZmVySW5pdGlhdGVkAAAAAAABAAAAGGFkbWluX3RyYW5zZmVyX2luaXRpYXRlZAAAAAMAAAAAAAAADWN1cnJlbnRfYWRtaW4AAAAAAAATAAAAAQAAAAAAAAAJbmV3X2FkbWluAAAAAAAAEwAAAAAAAAAAAAAAEWxpdmVfdW50aWxfbGVkZ2VyAAAAAAAABAAAAAAAAAAC",
-        "AAAABAAAAAAAAAAAAAAADE93bmFibGVFcnJvcgAAAAMAAAAAAAAAC093bmVyTm90U2V0AAAACDQAAAAAAAAAElRyYW5zZmVySW5Qcm9ncmVzcwAAAAAINQAAAAAAAAAPT3duZXJBbHJlYWR5U2V0AAAACDY=",
-        "AAAABQAAADZFdmVudCBlbWl0dGVkIHdoZW4gYW4gb3duZXJzaGlwIHRyYW5zZmVyIGlzIGluaXRpYXRlZC4AAAAAAAAAAAART3duZXJzaGlwVHJhbnNmZXIAAAAAAAABAAAAEm93bmVyc2hpcF90cmFuc2ZlcgAAAAAAAwAAAAAAAAAJb2xkX293bmVyAAAAAAAAEwAAAAAAAAAAAAAACW5ld19vd25lcgAAAAAAABMAAAAAAAAAAAAAABFsaXZlX3VudGlsX2xlZGdlcgAAAAAAAAQAAAAAAAAAAg==",
-        "AAAABQAAACpFdmVudCBlbWl0dGVkIHdoZW4gb3duZXJzaGlwIGlzIHJlbm91bmNlZC4AAAAAAAAAAAAST3duZXJzaGlwUmVub3VuY2VkAAAAAAABAAAAE293bmVyc2hpcF9yZW5vdW5jZWQAAAAAAQAAAAAAAAAJb2xkX293bmVyAAAAAAAAEwAAAAAAAAAC",
-        "AAAABQAAADZFdmVudCBlbWl0dGVkIHdoZW4gYW4gb3duZXJzaGlwIHRyYW5zZmVyIGlzIGNvbXBsZXRlZC4AAAAAAAAAAAAaT3duZXJzaGlwVHJhbnNmZXJDb21wbGV0ZWQAAAAAAAEAAAAcb3duZXJzaGlwX3RyYW5zZmVyX2NvbXBsZXRlZAAAAAEAAAAAAAAACW5ld19vd25lcgAAAAAAABMAAAAAAAAAAg==",
-        "AAAAAQAAADFTdG9yYWdlIGtleSBmb3IgZW51bWVyYXRpb24gb2YgYWNjb3VudHMgcGVyIHJvbGUuAAAAAAAAAAAAAA5Sb2xlQWNjb3VudEtleQAAAAAAAgAAAAAAAAAFaW5kZXgAAAAAAAAEAAAAAAAAAARyb2xlAAAAEQ==",
-        "AAAAAgAAADxTdG9yYWdlIGtleXMgZm9yIHRoZSBkYXRhIGFzc29jaWF0ZWQgd2l0aCB0aGUgYWNjZXNzIGNvbnRyb2wAAAAAAAAAF0FjY2Vzc0NvbnRyb2xTdG9yYWdlS2V5AAAAAAcAAAAAAAAAAAAAAA1FeGlzdGluZ1JvbGVzAAAAAAAAAQAAAAAAAAAMUm9sZUFjY291bnRzAAAAAQAAB9AAAAAOUm9sZUFjY291bnRLZXkAAAAAAAEAAAAAAAAAB0hhc1JvbGUAAAAAAgAAABMAAAARAAAAAQAAAAAAAAARUm9sZUFjY291bnRzQ291bnQAAAAAAAABAAAAEQAAAAEAAAAAAAAACVJvbGVBZG1pbgAAAAAAAAEAAAARAAAAAAAAAAAAAAAFQWRtaW4AAAAAAAAAAAAAAAAAAAxQZW5kaW5nQWRtaW4=",
-        "AAAAAgAAACNTdG9yYWdlIGtleXMgZm9yIGBPd25hYmxlYCB1dGlsaXR5LgAAAAAAAAAAEU93bmFibGVTdG9yYWdlS2V5AAAAAAAAAgAAAAAAAAAAAAAABU93bmVyAAAAAAAAAAAAAAAAAAAMUGVuZGluZ093bmVy",
+        "AAAAAAAAAAAAAAAQYXBwbHlfcHJpY2VfZmVlZAAAAAEAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAA=",
+        "AAAAAAAAAAAAAAAQcG9zaXRpb25fbWFuYWdlcgAAAAAAAAABAAAAEw==",
+        "AAAAAAAAAAAAAAARY2FuY2VsX3ByaWNlX2ZlZWQAAAAAAAABAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAA",
+        "AAAAAAAAAAAAAAARZGVyZWdpc3Rlcl9tYXJrZXQAAAAAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAADW1hcmtldF9zeW1ib2wAAAAAAAARAAAAAA==",
+        "AAAAAAAAAAAAAAAScHJvcG9zZV9wcmljZV9mZWVkAAAAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAACnByaWNlX2ZlZWQAAAAAABMAAAAA",
+        "AAAAAAAAAAAAAAATYXBwbHlfZ2xvYmFsX2NvbmZpZwAAAAABAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAA",
+        "AAAAAAAAAAAAAAATYXBwbHlfbWFya2V0X2NvbmZpZwAAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAADW1hcmtldF9zeW1ib2wAAAAAAAARAAAAAA==",
+        "AAAAAAAAAAAAAAAUY2FuY2VsX2dsb2JhbF9jb25maWcAAAABAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAA",
+        "AAAAAAAAAAAAAAAUY2FuY2VsX21hcmtldF9jb25maWcAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAADW1hcmtldF9zeW1ib2wAAAAAAAARAAAAAA==",
+        "AAAAAAAAAAAAAAAVcHJvcG9zZV9nbG9iYWxfY29uZmlnAAAAAAAAAgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAZjb25maWcAAAAAB9AAAAAMR2xvYmFsQ29uZmlnAAAAAA==",
+        "AAAAAAAAAAAAAAAVcHJvcG9zZV9tYXJrZXRfY29uZmlnAAAAAAAAAwAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAA1tYXJrZXRfc3ltYm9sAAAAAAAAEQAAAAAAAAAGY29uZmlnAAAAAAfQAAAADE1hcmtldENvbmZpZwAAAAA=",
         "AAAAAQAAAAAAAAAAAAAACVByaWNlRGF0YQAAAAAAAAIAAAAAAAAABXByaWNlAAAAAAAACwAAAAAAAAAJdGltZXN0YW1wAAAAAAAABg==",
         "AAAAAQAAAAAAAAAAAAAADFN0YW1wZWRQcmljZQAAAAIAAAAAAAAAC29ic2VydmVkX2F0AAAAAAYAAAAAAAAABXByaWNlAAAAAAAACw==",
         "AAAAAQAAAAAAAAAAAAAABk1hcmtldAAAAAAAEAAAAAAAAAAGY29uZmlnAAAAAAfQAAAADE1hcmtldENvbmZpZwAAAAAAAAASY3VycmVudF9wYXllcl9yYXRlAAAAAAALAAAAAAAAABJjdXJyZW50X3BheWVyX3NpZGUAAAAAB9AAAAAJUGF5ZXJTaWRlAAAAAAAAAAAAABdsYXN0X2Z1bmRpbmdfY2hlY2twb2ludAAAAAAGAAAAAAAAAARsb25nAAAH0AAAAApNYXJrZXRTaWRlAAAAAAAAAAAAFWxvbmdfcGF5ZXJfcmVtYWluZGVycwAAAAAAB9AAAAAOUmVtYWluZGVyR3JvdXAAAAAAAAAAAAAUbHBfYmFja2VkX2luZGV4X2xvbmcAAAALAAAAAAAAABVscF9iYWNrZWRfaW5kZXhfc2hvcnQAAAAAAAALAAAAAAAAABhwZW5kaW5nX3JlY2VpdmVyX2Z1bmRpbmcAAAALAAAAAAAAABpyZWNlaXZlcl9iYWNrZWRfaW5kZXhfbG9uZwAAAAAACwAAAAAAAAAbcmVjZWl2ZXJfYmFja2VkX2luZGV4X3Nob3J0AAAAAAsAAAAAAAAAE3JlY2VpdmVyX2luZGV4X2xvbmcAAAAACwAAAAAAAAAUcmVjZWl2ZXJfaW5kZXhfc2hvcnQAAAALAAAAAAAAAAVzaG9ydAAAAAAAB9AAAAAKTWFya2V0U2lkZQAAAAAAAAAAABZzaG9ydF9wYXllcl9yZW1haW5kZXJzAAAAAAfQAAAADlJlbWFpbmRlckdyb3VwAAAAAAAAAAAACHNrZXdfZW1hAAAACw==",
@@ -658,16 +589,18 @@ export class Client extends ContractClient {
   public readonly fromJSON = {
     migrate: this.txFromJSON<null>,
         upgrade: this.txFromJSON<null>,
-        has_role: this.txFromJSON<boolean>,
-        grant_role: this.txFromJSON<null>,
-        revoke_role: this.txFromJSON<null>,
-        accept_admin: this.txFromJSON<null>,
-        propose_admin: this.txFromJSON<null>,
         cancel_upgrade: this.txFromJSON<null>,
         propose_upgrade: this.txFromJSON<null>,
-        get_pending_admin: this.txFromJSON<Option<string>>,
-        get_upgrade_timelock: this.txFromJSON<u64>,
-        set_upgrade_timelock: this.txFromJSON<null>,
-        cancel_admin_proposal: this.txFromJSON<null>
+        apply_price_feed: this.txFromJSON<null>,
+        position_manager: this.txFromJSON<string>,
+        cancel_price_feed: this.txFromJSON<null>,
+        deregister_market: this.txFromJSON<null>,
+        propose_price_feed: this.txFromJSON<null>,
+        apply_global_config: this.txFromJSON<null>,
+        apply_market_config: this.txFromJSON<null>,
+        cancel_global_config: this.txFromJSON<null>,
+        cancel_market_config: this.txFromJSON<null>,
+        propose_global_config: this.txFromJSON<null>,
+        propose_market_config: this.txFromJSON<null>
   }
 }

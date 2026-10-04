@@ -1,0 +1,27 @@
+name: contracts
+
+# Tests the contracts, then builds and optimizes the WASM exactly as
+# `make optimize` does, which fails if any contract exceeds the network's
+# 131,072-byte size limit.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: binaryen (pinned to the Makefile's WASM_OPT_VERSION)
+        run: |
+          v=$(sed -n 's/^WASM_OPT_VERSION = //p' Makefile)
+          curl -sSL "https://github.com/WebAssembly/binaryen/releases/download/version_${v}/binaryen-version_${v}-x86_64-linux.tar.gz" | tar xz
+          echo "$PWD/binaryen-version_${v}/bin" >> "$GITHUB_PATH"
+      - run: cargo test --workspace
+      - run: make optimize

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy.sh — Fresh deploy of the protocol contracts: ConfigManager,
-# PositionManager, Vault and RequestRouter. Uses identities created by
+# MarketGovernor, PositionManager, Vault and RequestRouter. Uses identities created by
 # scripts/provision-keys.sh.
 #
 #   NETWORK_KEY=local    bash scripts/deploy.sh
@@ -132,6 +132,7 @@ deploy() {
   fi
   echo "Deploying $name..." >&2
   local args=(--wasm "$wasm" --source admin --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE")
+  [[ -n "${SALT:-}" ]] && args+=(--salt "$SALT")
   local contract_id
   if [[ $# -gt 0 ]]; then
     contract_id=$(stellar contract deploy "${args[@]}" -- "$@")
@@ -195,14 +196,32 @@ CM_ID=$(deploy config-manager --admin "$ADMIN_ADDR")
 CM_LEDGER=$(current_ledger)
 echo "  config-manager : $CM_ID"
 
+# The PositionManager pins its governor at construction and the governor pins
+# the PositionManager, so the governor's address is derived from a salt first,
+# the PM is deployed with it, and the governor is then deployed at that salt.
+GOV_SALT=$(openssl rand -hex 32)
+GOV_ID=$(stellar contract id wasm --salt "$GOV_SALT" --source-account admin \
+  --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE")
+
 # The Vault binds its PositionManager in its constructor, so PM comes first;
 # `set_vault` closes the cycle.
 PM_ID=$(deploy position-manager \
   --config_manager "$CM_ID" \
+  --governor "$GOV_ID" \
   --price_feed "$PRICE_FEED_ADDR" \
   --config "$GLOBAL_CONFIG")
 PM_LEDGER=$(current_ledger)
 echo "  position-mgr   : $PM_ID"
+
+DEPLOYED_GOV=$(SALT="$GOV_SALT" deploy market-governor \
+  --config_manager "$CM_ID" \
+  --position_manager "$PM_ID")
+GOV_LEDGER=$(current_ledger)
+if [[ "$DEPLOYED_GOV" != "$GOV_ID" ]]; then
+  echo "❌ Governor landed at $DEPLOYED_GOV, but the PositionManager pinned $GOV_ID"
+  exit 1
+fi
+echo "  market-governor: $GOV_ID"
 
 VAULT_ID=$(deploy vault \
   --asset_address "$ASSET_ADDR" \
@@ -249,7 +268,7 @@ echo ""
 echo "=== Registering markets ==="
 for ticker in "${TICKERS[@]}"; do
   echo "  propose_market_config($ticker)"
-  invoke --id "$PM_ID" -- propose_market_config \
+  invoke --id "$GOV_ID" -- propose_market_config \
     --caller "$ADMIN_ADDR" --market_symbol "$ticker" --config "$MARKET_CONFIG"
 done
 
@@ -261,6 +280,10 @@ expect_eq "position-manager.price_feed" \
   "$(invoke --send=no --id "$PM_ID" -- price_feed | unquote)" "$PRICE_FEED_ADDR"
 expect_eq "vault.query_asset" \
   "$(invoke --send=no --id "$VAULT_ID" -- query_asset | unquote)" "$ASSET_ADDR"
+expect_eq "position-manager.governor" \
+  "$(invoke --send=no --id "$PM_ID" -- governor | unquote)" "$GOV_ID"
+expect_eq "market-governor.position_manager" \
+  "$(invoke --send=no --id "$GOV_ID" -- position_manager | unquote)" "$PM_ID"
 expect_eq "active market count" \
   "$(invoke --send=no --id "$PM_ID" -- active_markets | jq length)" "${#TICKERS[@]}"
 # Reaches the vault through PM's stored address, so it proves `set_vault`.
@@ -289,6 +312,7 @@ jq \
   --arg rr "$REQUEST_ROUTER_ID"     --argjson rrL    "${REQUEST_ROUTER_LEDGER:-0}" \
   --arg pm "$PM_ID"                --argjson pmL    "${PM_LEDGER:-0}" \
   --arg cm "$CM_ID"                --argjson cmL    "${CM_LEDGER:-0}" \
+  --arg gov "$GOV_ID"              --argjson govL   "${GOV_LEDGER:-0}" \
   --arg feed "$PRICE_FEED_ADDR" \
   --arg mockToken "$MOCK_TOKEN_ID"   --argjson mockTokenL  "${MOCK_TOKEN_LEDGER:-0}" \
   --arg mockOracle "$MOCK_ORACLE_ID" --argjson mockOracleL "${MOCK_ORACLE_LEDGER:-0}" \
@@ -297,6 +321,7 @@ jq \
        requestRouter:   {address: $rr,         startLedger: $rrL},
        positionManager: {address: $pm,         startLedger: $pmL},
        configManager:   {address: $cm,         startLedger: $cmL},
+       governor:        {address: $gov,        startLedger: $govL},
        oracleRouter:    {address: $feed,       startLedger: 0},
        mockToken:       {address: $mockToken,  startLedger: $mockTokenL}}
    | if $mockOracle == "" then . else .[$net].contracts.oracle = {address: $mockOracle, startLedger: $mockOracleL} end' \
