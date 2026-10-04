@@ -9,8 +9,15 @@ DEPLOY_CONTRACTS = config-manager vault request-router position-manager
 
 .PHONY: build optimize bind check clean up down reset provision-keys provision-keys-testnet deploy deploy-testnet deploy-mainnet deploy-testnet-full upgrade-propose upgrade-execute add-market local
 
+# Panic locations embed absolute source paths. Remap them to fixed prefixes so
+# the same commit builds byte-identical WASM on any machine.
+CARGO_HOME ?= $(HOME)/.cargo
+REPRO_RUSTFLAGS = --remap-path-prefix=$(CARGO_HOME)=/cargo \
+	--remap-path-prefix=$(shell rustc --print sysroot)=/rustc \
+	--remap-path-prefix=$(CURDIR)=/build
+
 build:
-	cargo build --target wasm32v1-none --release \
+	RUSTFLAGS="$(REPRO_RUSTFLAGS)" cargo build --target wasm32v1-none --release \
 		-p vault \
 		-p request-router \
 		-p position-manager \
@@ -34,6 +41,7 @@ optimize: build
 			-o "$${wasm%.wasm}.optimized.wasm" || exit 1; \
 	done
 	bash scripts/check-sizes.sh
+	@cd $(WASM_DIR) && shasum -a 256 *.optimized.wasm
 
 bind: optimize
 	bash scripts/gen-bindings.sh
