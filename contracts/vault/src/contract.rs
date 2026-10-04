@@ -411,10 +411,6 @@ impl VaultInterface for VaultContract {
     fn cancel_upgrade(env: Env, caller: Address) {
         <Self as TimelockedUpgradeable>::cancel(&env, caller);
     }
-
-    fn bump_vault_state(env: Env) {
-        shared::bump_instance_ttl(&env);
-    }
 }
 
 #[contractimpl]

@@ -355,36 +355,3 @@ pub fn clear_pending_market_config(env: &Env, market: &Symbol) {
         .instance()
         .remove(&StorageKey::PendingMarketConfig(market.clone()));
 }
-
-fn extend(env: &Env, key: &StorageKey) {
-    env.storage()
-        .persistent()
-        .extend_ttl(key, SHARED_THRESHOLD, SHARED_BUMP);
-}
-
-pub fn bump_pending_action(env: &Env, id: u64) {
-    extend(env, &StorageKey::PendingAction(id));
-}
-
-pub fn bump_market(env: &Env, market: &Symbol) {
-    extend(env, &StorageKey::Market(market.clone()));
-}
-
-pub fn bump_referral_code(env: &Env, code: &Symbol) {
-    extend(env, &StorageKey::ReferralCode(code.clone()));
-}
-
-pub fn bump_referrer(env: &Env, trader: &Address) {
-    extend(env, &StorageKey::Referrer(trader.clone()));
-}
-
-pub fn bump_referral_balance(env: &Env, referrer: &Address) {
-    extend(env, &StorageKey::ReferralBalance(referrer.clone()));
-}
-
-pub fn bump_unclaimed_payout(env: &Env, owner: &Address) {
-    let key = StorageKey::UnclaimedPayout(owner.clone());
-    if env.storage().persistent().has(&key) {
-        extend(env, &key);
-    }
-}

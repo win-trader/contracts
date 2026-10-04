@@ -6,7 +6,6 @@ pub trait ConfigManager {
     fn grant_role(env: Env, caller: Address, role: Symbol, account: Address);
     fn revoke_role(env: Env, caller: Address, role: Symbol, account: Address);
     fn has_role(env: Env, role: Symbol, account: Address) -> bool;
-    fn bump_config_state(env: Env);
 
     fn propose_admin(env: Env, caller: Address, new_admin: Address);
     fn accept_admin(env: Env, new_admin: Address);

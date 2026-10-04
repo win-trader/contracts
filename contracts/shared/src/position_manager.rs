@@ -219,19 +219,4 @@ pub trait PositionManager {
 
     /// Cancel a pending upgrade (PAUSER).
     fn cancel_upgrade(env: Env, caller: Address);
-
-    /// Extend a position's TTL. Open to anyone.
-    fn bump_position(env: Env, position_id: u64);
-
-    /// Extend a pending action's TTL. Open to anyone.
-    fn bump_pending_action(env: Env, action_id: u64);
-
-    /// Extend a market's TTL. Open to anyone.
-    fn bump_market_entry(env: Env, market: Symbol);
-
-    /// Extend referral entries' TTL. Open to anyone.
-    fn bump_referral_entry(env: Env, code: Symbol, trader: Address, referrer: Address);
-
-    /// Extend an owner's undelivered-payout entry TTL. Open to anyone.
-    fn bump_unclaimed_payout(env: Env, owner: Address);
 }

@@ -573,36 +573,6 @@ impl PositionManager for PositionManagerContract {
     fn cancel_upgrade(env: Env, caller: Address) {
         <Self as TimelockedUpgradeable>::cancel(&env, caller);
     }
-
-    fn bump_position(env: Env, position_id: u64) {
-        let position = storage::get_position(&env, position_id);
-        storage::save_position(&env, &position);
-        shared::bump_instance_ttl(&env);
-    }
-
-    fn bump_pending_action(env: Env, action_id: u64) {
-        storage::get_pending_action(&env, action_id);
-        storage::bump_pending_action(&env, action_id);
-        shared::bump_instance_ttl(&env);
-    }
-
-    fn bump_market_entry(env: Env, market: Symbol) {
-        storage::get_market(&env, &market);
-        storage::bump_market(&env, &market);
-        shared::bump_instance_ttl(&env);
-    }
-
-    fn bump_referral_entry(env: Env, code: Symbol, trader: Address, referrer: Address) {
-        storage::bump_referral_code(&env, &code);
-        storage::bump_referrer(&env, &trader);
-        storage::bump_referral_balance(&env, &referrer);
-        shared::bump_instance_ttl(&env);
-    }
-
-    fn bump_unclaimed_payout(env: Env, owner: Address) {
-        storage::bump_unclaimed_payout(&env, &owner);
-        shared::bump_instance_ttl(&env);
-    }
 }
 
 #[contractimpl]

@@ -78,10 +78,6 @@ impl ConfigManager for ConfigManagerContract {
         has_role_local(&env, &role, &account)
     }
 
-    fn bump_config_state(env: Env) {
-        bump_instance_ttl(&env);
-    }
-
     fn propose_admin(env: Env, caller: Address, new_admin: Address) {
         require_admin_with_auth(&env, &caller);
         if caller == new_admin {

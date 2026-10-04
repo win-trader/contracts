@@ -84,7 +84,4 @@ pub trait VaultInterface {
 
     /// Cancel a pending upgrade (PAUSER).
     fn cancel_upgrade(env: Env, caller: Address);
-
-    /// Extend instance storage TTL. Open to anyone.
-    fn bump_vault_state(env: Env);
 }

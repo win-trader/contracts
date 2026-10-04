@@ -67,9 +67,6 @@ fn the_authority_gates_refuse_an_outsider_and_the_open_ones_do_not() {
     // §7.0 — "a checkpoint pays no reward and moves no value between parties,
     // so there is nothing for an allowlist to protect."
     c.update_indices(&outsider, &p.market);
-    // §12.4 — "every persistent entry is extendable permissionlessly."
-    c.bump_position(&id);
-    c.bump_market_entry(&p.market);
     p.assert_conserved("after an outsider exercised the open entry points");
 }
 
