@@ -139,12 +139,6 @@ pub trait PositionManager {
     /// The global configuration.
     fn global_config(env: Env) -> GlobalConfig;
 
-    /// Guaranteed receiver funding not yet credited to positions.
-    fn pending_receiver_funding_total(env: Env) -> i128;
-
-    /// Collected protocol revenue not yet claimed.
-    fn protocol_claimable_total(env: Env) -> i128;
-
     /// All non-LP claims on vault cash.
     fn non_lp_claims(env: Env) -> i128;
 
@@ -159,9 +153,6 @@ pub trait PositionManager {
 
     /// An owner's undelivered payouts.
     fn unclaimed_payout(env: Env, owner: Address) -> i128;
-
-    /// All undelivered payouts.
-    fn unclaimed_payout_total(env: Env) -> i128;
 
     /// Pause new exposure; exits stay open (PAUSER).
     fn pause(env: Env, caller: Address);

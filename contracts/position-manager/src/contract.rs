@@ -367,7 +367,6 @@ impl PositionManager for PositionManagerContract {
         storage::get_position(&env, position_id)
     }
 
-
     fn get_market(env: Env, market: Symbol) -> Market {
         storage::get_market(&env, &market)
     }
@@ -378,14 +377,6 @@ impl PositionManager for PositionManagerContract {
 
     fn global_config(env: Env) -> GlobalConfig {
         storage::get_global_config(&env)
-    }
-
-    fn pending_receiver_funding_total(env: Env) -> i128 {
-        storage::get_ledger(&env).pending_receiver_funding_total
-    }
-
-    fn protocol_claimable_total(env: Env) -> i128 {
-        storage::get_ledger(&env).protocol_claimable_total
     }
 
     fn non_lp_claims(env: Env) -> i128 {
@@ -443,10 +434,6 @@ impl PositionManager for PositionManagerContract {
         storage::get_unclaimed_payout(&env, &owner)
     }
 
-    fn unclaimed_payout_total(env: Env) -> i128 {
-        storage::get_ledger(&env).unclaimed_payout_total
-    }
-
     fn pause(env: Env, caller: Address) {
         require_role(&env, &caller, ROLE_PAUSER);
         storage::save_paused(&env, true);
@@ -468,8 +455,9 @@ impl PositionManager for PositionManagerContract {
     }
 }
 
-// Test-only: off-chain previews come from @win-trader/protocol-math, and the
-// release build cannot spare the bytes.
+// Test-only views: nothing on chain or off chain calls them, and the release
+// build cannot spare the bytes. Previews come from @win-trader/protocol-math;
+// the totals are in `accounting_snapshot` and the event stream.
 #[cfg(feature = "testutils")]
 #[contractimpl]
 impl PositionManagerContract {
@@ -484,6 +472,18 @@ impl PositionManagerContract {
             funding_received: pending.funding_received,
             borrow: pending.borrow,
         }
+    }
+
+    pub fn pending_receiver_funding_total(env: Env) -> i128 {
+        storage::get_ledger(&env).pending_receiver_funding_total
+    }
+
+    pub fn protocol_claimable_total(env: Env) -> i128 {
+        storage::get_ledger(&env).protocol_claimable_total
+    }
+
+    pub fn unclaimed_payout_total(env: Env) -> i128 {
+        storage::get_ledger(&env).unclaimed_payout_total
     }
 }
 

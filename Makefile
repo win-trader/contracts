@@ -19,11 +19,19 @@ build:
 		-p mock-token \
 		-p mock-oracle
 
+# Binaryen is pinned so the optimized WASM, and so its hash, is reproducible.
+# Features are limited to what rustc's wasm32v1-none output already uses, so
+# the optimizer cannot introduce an instruction the Soroban VM rejects.
+WASM_OPT_VERSION = 133
+
 optimize: build
+	@wasm-opt --version | grep -q "version $(WASM_OPT_VERSION)$$" || \
+		{ echo "wasm-opt (binaryen) $(WASM_OPT_VERSION) is required: brew install binaryen"; exit 1; }
 	@for contract in $(CONTRACTS); do \
 		wasm="$(WASM_DIR)/$$(echo $$contract | tr '-' '_').wasm"; \
 		echo "Optimizing $$wasm..."; \
-		stellar contract optimize --wasm "$$wasm"; \
+		wasm-opt "$$wasm" --mvp-features --enable-mutable-globals --enable-sign-ext -Oz \
+			-o "$${wasm%.wasm}.optimized.wasm" || exit 1; \
 	done
 	bash scripts/check-sizes.sh
 

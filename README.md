@@ -24,6 +24,7 @@ This is one of four repos:
 ## Prerequisites
 
 - Rust + `wasm32v1-none` target, and the `stellar` CLI
+- binaryen `wasm-opt` version 133 (`brew install binaryen`), pinned so optimized WASM hashes are reproducible
 - Node ≥ 18 and `pnpm`
 
 ## Common commands
@@ -31,7 +32,7 @@ This is one of four repos:
 Contracts (Rust):
 
 - `make build` — compile contracts to WASM
-- `make optimize` — optimize the WASM with `stellar contract optimize`
+- `make optimize` — optimize the WASM with `wasm-opt`, then fail if any contract exceeds the 131,072-byte network limit
 - `make check` — type-check the Rust workspace
 - `make bind` — `optimize` + generate and build the TS bindings into `packages/bindings/`
 
