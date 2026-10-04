@@ -3,7 +3,8 @@
 | | |
 |---|---|
 | **Scope** | `contracts/{config-manager,position-manager,vault,request-router,shared}` (~10.6k LOC Soroban/Rust, `soroban-sdk 23.5.2`) plus the deploy/upgrade scripts in `scripts/` |
-| **Commit** | `48c846e` (branch `fix/review-findings`) |
+| **Commit** | Modelled at `48c846e`; findings re-checked at `b6ffbe8` (branch `fix/review-findings`) — see §9 |
+| **Line references** | Point at `48c846e` unless a row says otherwise |
 | **Date** | 2026-10-04 |
 | **Purpose** | Pre-audit threat model: give auditors the system's trust boundaries, privileged surfaces, and the highest-risk areas to focus on, and list what to fix before handing over the code |
 | **Method** | Manual review of all contract sources against STRIDE, per component and per trust boundary. The spec in `docs/design/trading-fees-and-settlement-specification.md` was used for intended behaviour. |
@@ -125,7 +126,7 @@ flowchart LR
 1. The collateral asset is the Stellar Asset Contract (SAC) for USDC. Transfers have no receiver hooks, so `try_transfer` cannot be budget-griefed by a recipient. The vault constructor only checks `decimals == 7` (`vault/src/contract.rs:155`).
 2. Soroban forbids contract re-entrancy. Any accidental re-entrant path traps (a liveness failure) rather than creating a theft window.
 3. Archived persistent entries are restored automatically (Protocol 23 / CAP-66), so TTL expiry of a `Position` or `Request` costs a fee but does not lose state.
-4. Privileged roles are held by separate keys, and ADMIN and UPGRADER are multisig accounts. **None of this is enforced on-chain** — see T-14.
+4. Privileged roles are held by separate keys, and ADMIN and UPGRADER are multisig accounts. This is **not enforced on-chain**. Since `eba596b`, `deploy.sh` refuses a mainnet deploy unless every role has a non-admin holder and UPGRADER ≠ PAUSER; multisig is still a convention.
 5. The external price feed returns `price` with 7 decimals and stamps `timestamp` honestly. The protocol cannot detect a publisher who lies about either.
 
 ---
