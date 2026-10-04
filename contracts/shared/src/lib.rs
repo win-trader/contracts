@@ -5,18 +5,21 @@ pub mod constants;
 pub mod defaults;
 pub mod events;
 pub mod fixed;
+pub mod market_governor;
 pub mod math;
 pub mod position_manager;
 pub mod price_feed;
 pub mod request_router;
 pub mod types;
 pub mod upgrade;
+pub mod validation;
 pub mod vault;
 
 use constants::{INSTANCE_BUMP, INSTANCE_THRESHOLD};
 use soroban_sdk::{contractclient, Address, Env, Symbol};
 
 pub use config_manager::{ConfigManager, ConfigManagerClient};
+pub use market_governor::{MarketGovernor, MarketGovernorClient};
 pub use position_manager::{PositionManager, PositionManagerClient};
 pub use price_feed::{PriceData, PriceFeed, PriceFeedClient, StampedPrice};
 pub use request_router::{RequestRouter, RequestRouterClient};

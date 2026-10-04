@@ -12,6 +12,7 @@ mod spec_harness;
 
 use spec_harness::*;
 
+use market_governor::MarketGovernorError;
 use position_manager::PositionManagerError;
 use request_router::RequestRouterError;
 use shared::constants::{DEFAULT_UPGRADE_TIMELOCK, ROLE_ORACLE, ROLE_PAUSER, ROLE_UPGRADER};
@@ -290,11 +291,11 @@ fn m4_a_funding_half_life_change_does_not_reprice_the_elapsed_window() {
         if apply_change {
             let mut faster = defaults::global_config();
             faster.funding_half_life_seconds = 3_600;
-            c.propose_global_config(&p.admin, &faster);
+            p.gov().propose_global_config(&p.admin, &faster);
         }
         p.observe(defaults::CONFIG_TIMELOCK_SECONDS, FILL);
         if apply_change {
-            c.apply_global_config(&p.keeper);
+            p.gov().apply_global_config(&p.keeper);
         }
         c.update_indices(&p.keeper, &p.market);
         let m = c.get_market(&p.market);
@@ -419,7 +420,7 @@ fn m8_raising_maintenance_margin_waits_out_the_timelock() {
     let c = p.pm();
     let mut stricter = defaults::market_config();
     stricter.maintenance_margin_bps = 400;
-    c.propose_market_config(&p.admin, &p.market, &stricter);
+    p.gov().propose_market_config(&p.admin, &p.market, &stricter);
     assert_eq!(
         c.get_market(&p.market).config.maintenance_margin_bps,
         defaults::MAINTENANCE_MARGIN_BPS,
@@ -437,15 +438,15 @@ fn m8_a_price_feed_change_waits_out_the_timelock() {
     let oracle = grant(&p, ROLE_ORACLE);
     let replacement = p.env.register(mock_oracle::MockOracle, ());
 
-    c.propose_price_feed(&oracle, &replacement);
+    p.gov().propose_price_feed(&oracle, &replacement);
     assert_eq!(c.price_feed(), p.feed, "the change is proposed, not applied");
     assert!(
-        c.try_apply_price_feed(&p.keeper).is_err(),
+        p.gov().try_apply_price_feed(&p.keeper).is_err(),
         "not before the timelock"
     );
 
     p.wait(defaults::CONFIG_TIMELOCK_SECONDS);
-    c.apply_price_feed(&p.keeper);
+    p.gov().apply_price_feed(&p.keeper);
     assert_eq!(c.price_feed(), replacement, "and applied once it has elapsed");
 }
 
@@ -453,27 +454,26 @@ fn m8_a_price_feed_change_waits_out_the_timelock() {
 #[test]
 fn m8_a_pending_proposal_can_be_cancelled() {
     let p = Protocol::new();
-    let c = p.pm();
     let oracle = grant(&p, ROLE_ORACLE);
     let replacement = p.env.register(mock_oracle::MockOracle, ());
 
     let mut changed = defaults::global_config();
     changed.min_position_lifetime = 120;
-    c.propose_global_config(&p.admin, &changed);
+    p.gov().propose_global_config(&p.admin, &changed);
     let mut stricter = defaults::market_config();
     stricter.maintenance_margin_bps = 400;
-    c.propose_market_config(&p.admin, &p.market, &stricter);
-    c.propose_price_feed(&oracle, &replacement);
+    p.gov().propose_market_config(&p.admin, &p.market, &stricter);
+    p.gov().propose_price_feed(&oracle, &replacement);
 
-    c.cancel_global_config(&p.admin);
-    c.cancel_market_config(&p.admin, &p.market);
-    c.cancel_price_feed(&oracle);
+    p.gov().cancel_global_config(&p.admin);
+    p.gov().cancel_market_config(&p.admin, &p.market);
+    p.gov().cancel_price_feed(&oracle);
 
     p.observe(defaults::CONFIG_TIMELOCK_SECONDS, FILL);
-    assert!(c.try_apply_global_config(&p.keeper).is_err());
-    assert!(c.try_apply_market_config(&p.keeper, &p.market).is_err());
-    assert!(c.try_apply_price_feed(&p.keeper).is_err());
-    assert!(c.try_cancel_global_config(&p.admin).is_err(), "nothing left to cancel");
+    assert!(p.gov().try_apply_global_config(&p.keeper).is_err());
+    assert!(p.gov().try_apply_market_config(&p.keeper, &p.market).is_err());
+    assert!(p.gov().try_apply_price_feed(&p.keeper).is_err());
+    assert!(p.gov().try_cancel_global_config(&p.admin).is_err(), "nothing left to cancel");
 }
 
 /// M8 — an upgrade can change anything a configuration change can, so its
@@ -487,6 +487,7 @@ fn m8_an_upgrade_waits_at_least_the_configuration_timelock() {
     p.pm().propose_upgrade(&auth, &wasm);
     p.vault_client().propose_upgrade(&auth, &wasm);
     p.router_client().propose_upgrade(&auth, &wasm);
+    p.gov().propose_upgrade(&auth, &wasm);
 
     // The defaults put the upgrade timelock (24h) under the configuration
     // timelock (48h), which is the gap this test covers.
@@ -511,6 +512,14 @@ fn m8_an_upgrade_waits_at_least_the_configuration_timelock() {
             RequestRouterError::UpgradeTimelockNotElapsed as u32
         )))
     );
+    // Upgrading the governor must not be a faster path to new config than
+    // proposing it.
+    assert_eq!(
+        p.gov().try_upgrade(&wasm, &auth),
+        Err(Ok(contract_error(
+            MarketGovernorError::UpgradeTimelockNotElapsed as u32
+        )))
+    );
 }
 
 /// M8 — applying is permissionless, so a proposal nobody applied stayed a
@@ -521,12 +530,12 @@ fn m8_a_configuration_proposal_expires_if_it_is_not_applied() {
     let c = p.pm();
     let mut changed = defaults::global_config();
     changed.min_position_lifetime = 120;
-    c.propose_global_config(&p.admin, &changed);
+    p.gov().propose_global_config(&p.admin, &changed);
 
     p.observe(defaults::CONFIG_TIMELOCK_SECONDS * 30, FILL);
     assert_eq!(
-        c.try_apply_global_config(&p.keeper),
-        Err(Ok(contract_error(PositionManagerError::ConfigProposalExpired as u32))),
+        p.gov().try_apply_global_config(&p.keeper),
+        Err(Ok(contract_error(MarketGovernorError::ConfigProposalExpired as u32))),
         "a months-old proposal must not be applicable by anyone"
     );
     assert_eq!(

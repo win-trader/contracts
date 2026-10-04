@@ -22,6 +22,7 @@ position-manager = { path = ".", features = ["testutils"] }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 shared = { workspace = true, features = ["testutils"] }
 config-manager = { path = "../config-manager", features = ["testutils"] }
+market-governor = { path = "../market-governor", features = ["testutils"] }
 vault = { path = "../vault", features = ["testutils"] }
 request-router = { path = "../request-router", features = ["testutils"] }
 mock-token = { path = "../../mocks/mock-token", features = ["testutils"] }

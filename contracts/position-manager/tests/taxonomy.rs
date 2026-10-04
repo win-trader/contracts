@@ -8,12 +8,13 @@
 //! the app came to report oracle outages as slippage.
 
 use config_manager::ConfigManagerError as Cm;
+use market_governor::MarketGovernorError as Mg;
 use position_manager::PositionManagerError as Pm;
 use request_router::RequestRouterError as Rr;
 use vault::VaultError as V;
 
 /// Every code this build can emit, by owning contract and assigned range.
-fn ranges() -> [(&'static str, u32, u32, Vec<u32>); 4] {
+fn ranges() -> [(&'static str, u32, u32, Vec<u32>); 5] {
     [
         (
             "position-manager",
@@ -26,7 +27,6 @@ fn ranges() -> [(&'static str, u32, u32, Vec<u32>); 4] {
                 Pm::MarketNotConfigured as u32,
                 Pm::ActionNotFound as u32,
                 Pm::TriggerNotAttached as u32,
-                Pm::NoPendingConfig as u32,
                 Pm::UpgradeNoPending as u32,
                 Pm::NotInitialized as u32,
                 Pm::AlreadyInitialized as u32,
@@ -38,7 +38,6 @@ fn ranges() -> [(&'static str, u32, u32, Vec<u32>); 4] {
                 Pm::MutationPending as u32,
                 Pm::MarketNotEmpty as u32,
                 Pm::StateVersionMismatch as u32,
-                Pm::ConfigTimelockNotElapsed as u32,
                 Pm::UpgradeTimelockNotElapsed as u32,
                 Pm::InsufficientCollateral as u32,
                 Pm::MarketLimitExceeded as u32,
@@ -103,6 +102,22 @@ fn ranges() -> [(&'static str, u32, u32, Vec<u32>); 4] {
                 Rr::UpgradeNoPending as u32,
                 Rr::UpgradeTimelockNotElapsed as u32,
                 Rr::UpgradeHashMismatch as u32,
+            ],
+        ),
+        (
+            "market-governor",
+            500,
+            599,
+            vec![
+                Mg::Unauthorized as u32,
+                Mg::NoPendingConfig as u32,
+                Mg::ConfigTimelockNotElapsed as u32,
+                Mg::ConfigProposalExpired as u32,
+                Mg::InvalidConfig as u32,
+                Mg::PriceUnavailable as u32,
+                Mg::UpgradeNoPending as u32,
+                Mg::UpgradeTimelockNotElapsed as u32,
+                Mg::UpgradeHashMismatch as u32,
             ],
         ),
     ]

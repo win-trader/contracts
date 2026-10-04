@@ -42,22 +42,22 @@ fn the_authority_gates_refuse_an_outsider_and_the_open_ones_do_not() {
     assert!(c.try_pause(&outsider).is_err(), "§12.3 — pause_authority");
     assert!(c.try_unpause(&outsider).is_err(), "§12.3 — unpause_authority");
     assert!(
-        c.try_propose_global_config(&outsider, &defaults::global_config()).is_err(),
+        p.gov().try_propose_global_config(&outsider, &defaults::global_config()).is_err(),
         "§12.3 — configuration_authority"
     );
-    assert!(c
+    assert!(p.gov()
         .try_propose_market_config(&outsider, &p.market, &defaults::market_config())
         .is_err());
-    assert!(c.try_deregister_market(&outsider, &p.market).is_err());
+    assert!(p.gov().try_deregister_market(&outsider, &p.market).is_err());
     assert!(c.try_disable_market(&outsider, &p.market).is_err());
     assert!(c.try_enable_market(&outsider, &p.market).is_err());
     assert!(
-        c.try_propose_price_feed(&outsider, &p.feed).is_err(),
+        p.gov().try_propose_price_feed(&outsider, &p.feed).is_err(),
         "§12.3 — oracle_authority"
     );
-    assert!(c.try_cancel_price_feed(&outsider).is_err());
-    assert!(c.try_cancel_global_config(&outsider).is_err());
-    assert!(c.try_cancel_market_config(&outsider, &p.market).is_err());
+    assert!(p.gov().try_cancel_price_feed(&outsider).is_err());
+    assert!(p.gov().try_cancel_global_config(&outsider).is_err());
+    assert!(p.gov().try_cancel_market_config(&outsider, &p.market).is_err());
     assert!(
         c.try_claim_protocol(&outsider, &outsider, &1).is_err(),
         "§12.3 — protocol_recipient"

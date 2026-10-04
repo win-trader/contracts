@@ -5,6 +5,7 @@ members = [
     "contracts/vault",
     "contracts/position-manager",
     "contracts/config-manager",
+    "contracts/market-governor",
     "contracts/request-router",
     "mocks/mock-token",
     "mocks/mock-oracle",

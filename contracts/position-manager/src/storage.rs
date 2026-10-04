@@ -1,6 +1,6 @@
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
 use shared::{
-    GlobalConfig, Market, PendingAction, PendingGlobalConfig, PendingMarketConfig, Position,
+    GlobalConfig, Market, PendingAction, Position,
 };
 use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol, Vec};
 
@@ -24,10 +24,8 @@ pub enum StorageKey {
     MarketDisabled(Symbol),
     PendingAction(u64),
     NextActionId,
-    PendingGlobalConfig,
-    PendingMarketConfig(Symbol),
     UnclaimedPayout(Address),
-    PendingPriceFeed,
+    Governor,
 }
 
 pub fn is_paused(env: &Env) -> bool {
@@ -173,6 +171,17 @@ pub fn save_price_feed(env: &Env, price_feed: &Address) {
         .set(&StorageKey::PriceFeed, price_feed);
 }
 
+pub fn get_governor(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&StorageKey::Governor)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
+}
+
+pub fn save_governor(env: &Env, governor: &Address) {
+    env.storage().instance().set(&StorageKey::Governor, governor);
+}
+
 pub fn get_vault(env: &Env) -> Address {
     try_get_vault(env)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
@@ -258,54 +267,4 @@ pub fn take_next_action_id(env: &Env) -> u64 {
         .instance()
         .set(&StorageKey::NextActionId, &(id + 1));
     id
-}
-
-pub fn try_get_pending_price_feed(env: &Env) -> Option<shared::PendingPriceFeed> {
-    env.storage().instance().get(&StorageKey::PendingPriceFeed)
-}
-
-pub fn save_pending_price_feed(env: &Env, pending: &shared::PendingPriceFeed) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::PendingPriceFeed, pending);
-}
-
-pub fn clear_pending_price_feed(env: &Env) {
-    env.storage().instance().remove(&StorageKey::PendingPriceFeed);
-}
-
-pub fn try_get_pending_global_config(env: &Env) -> Option<PendingGlobalConfig> {
-    env.storage()
-        .instance()
-        .get(&StorageKey::PendingGlobalConfig)
-}
-
-pub fn save_pending_global_config(env: &Env, pending: &PendingGlobalConfig) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::PendingGlobalConfig, pending);
-}
-
-pub fn clear_pending_global_config(env: &Env) {
-    env.storage()
-        .instance()
-        .remove(&StorageKey::PendingGlobalConfig);
-}
-
-pub fn try_get_pending_market_config(env: &Env, market: &Symbol) -> Option<PendingMarketConfig> {
-    env.storage()
-        .instance()
-        .get(&StorageKey::PendingMarketConfig(market.clone()))
-}
-
-pub fn save_pending_market_config(env: &Env, market: &Symbol, pending: &PendingMarketConfig) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::PendingMarketConfig(market.clone()), pending);
-}
-
-pub fn clear_pending_market_config(env: &Env, market: &Symbol) {
-    env.storage()
-        .instance()
-        .remove(&StorageKey::PendingMarketConfig(market.clone()));
 }

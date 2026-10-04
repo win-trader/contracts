@@ -7,6 +7,7 @@ mod spec_harness;
 
 use spec_harness::*;
 
+use market_governor::MarketGovernorError;
 use position_manager::PositionManagerError;
 use shared::{defaults, ActionOutcome};
 use soroban_sdk::Symbol;
@@ -20,15 +21,14 @@ fn contract_error(code: u32) -> soroban_sdk::Error {
 #[test]
 fn the_config_timelock_has_a_one_day_floor() {
     let p = Protocol::new();
-    let c = p.pm();
     let mut shorter = defaults::global_config();
     shorter.config_timelock_seconds = 86_399;
     assert_eq!(
-        c.try_propose_global_config(&p.admin, &shorter),
-        Err(Ok(contract_error(PositionManagerError::InvalidConfig as u32)))
+        p.gov().try_propose_global_config(&p.admin, &shorter),
+        Err(Ok(contract_error(MarketGovernorError::InvalidConfig as u32)))
     );
     shorter.config_timelock_seconds = 86_400;
-    c.propose_global_config(&p.admin, &shorter);
+    p.gov().propose_global_config(&p.admin, &shorter);
 }
 
 /// T-06 — `disable_market` wrote an instance-storage flag for any symbol, so

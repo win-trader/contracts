@@ -59,6 +59,7 @@ pub const LP_SEED: i128 = usd_const(1_000_000);
 pub struct Protocol {
     pub env: Env,
     pub pm: Address,
+    pub governor: Address,
     pub vault: Address,
     pub router: Address,
     pub token: Address,
@@ -110,9 +111,17 @@ impl Protocol {
         );
 
         let feed = env.register(mock_oracle::MockOracle, ());
+        // The PM pins its governor at construction, so the governor's
+        // address is chosen first and the contract registered there after.
+        let governor = Address::generate(&env);
         let pm = env.register(
             position_manager::PositionManagerContract,
-            (cm.clone(), feed.clone(), defaults::global_config()),
+            (cm.clone(), governor.clone(), feed.clone(), defaults::global_config()),
+        );
+        env.register_at(
+            &governor,
+            market_governor::MarketGovernorContract,
+            (cm.clone(), pm.clone()),
         );
         let vault = env.register(
             vault::VaultContract,
@@ -136,6 +145,7 @@ impl Protocol {
         let p = Protocol {
             env,
             pm,
+            governor,
             vault,
             router,
             token,
@@ -153,7 +163,7 @@ impl Protocol {
         // §7.18 — registration applies at once; a later change waits out the
         // timelock.
         p.publish(FILL);
-        p.pm()
+        p.gov()
             .propose_market_config(&p.admin, &p.market, &defaults::market_config());
 
         p.mint(&p.admin, seed);
@@ -167,6 +177,10 @@ impl Protocol {
 
     pub fn pm(&self) -> PositionManagerContractClient<'_> {
         PositionManagerContractClient::new(&self.env, &self.pm)
+    }
+
+    pub fn gov(&self) -> market_governor::MarketGovernorContractClient<'_> {
+        market_governor::MarketGovernorContractClient::new(&self.env, &self.governor)
     }
 
     pub fn vault_client(&self) -> VaultClient<'_> {

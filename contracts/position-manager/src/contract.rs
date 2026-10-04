@@ -3,11 +3,11 @@ use crate::errors::PositionManagerError;
 use crate::events;
 use crate::ledger::{self, Ledger};
 use crate::{
-    borrow, funding, governance, math, position, risk, snapshot, storage, validation,
+    borrow, funding, math, position, risk, snapshot, storage, validation,
 };
 use position::{adl, entry, liquidate, mutation, trigger};
 use shared::constants::{
-    INDEX_PRECISION, PRICE_DECIMALS, ROLE_ADMIN, ROLE_ORACLE, ROLE_PAUSER, ROLE_PROTOCOL,
+    INDEX_PRECISION, PRICE_DECIMALS, ROLE_ADMIN, ROLE_PAUSER, ROLE_PROTOCOL,
     ROLE_UNPAUSER, ROLE_UPGRADER,
 };
 use shared::{
@@ -103,6 +103,13 @@ fn apply_market(env: &Env, actor: &Address, symbol: &Symbol, config: &MarketConf
     events::emit_market_config_updated(env, symbol, actor, config);
 }
 
+fn require_governor(env: &Env, caller: &Address) {
+    caller.require_auth();
+    if *caller != storage::get_governor(env) {
+        panic_with_error!(env, PositionManagerError::InvalidCaller);
+    }
+}
+
 fn market_is_empty(market: &Market) -> bool {
     market.long.size_open_interest == 0
         && market.short.size_open_interest == 0
@@ -115,11 +122,13 @@ impl PositionManagerContract {
     pub fn __constructor(
         env: Env,
         config_manager: Address,
+        governor: Address,
         price_feed: Address,
         config: GlobalConfig,
     ) {
         validation::validate_global(&env, &config);
         storage::save_config_manager(&env, &config_manager);
+        storage::save_governor(&env, &governor);
         require_feed_decimals(&env, &price_feed);
         storage::save_price_feed(&env, &price_feed);
         storage::save_global_config(&env, &config);
@@ -131,31 +140,6 @@ impl PositionManagerContract {
 
 #[contractimpl]
 impl PositionManager for PositionManagerContract {
-    fn propose_price_feed(env: Env, caller: Address, price_feed: Address) {
-        require_role(&env, &caller, ROLE_ORACLE);
-        require_feed_decimals(&env, &price_feed);
-        let now = env.ledger().timestamp();
-        governance::store_price_feed_proposal(
-            &env,
-            &caller,
-            &price_feed,
-            governance::effective_at(&env, now),
-        );
-    }
-
-    fn apply_price_feed(env: Env, caller: Address) {
-        caller.require_auth();
-        let price_feed = governance::take_due_price_feed(&env, env.ledger().timestamp());
-        require_feed_decimals(&env, &price_feed);
-        storage::save_price_feed(&env, &price_feed);
-        events::emit_price_feed_changed(&env, &caller, &price_feed);
-    }
-
-    fn cancel_price_feed(env: Env, caller: Address) {
-        require_role(&env, &caller, ROLE_ORACLE);
-        governance::cancel_price_feed_proposal(&env, &caller);
-    }
-
     fn price_feed(env: Env) -> Address {
         storage::get_price_feed(&env)
     }
@@ -273,68 +257,37 @@ impl PositionManager for PositionManagerContract {
         events::emit_market_checkpoint(&env, &market_symbol, &caller, &market, &ledger, now);
     }
 
-    fn propose_global_config(env: Env, caller: Address, config: GlobalConfig) {
-        governance::require_configuration_authority(&env, &caller);
+    fn governor(env: Env) -> Address {
+        storage::get_governor(&env)
+    }
+
+    fn install_global_config(env: Env, caller: Address, actor: Address, config: GlobalConfig) {
+        require_governor(&env, &caller);
         validate_global_against_markets(&env, &config);
-        let now = env.ledger().timestamp();
-        if governance::global_is_conservative(&storage::get_global_config(&env), &config) {
-            apply_global(&env, &caller, &config);
-            return;
-        }
-        governance::store_global_proposal(&env, &caller, &config, governance::effective_at(&env, now));
+        apply_global(&env, &actor, &config);
     }
 
-    fn apply_global_config(env: Env, caller: Address) {
-        caller.require_auth();
-        let now = env.ledger().timestamp();
-        let config = governance::take_due_global_proposal(&env, now);
-        validate_global_against_markets(&env, &config);
-        apply_global(&env, &caller, &config);
-    }
-
-    fn cancel_global_config(env: Env, caller: Address) {
-        governance::require_configuration_authority(&env, &caller);
-        governance::cancel_global_proposal(&env, &caller);
-    }
-
-    fn propose_market_config(env: Env, caller: Address, market_symbol: Symbol, config: MarketConfig) {
-        governance::require_configuration_authority(&env, &caller);
+    fn install_market_config(
+        env: Env,
+        caller: Address,
+        actor: Address,
+        market_symbol: Symbol,
+        config: MarketConfig,
+    ) {
+        require_governor(&env, &caller);
         validate_market_against_set(&env, &market_symbol, &config);
-        let existing = storage::try_get_market(&env, &market_symbol);
-        let exempt = match &existing {
-            None => true,
-            Some(_) if !storage::is_market_registered(&env, &market_symbol) => true,
-            Some(market) => governance::market_is_conservative(&market.config, &config),
-        };
-        if exempt {
-            apply_market(&env, &caller, &market_symbol, &config);
-            return;
-        }
-        let now = env.ledger().timestamp();
-        governance::store_market_proposal(
-            &env,
-            &caller,
-            &market_symbol,
-            &config,
-            governance::effective_at(&env, now),
-        );
+        apply_market(&env, &actor, &market_symbol, &config);
     }
 
-    fn apply_market_config(env: Env, caller: Address, market_symbol: Symbol) {
-        caller.require_auth();
-        let now = env.ledger().timestamp();
-        let config = governance::take_due_market_proposal(&env, &market_symbol, now);
-        validate_market_against_set(&env, &market_symbol, &config);
-        apply_market(&env, &caller, &market_symbol, &config);
+    fn install_price_feed(env: Env, caller: Address, actor: Address, price_feed: Address) {
+        require_governor(&env, &caller);
+        require_feed_decimals(&env, &price_feed);
+        storage::save_price_feed(&env, &price_feed);
+        events::emit_price_feed_changed(&env, &actor, &price_feed);
     }
 
-    fn cancel_market_config(env: Env, caller: Address, market_symbol: Symbol) {
-        governance::require_configuration_authority(&env, &caller);
-        governance::cancel_market_proposal(&env, &caller, &market_symbol);
-    }
-
-    fn deregister_market(env: Env, caller: Address, market_symbol: Symbol) {
-        governance::require_configuration_authority(&env, &caller);
+    fn deregister_market(env: Env, caller: Address, actor: Address, market_symbol: Symbol) {
+        require_governor(&env, &caller);
         let market = storage::get_market(&env, &market_symbol);
         let empty = market.long.size_open_interest == 0
             && market.short.size_open_interest == 0
@@ -356,7 +309,7 @@ impl PositionManager for PositionManagerContract {
             }
         }
         storage::save_active_markets(&env, &remaining);
-        events::emit_market_status_changed(&env, &market_symbol, &caller, true);
+        events::emit_market_status_changed(&env, &market_symbol, &actor, true);
     }
 
     fn disable_market(env: Env, caller: Address, market: Symbol) {

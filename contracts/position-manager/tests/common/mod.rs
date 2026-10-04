@@ -25,6 +25,7 @@ const DECIMALS: u32 = 7;
 pub struct World {
     pub env: Env,
     pub pm: Address,
+    pub governor: Address,
     pub feed: Address,
     pub token: Address,
     pub market: Symbol,
@@ -61,9 +62,15 @@ impl World {
         );
         let feed = env.register(mock_oracle::MockOracle, ());
 
+        let governor = Address::generate(&env);
         let pm = env.register(
             PositionManagerContract,
-            (config_manager.clone(), feed.clone(), global_config()),
+            (config_manager.clone(), governor.clone(), feed.clone(), global_config()),
+        );
+        env.register_at(
+            &governor,
+            market_governor::MarketGovernorContract,
+            (config_manager.clone(), pm.clone()),
         );
         let vault = env.register(
             vault::VaultContract,
@@ -89,7 +96,8 @@ impl World {
 
         let market = Symbol::new(&env, "BTC");
         mock_oracle::MockOracleClient::new(&env, &feed).set_price(&market, &PRICE);
-        client.propose_market_config(&admin, &market, &defaults::market_config());
+        market_governor::MarketGovernorContractClient::new(&env, &governor)
+            .propose_market_config(&admin, &market, &defaults::market_config());
 
         // Seed the vault with LP capital and the trader with spending money.
         let token_client = mock_token::MockTokenClient::new(&env, &token);
@@ -100,6 +108,7 @@ impl World {
         World {
             env,
             pm,
+            governor,
             feed,
             token,
             market,
@@ -113,6 +122,10 @@ impl World {
 
     pub fn client(&self) -> PositionManagerContractClient<'_> {
         PositionManagerContractClient::new(&self.env, &self.pm)
+    }
+
+    pub fn gov(&self) -> market_governor::MarketGovernorContractClient<'_> {
+        market_governor::MarketGovernorContractClient::new(&self.env, &self.governor)
     }
 
     pub fn balance(&self, who: &Address) -> i128 {

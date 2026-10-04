@@ -66,7 +66,7 @@ fn a_market_is_deregistered_only_when_nothing_is_owed_to_it() {
     c.settle_market_open(&w.keeper, &action_id);
 
     assert!(
-        c.try_deregister_market(&w.admin, &w.market).is_err(),
+        w.gov().try_deregister_market(&w.admin, &w.market).is_err(),
         "open interest still stands against it"
     );
 
@@ -75,7 +75,7 @@ fn a_market_is_deregistered_only_when_nothing_is_owed_to_it() {
     c.settle_close(&w.keeper, &close);
 
     let index_before = c.get_market(&w.market).receiver_backed_index_long;
-    c.deregister_market(&w.admin, &w.market);
+    w.gov().deregister_market(&w.admin, &w.market);
     assert_eq!(c.active_markets().len(), 0, "out of the registry");
     assert_eq!(
         c.get_market(&w.market).receiver_backed_index_long,
@@ -91,15 +91,20 @@ fn a_market_is_deregistered_only_when_nothing_is_owed_to_it() {
 }
 
 /// §7.18 — re-registering puts the market back in the registry rather than
-/// only updating its configuration.
+/// only updating its configuration. It waits out the timelock like any other
+/// change to a known market (THREAT_MODEL T-04).
 #[test]
-fn re_registering_returns_a_market_to_the_registry() {
+fn re_registering_returns_a_market_to_the_registry_after_the_timelock() {
     let w = World::new();
     let c = w.client();
-    c.deregister_market(&w.admin, &w.market);
+    w.gov().deregister_market(&w.admin, &w.market);
     assert_eq!(c.active_markets().len(), 0);
 
-    c.propose_market_config(&w.admin, &w.market, &defaults::market_config());
+    w.gov().propose_market_config(&w.admin, &w.market, &defaults::market_config());
+    assert_eq!(c.active_markets().len(), 0, "a returning market is not instant");
+    assert!(w.gov().try_apply_market_config(&w.keeper, &w.market).is_err());
+    w.observe(defaults::CONFIG_TIMELOCK_SECONDS, PRICE);
+    w.gov().apply_market_config(&w.keeper, &w.market);
     assert_eq!(c.active_markets().len(), 1);
     let action_id = c.create_market_open(&w.trader, &w.market, &w.request(100_000_0000, 0, 120));
     w.observe(10, PRICE);
@@ -118,7 +123,7 @@ fn deregistration_drains_a_pending_entry_rather_than_stranding_it() {
     let c = w.client();
     let before = w.balance(&w.trader);
     let action_id = c.create_market_open(&w.trader, &w.market, &w.request(100_000_0000, 0, 120));
-    c.deregister_market(&w.admin, &w.market);
+    w.gov().deregister_market(&w.admin, &w.market);
 
     w.observe(10, PRICE);
     assert_eq!(
@@ -135,12 +140,11 @@ fn deregistration_drains_a_pending_entry_rather_than_stranding_it() {
 #[test]
 fn an_unwired_feed_surfaces_as_this_contracts_own_error() {
     let w = World::new();
-    let c = w.client();
     // A contract that is not a price feed at all: the call into it fails
     // with something that is not ours.
     let impostor = Address::generate(&w.env);
     assert!(
-        c.try_propose_price_feed(&w.admin, &impostor).is_err(),
+        w.gov().try_propose_price_feed(&w.admin, &impostor).is_err(),
         "an address that cannot answer `decimals` is refused at proposal time"
     );
 }

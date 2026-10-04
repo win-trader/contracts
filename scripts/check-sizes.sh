@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WASM_DIR="$ROOT/target/wasm32v1-none/release"
 LIMIT=131072
 WARN_HEADROOM="${WARN_HEADROOM:-10240}"
-CONTRACTS="${CONTRACTS:-config_manager position_manager vault request_router}"
+CONTRACTS="${CONTRACTS:-config_manager market_governor position_manager vault request_router}"
 
 status=0
 for name in $CONTRACTS; do

@@ -11,7 +11,6 @@ pub enum PositionManagerError {
     MarketNotConfigured = 11,
     ActionNotFound = 12,
     TriggerNotAttached = 14,
-    NoPendingConfig = 15,
     UpgradeNoPending = 16,
 
     NotInitialized = 20,
@@ -24,11 +23,9 @@ pub enum PositionManagerError {
     MutationPending = 27,
     MarketNotEmpty = 28,
     StateVersionMismatch = 29,
-    ConfigTimelockNotElapsed = 30,
     UpgradeTimelockNotElapsed = 31,
     InsufficientCollateral = 32,
     MarketLimitExceeded = 33,
-    ConfigProposalExpired = 34,
 
     InvalidAmount = 40,
     InvalidConfig = 41,

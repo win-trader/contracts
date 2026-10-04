@@ -12,15 +12,6 @@ pub trait PositionManager {
     /// One-time wiring of the vault address (ADMIN).
     fn set_vault(env: Env, caller: Address, vault: Address);
 
-    /// Propose a replacement price feed (ORACLE). Applies after `config_timelock_seconds`.
-    fn propose_price_feed(env: Env, caller: Address, price_feed: Address);
-
-    /// Apply a due price-feed proposal. Permissionless.
-    fn apply_price_feed(env: Env, caller: Address);
-
-    /// Withdraw a pending price-feed proposal (ORACLE).
-    fn cancel_price_feed(env: Env, caller: Address);
-
     /// The price feed currently in use.
     fn price_feed(env: Env) -> Address;
 
@@ -91,36 +82,29 @@ pub trait PositionManager {
     /// A pending action. Panics `ActionNotFound` once consumed.
     fn get_pending_action(env: Env, action_id: u64) -> PendingAction;
 
-
-
-
-
-
-
-
     /// Checkpoint the borrow index and one market's funding to now. Permissionless.
     fn update_indices(env: Env, caller: Address, market: Symbol);
 
-    /// Propose a global config (ADMIN). Conservative changes apply immediately.
-    fn propose_global_config(env: Env, caller: Address, config: GlobalConfig);
+    /// The MarketGovernor, the only caller allowed to change configuration.
+    fn governor(env: Env) -> Address;
 
-    /// Apply a due global proposal. Permissionless; expires one timelock after it is due.
-    fn apply_global_config(env: Env, caller: Address);
+    /// Install a global config (governor only). `actor` is who triggered it.
+    fn install_global_config(env: Env, caller: Address, actor: Address, config: GlobalConfig);
 
-    /// Withdraw the pending global proposal (ADMIN).
-    fn cancel_global_config(env: Env, caller: Address);
+    /// Register a market or install its config (governor only).
+    fn install_market_config(
+        env: Env,
+        caller: Address,
+        actor: Address,
+        market_symbol: Symbol,
+        config: MarketConfig,
+    );
 
-    /// Register a market or propose a change to one (ADMIN).
-    fn propose_market_config(env: Env, caller: Address, market: Symbol, config: MarketConfig);
+    /// Switch the price feed (governor only).
+    fn install_price_feed(env: Env, caller: Address, actor: Address, price_feed: Address);
 
-    /// Apply a due market proposal. Permissionless.
-    fn apply_market_config(env: Env, caller: Address, market: Symbol);
-
-    /// Withdraw a pending market proposal (ADMIN).
-    fn cancel_market_config(env: Env, caller: Address, market: Symbol);
-
-    /// Remove an empty market from the registry (ADMIN). Its indices are kept.
-    fn deregister_market(env: Env, caller: Address, market: Symbol);
+    /// Remove an empty market from the registry (governor only). Its indices are kept.
+    fn deregister_market(env: Env, caller: Address, actor: Address, market_symbol: Symbol);
 
     /// Block new exposure on one market (PAUSER).
     fn disable_market(env: Env, caller: Address, market: Symbol);
@@ -145,7 +129,6 @@ pub trait PositionManager {
 
     /// A position.
     fn get_position(env: Env, position_id: u64) -> Position;
-
 
     /// A market's configuration and accounting.
     fn get_market(env: Env, market: Symbol) -> Market;
