@@ -6,6 +6,9 @@ const MAX_ORDER_LIFETIME_CEILING: u64 = 2_592_000;
 const MIN_MARKET_ORDER_LIFETIME: u64 = 60;
 const MAX_FUNDING_HALF_LIFE: u64 = 31_536_000;
 const MIN_CONFIG_TIMELOCK: u64 = 86_400;
+// LP settlement prices every market at ~12M instructions each (THREAT_MODEL
+// T-13); 16 keeps it under half the 400M per-transaction budget.
+const MAX_ACTIVE_MARKETS_CEILING: u32 = 16;
 
 fn reward_bounds(r: &KeeperRewards) -> (i128, i128) {
     let all = [
@@ -61,6 +64,7 @@ pub fn global_is_valid(c: &GlobalConfig) -> bool {
         || c.fee_lp_revenue_share_bps > BPS as u32
         || c.borrow_lp_revenue_share_bps > BPS as u32
         || c.max_active_markets == 0
+        || c.max_active_markets > MAX_ACTIVE_MARKETS_CEILING
         || c.global_hard_cap_limit_bps == 0
         || c.global_hard_cap_limit_bps > BPS as u32
         || c.hard_cap_relatch_band_bps == 0

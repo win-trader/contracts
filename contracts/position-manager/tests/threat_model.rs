@@ -125,3 +125,18 @@ fn the_pause_key_can_refund_a_stuck_queue_head_after_a_grace_period() {
     p.publish(FILL);
     p.assert_conserved("after skipping a stuck head");
 }
+
+/// T-13 — LP settlement costs about 12M instructions per registered market,
+/// and nothing bounded the registry.
+#[test]
+fn the_market_registry_is_capped_at_sixteen() {
+    let p = Protocol::new();
+    let mut wide = defaults::global_config();
+    wide.max_active_markets = 17;
+    assert_eq!(
+        p.gov().try_propose_global_config(&p.admin, &wide),
+        Err(Ok(contract_error(MarketGovernorError::InvalidConfig as u32)))
+    );
+    wide.max_active_markets = 16;
+    p.gov().propose_global_config(&p.admin, &wide);
+}
