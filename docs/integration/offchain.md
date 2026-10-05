@@ -57,7 +57,8 @@ the reward.
 | Liquidation | `PM.liquidate_position(keeper, position_id)` | Reverts `PositionHealthy` if not liquidatable |
 | ADL | `PM.execute_adl(keeper, position_id)` | Only on an `Adl`/`HardCap` side, profitable positions only |
 | Index checkpoint | `PM.update_indices(caller, market)` | No reward |
-| LP queue | `RR.resolve_next(executor)` | Pays `lp_resolve` reward |
+| LP queue | `RR.resolve_next(executor)` | Pays the reward fixed when the request was made (`LpRequest.reward`) |
+| Stuck LP head | `RR.skip_head(caller)` (PAUSER) | Refunds the head in full once it has been resolvable for a day; for a head `resolve_next` cannot settle |
 | Due config proposals | `governor.apply_global_config` / `apply_market_config` / `apply_price_feed` | Permissionless once due; lapse one timelock later |
 | Storage TTL | Network `ExtendFootprintTTL` operation | No contract entry point |
 
@@ -105,18 +106,22 @@ head can fail repeatedly (THREAT_MODEL D-1).
 | position-manager | `revsplit` | `RevenueSplit` | vec |  | header, position_id, source, collected, lp_share, protocol_share |
 | position-manager | `riskstate` | `RiskStateChanged` | vec |  | header, is_long, previous_state, next_state, pnl_factor_bps |
 | position-manager | `tpsl` | `TpSlUpdated` | map | position_id | header, owner, take_profit, stop_loss |
-| request-router | `lpreq` | `LpRequestCreated` | vec |  | request_id, owner, kind, amount, execute_after |
+| request-router | `lpreq` | `LpRequestCreated` | vec |  | request_id, owner, kind, amount, reward, execute_after |
 | request-router | `lpres` | `LpRequestResolved` | vec |  | request_id, owner, kind, status, settled_amount, reward |
 | request-router | `lpdefer` | `LpPayoutDeferred` | vec |  | owner, amount |
+| request-router | `lpskip` | `LpRequestSkipped` | vec |  | request_id, caller |
 | request-router | `lpclaim` | `LpPayoutClaimed` | vec |  | owner, amount |
 | shared | `upgprp` | `UpgradeProposed` | vec |  | wasm_hash, eta |
+| shared | `wired` | `Wired` | vec |  | target, address, caller |
+| shared | `migrated` | `Migrated` | vec |  | version, operator |
 | shared | `upgcan` | `UpgradeCancelled` | vec |  | caller |
 | vault | `lpdep` | `DepositSettled` | map |  | owner, assets, shares, share_supply, vault_nav |
 | vault | `lpwd` | `WithdrawalSettled` | map |  | owner, shares, assets, share_supply, vault_nav |
 | vault | `cfglp` | `LpConfigUpdated` | map |  | config |
 | vault | `pause` | `PauseChanged` | vec |  | paused |
 
-`UpgradeProposed` / `UpgradeCancelled` (`shared`) are emitted by every
-upgradeable contract. Most PositionManager events carry an `EventHeader`
+`UpgradeProposed`, `UpgradeCancelled`, and `Migrated` (`shared`) are emitted by
+every upgradeable contract; `Wired` by the PositionManager (`set_vault`) and the
+vault (`set_request_router`). Most PositionManager events carry an `EventHeader`
 (`event_version`, `ledger_timestamp`, `market`, `actor`) as their first field;
 `market` is `"vault"` for protocol-wide events.
