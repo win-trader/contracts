@@ -27,19 +27,17 @@ build:
 		-p mock-token \
 		-p mock-oracle
 
-# Binaryen is pinned so the optimized WASM, and so its hash, is reproducible.
-# Features are limited to what rustc's wasm32v1-none output already uses, so
-# the optimizer cannot introduce an instruction the Soroban VM rejects.
-WASM_OPT_VERSION = 133
+# The stellar CLI bundles its optimizer, so pinning the CLI pins the
+# optimized WASM, and so its hash.
+STELLAR_CLI_VERSION = 27.0.0
 
 optimize: build
-	@wasm-opt --version | grep -qE "version $(WASM_OPT_VERSION)( |$$)" || \
-		{ echo "wasm-opt (binaryen) $(WASM_OPT_VERSION) is required: brew install binaryen"; exit 1; }
+	@stellar --version | grep -q "^stellar $(STELLAR_CLI_VERSION) " || \
+		{ echo "stellar CLI $(STELLAR_CLI_VERSION) is required for reproducible optimized WASM"; exit 1; }
 	@for contract in $(CONTRACTS); do \
 		wasm="$(WASM_DIR)/$$(echo $$contract | tr '-' '_').wasm"; \
 		echo "Optimizing $$wasm..."; \
-		wasm-opt "$$wasm" --mvp-features --enable-mutable-globals --enable-sign-ext -Oz \
-			-o "$${wasm%.wasm}.optimized.wasm" || exit 1; \
+		stellar contract optimize --wasm "$$wasm" 2>/dev/null || exit 1; \
 	done
 	bash scripts/check-sizes.sh
 	@cd $(WASM_DIR) && shasum -a 256 *.optimized.wasm
@@ -53,8 +51,9 @@ REPRO_IMAGE = rust:1.98.1@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae8
 repro:
 	docker run --rm --platform linux/amd64 -v "$(CURDIR)":/src -w /src $(REPRO_IMAGE) bash -ec '\
 		rustup target add wasm32v1-none >/dev/null; \
-		curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_$(WASM_OPT_VERSION)/binaryen-version_$(WASM_OPT_VERSION)-x86_64-linux.tar.gz | tar xz -C /opt; \
-		export PATH=/opt/binaryen-version_$(WASM_OPT_VERSION)/bin:$$PATH CARGO_TARGET_DIR=target/repro; \
+		apt-get update -qq >/dev/null && apt-get install -y -qq libdbus-1-3 >/dev/null; \
+		curl -sSL https://github.com/stellar/stellar-cli/releases/download/v$(STELLAR_CLI_VERSION)/stellar-cli-$(STELLAR_CLI_VERSION)-x86_64-unknown-linux-gnu.tar.gz | tar xz -C /usr/local/bin; \
+		export CARGO_TARGET_DIR=target/repro; \
 		make optimize WASM_DIR=target/repro/wasm32v1-none/release'
 
 bind: optimize

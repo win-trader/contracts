@@ -4,12 +4,12 @@
 
 **Status:** implemented in `b03a55d`…`af8fe56`. The sections below are the plan as written; numbers were measured on a prototype of `b42e5fe`.
 
-**Outcome:** PositionManager 120,727 bytes (10,345 headroom), MarketGovernor 38,543. 164 tests pass.
+**Outcome:** PositionManager 126,083 bytes (4,989 headroom) with the stellar CLI's bundled optimizer. MarketGovernor 42,353. 164 tests pass.
 
 **Where the implementation deviated from the plan:**
 - The checks spanning the market set (market count, hard-cap sum) stay in the PM and run on every install, instead of moving to the governor. They bound the LP-snapshot loop and the solvency caps, so a compromised governor must not be able to skip them. The governor runs the per-config check early at propose time; both use `shared::validation`.
 - `install_*` and `deregister_market` take the triggering `actor`, so config events keep naming a person rather than the governor.
-- §5.1: binaryen `wasm-opt -Oz` (pinned to 133) saved 5.5 KB on its own; `opt-level = "s"` was worse. Three ledger-total views (`pending_receiver_funding_total`, `protocol_claimable_total`, `unclaimed_payout_total`) joined `pending_fees` as test-only, since only the conservation tests call them.
+- §5.1: standalone binaryen `wasm-opt -Oz` (version 133) saved 5.5 KB more (PM 120,567), but was reverted in favour of the stellar CLI's bundled optimizer, the ecosystem default. Headroom is therefore ~5 KB, under the 10 KB target. `opt-level = "s"` was worse. Three ledger-total views (`pending_receiver_funding_total`, `protocol_claimable_total`, `unclaimed_payout_total`) joined `pending_fees` as test-only, since only the conservation tests call them.
 - Also added: `rust-toolchain.toml` (rustc 1.98.1) for reproducible hashes, and a contracts CI workflow.
 
 ## 1. Measured sizes

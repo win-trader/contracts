@@ -18,10 +18,11 @@ jobs:
       - name: Rust (pinned by rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: binaryen (pinned to the Makefile's WASM_OPT_VERSION)
+      - name: stellar CLI (pinned to the Makefile's STELLAR_CLI_VERSION; bundles the optimizer)
         run: |
-          v=$(sed -n 's/^WASM_OPT_VERSION = //p' Makefile)
-          curl -sSL "https://github.com/WebAssembly/binaryen/releases/download/version_${v}/binaryen-version_${v}-x86_64-linux.tar.gz" | tar xz
-          echo "$PWD/binaryen-version_${v}/bin" >> "$GITHUB_PATH"
+          v=$(sed -n 's/^STELLAR_CLI_VERSION = //p' Makefile)
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/stellar/stellar-cli/releases/download/v${v}/stellar-cli-${v}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: cargo test --workspace
       - run: make optimize

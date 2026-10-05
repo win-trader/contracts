@@ -23,8 +23,7 @@ This is one of four repos:
 
 ## Prerequisites
 
-- Rust 1.98.1 with the `wasm32v1-none` target (pinned in `rust-toolchain.toml`), and the `stellar` CLI
-- binaryen `wasm-opt` version 133 (`brew install binaryen`), pinned so optimized WASM hashes are reproducible
+- Rust 1.98.1 with the `wasm32v1-none` target (pinned in `rust-toolchain.toml`), and the `stellar` CLI 27.0.0 (pinned in the Makefile; it bundles the WASM optimizer)
 - Node ≥ 18 and `pnpm`
 
 ## Common commands
@@ -32,7 +31,7 @@ This is one of four repos:
 Contracts (Rust):
 
 - `make build` — compile contracts to WASM
-- `make optimize` — optimize the WASM with `wasm-opt`, then fail if any contract exceeds the 131,072-byte network limit
+- `make optimize` — optimize the WASM with `stellar contract optimize`, then fail if any contract exceeds the 131,072-byte network limit
 - `make repro` — the canonical build: the same steps inside a pinned `rust:1.98.1` Linux image (needs Docker), output in `target/repro/`. Byte-identical to CI. Host builds differ by platform (Apple-silicon and x86-64 Linux order functions differently), so audited and deployed hashes come from this target, and testnet/mainnet deploys and upgrades use it automatically.
 - `make check` — type-check the Rust workspace
 - `make bind` — `optimize` + generate and build the TS bindings into `packages/bindings/`
