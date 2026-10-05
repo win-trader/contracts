@@ -1,5 +1,22 @@
 # WinTrader Trading, Fees, and Settlement Specification
 
+> **Status (2026-10-05).** This specification predates several pre-audit
+> changes. Where it disagrees with the code, the code and the notes below win.
+>
+> - **Removed:** position increase (`b42e5fe`), the referral program
+>   (`5fad1d6`), and the contract-level `bump_*` TTL entry points (`03dee9b`;
+>   anyone can extend an entry with the network's `ExtendFootprintTTL`
+>   operation). Sections describing them are kept as stubs so cross-references
+>   still resolve.
+> - **Moved:** configuration proposals, timelocks, and price-feed changes live
+>   in the MarketGovernor contract (`10c845d`); see §12.3.
+> - **Test-only views:** `pending_fees`, `pending_receiver_funding_total`,
+>   `protocol_claimable_total`, and `unclaimed_payout_total` are compiled only
+>   into test builds. Previews come from `@win-trader/protocol-math`, and the
+>   totals are in `accounting_snapshot` and the event stream.
+>
+> The security review of these changes is in `THREAT_MODEL.md`.
+
 ## Contents
 
 - [1. The system in plain language](#1-the-system-in-plain-language)
@@ -225,15 +242,7 @@ charged.
 
 ### 1.4 Increasing a position
 
-An increase adds size to an existing position and can add collateral at the
-same time. Adding size is economically the same as opening that additional
-exposure, so the added size can incur an opening fee. A collateral-only deposit
-is a separate action and does not change the position's exposure.
-
-Before the increase is applied, obligations accumulated by the existing
-position are settled. The enlarged position then begins a new borrow period
-using its resulting total exposure. The completed position must still satisfy
-the applicable collateral, margin, and capacity requirements.
+*Removed in `b42e5fe`.* Positions cannot be increased. A trader adds exposure by opening another position. A position's size only ever shrinks, so the lifetime gate (§8.5) reads `opened_at`.
 
 ### 1.5 Decreasing a position
 
@@ -916,7 +925,6 @@ non_lp_claims =
     + pending_receiver_funding_total
     + action_escrow_total
     + protocol_claimable_total
-    + referral_claimable_total
     + unclaimed_payout_total
 ```
 
@@ -927,8 +935,6 @@ non_lp_claims =
 - `action_escrow_total` is collateral committed to pending trader actions but
   not yet converted into position collateral or refunded.
 - `protocol_claimable_total` is collected protocol revenue awaiting claim.
-- `referral_claimable_total` is collected referral revenue awaiting claim and
-  equals the sum of individual referral balances.
 - `unclaimed_payout_total` is trader payouts and escrow refunds that could not
   be delivered when they settled and await the owner's claim (§12.1). It equals
   the sum of individual unclaimed payout balances.
@@ -965,10 +971,9 @@ cannot give the trader free PnL. A market side aggregates both size and base
 exposure, allowing market-level PnL and skew to be calculated without reading
 individual positions.
 
-When exposure is increased, the added base is calculated from the added size
-and its own execution price, then added to the existing base. The resulting
-position therefore naturally represents a size-weighted entry price without
-needing to store that average as an accounting authority.
+Base is fixed at open from the size and execution price, and a partial
+decrease removes it proportionally. A position therefore represents its entry
+price without storing it as an accounting authority.
 
 ### 2.7 Risk units
 
@@ -1110,7 +1115,7 @@ Rounding never favours the trader. The consistent direction is:
 | Funding received | Down |
 | Opening fee | Up |
 | Closing-fee components | Up before their caps |
-| LP and referral revenue shares | Down |
+| LP revenue shares | Down |
 | LP shares minted for a deposit | Down |
 | Assets paid for an LP withdrawal | Down |
 
@@ -1211,9 +1216,8 @@ The rate is configured per market and has an initial default of zero:
 open_fee_bps = 0
 ```
 
-An initial open applies the fee to the complete new size. An increase applies
-it only to the size added by that action. Adding collateral without adding size
-does not pay an opening fee. The fee has no skew tier and no separate leverage
+An open applies the fee to the complete new size. Adding collateral does not
+pay an opening fee. The fee has no skew tier and no separate leverage
 multiplier.
 
 For an initial entry, the trader submits one collateral amount. The fee is
@@ -1223,10 +1227,6 @@ deducted from that amount rather than transferred on top:
 net_collateral_added = submitted_collateral - opening_fee
 ```
 
-For an increase, any added collateral first joins the position and the opening
-fee is then deducted from the resulting stored position collateral. A
-size-only increase therefore records the fee as a small collateral reduction;
-it does not require a separate wallet transfer at settlement.
 
 For a delayed entry, the opening fee is calculated during settlement but is
 collected only if the position is successfully created. The post-fee,
@@ -1234,8 +1234,7 @@ post-keeper-reward collateral must pass every minimum-collateral, initial
 margin, health, and capacity check. A failed or expired entry charges no
 opening fee.
 
-Opening-fee revenue is shared by LPs, the protocol, and an eligible referrer as
-defined below. Keepers receive no share of it.
+Opening-fee revenue is shared by LPs and the protocol as defined in §3.7. Keepers receive no share of it.
 
 ### 3.2 Closing fee
 
@@ -1372,7 +1371,7 @@ violation and must be rejected before the minimum is applied.
 
 Borrow revenue is collected only to the extent the position can pay it. The
 collected amount is distributed 90% to LPs and 10% to the protocol by default.
-It never pays a referrer or keeper.
+It never pays a keeper.
 
 #### 3.3.1 Utilization-based rate
 
@@ -1444,7 +1443,7 @@ time.
 
 #### 3.3.3 Borrow-window resets
 
-An initial open starts the first borrow window. Every size increase or decrease
+An open starts the first borrow window. Every partial decrease
 settles the old window for the complete position and starts a new one:
 
 ```text
@@ -1615,7 +1614,7 @@ Receiver credits round down and payer obligations round up.
 Receiver-backed funding is guaranteed when it accrues. It immediately becomes
 an explicit vault liability and is collected before LP-backed funding and
 borrow. LP-backed funding is recognized as LP revenue only when collected.
-Funding never creates protocol, referral, or keeper revenue.
+Funding never creates protocol or keeper revenue.
 
 ### 3.5 Fixed keeper rewards
 
@@ -1624,7 +1623,6 @@ fixed cash amount:
 
 ```text
 keeper_open_reward
-keeper_increase_reward
 keeper_decrease_reward
 keeper_close_reward
 keeper_tp_reward
@@ -1647,8 +1645,8 @@ stack because an action also happened to originate from an order. A successful
 settlement call processes one action and pays at most one keeper reward.
 
 The reward is an execution cost, not protocol revenue. It is transferred to
-the keeper rather than accumulated in a reserve or shared with LPs, the
-protocol, or a referrer.
+the keeper rather than accumulated in a reserve or shared with LPs or the
+protocol.
 
 Four kinds of payment are capped at what their source holds and complete
 anyway: the failure reward on a position action (§7.0),
@@ -1666,7 +1664,7 @@ the reward step with less stored collateral than the reward, in a vault that
 cannot pay its profit. Requiring the reward in full reverted every exit of
 that position while it was too healthy to liquidate.
 
-The rewards of surviving actions — increase and decrease — are required in
+The reward of a surviving action — a partial decrease — is required in
 full: their preflights guarantee it, and a surviving settlement that cannot
 pay for itself takes the expected-failure path instead. Of the capped
 payments, only the liquidation reward may draw on LP equity, and only as far as
@@ -1684,9 +1682,7 @@ opening fee. An ineligible call or reverted transaction pays nothing.
 
 #### 3.5.2 Increase execution
 
-A successful size increase pays `keeper_increase_reward` from stored position
-collateral. The reward is included in the post-action health check and is
-separate from the opening fee on added size.
+*Removed in `b42e5fe`* together with position increase; there is no increase keeper reward.
 
 #### 3.5.3 Decrease execution
 
@@ -1766,55 +1762,22 @@ voluntary trade.
 
 ### 3.6 Referral rewards
 
-A trader can associate a referrer with the account. A valid referrer receives
-a share of opening and closing fees actually collected from that trader:
-
-```text
-referral_reward = floor(
-    collected_fee * referral_fee_share_bps / BPS
-)
-```
-
-The initial share is 250 bps, or 2.5% of the collected fee. It is carved
-entirely from the protocol portion and never reduces the LP share.
-
-Opening referral rewards apply to successful opens and size increases.
-Closing referral rewards apply to profitable voluntary closes, decreases,
-take-profits, and stop-losses. There is no referral reward when the applicable
-fee is zero, waived, or uncollected. Borrow, funding, keeper rewards,
-liquidation, and ADL do not generate referral revenue.
-
-Referral codes are first-come and their owner is immutable. A trader may change
-the account's referrer; the latest valid selection applies to future fees.
-Self-referral is rejected. Earned rewards accumulate as an explicit claim until
-the referrer withdraws them.
+*Removed in `5fad1d6`.* There is no referral program. Opening and closing fee revenue splits between LPs and the protocol only (§3.7).
 
 ### 3.7 Fee revenue distribution
 
-Opening and closing fees use the same distribution. With an eligible referrer:
+Opening and closing fees use the same distribution:
 
 ```text
 lp_revenue = floor(
     collected_fee * fee_lp_revenue_share_bps / BPS
 )
 
-referral_revenue = floor(
-    collected_fee * referral_fee_share_bps / BPS
-)
-
-protocol_revenue =
-    collected_fee - lp_revenue - referral_revenue
+protocol_revenue = collected_fee - lp_revenue
 ```
 
-Without a referrer, `referral_revenue` is zero and the protocol receives the
-remainder. Initial defaults produce:
-
-| Recipient | No referrer | With referrer |
-|---|---:|---:|
-| LPs | 90% | 90% |
-| Protocol | 10% | 7.5% plus rounding residue |
-| Referrer | 0% | 2.5% |
-| Keepers | 0% | 0% |
+Initial defaults give LPs 90% and the protocol 10% plus rounding residue.
+Keepers receive no share.
 
 Borrow revenue uses a separate split:
 
@@ -1827,11 +1790,11 @@ borrow_protocol_revenue =
     collected_borrow - borrow_lp_revenue
 ```
 
-Its initial values are 90% to LPs and 10% to the protocol. It has no referral
-or keeper share.
+Its initial values are 90% to LPs and 10% to the protocol. It has no keeper
+share.
 
-LP revenue remains in residual cash LP equity. Protocol and referral revenue
-increase their explicit claim totals. All shares are calculated from the
+LP revenue remains in residual cash LP equity. Protocol revenue increases its
+explicit claim total. All shares are calculated from the
 amount actually collected, never from a nominal fee that the position could
 not pay.
 
@@ -1856,7 +1819,7 @@ For a decrease, close, take-profit, or stop-loss, the economic order is:
 8. Leave residual value in the surviving position or pay it to the trader.
 ```
 
-On an increase or decrease that leaves a position open, previously accrued
+On a decrease that leaves a position open, previously accrued
 funding and the completed borrow window are capitalized against existing stored
 collateral before the new exposure state begins. The closing-fee profit cap
 still subtracts those senior items when determining how much current realized
@@ -1902,11 +1865,11 @@ LPs are the residual backstop. In particular, LP equity absorbs:
 
 Uncollected LP-backed funding and borrow are not recorded as earned revenue.
 They are forgone revenue rather than additional cash debt. An uncollectible
-closing fee is waived by definition. Protocol and referral claims are created
+closing fee is waived by definition. Protocol claims are created
 only from fees actually collected.
 
 This backstop does not let an ordinary action bypass liquidation. Once a
-position is liquidatable, voluntary increase, decrease, close, TP, and SL
+position is liquidatable, voluntary decrease, close, TP, and SL
 settlement yield to the forced liquidation path. The LP backstop exists for
 forced settlement and unavoidable price gaps, not as optional financing for a
 voluntary action.
@@ -2452,8 +2415,8 @@ begins only at the post-checkpoint boundary.
 
 ### 4.11 Settling and resetting a borrow window
 
-An increase or partial decrease closes the old borrow window for the full old
-position before changing size:
+A partial decrease closes the old borrow window for the full old position
+before changing size:
 
 ```text
 function settle_and_reset_borrow_window(position, size_after):
@@ -2597,7 +2560,7 @@ Global configuration applies to the complete vault.
 | Field | Unit | Meaning and invariant |
 |---|---:|---|
 | `min_collateral` | Cash | Minimum stored collateral for a surviving position; must exceed `keeper_liquidation_reward` |
-| `min_position_lifetime` | Seconds | Minimum time after an open or size increase before voluntary exposure removal |
+| `min_position_lifetime` | Seconds | Minimum time after an open before voluntary exposure removal |
 | `max_price_age_seconds` | Seconds | Oldest price observation any action accepts (§8.6) |
 | `max_order_lifetime_seconds` | Seconds | Upper bound on a limit entry's `expires_at`; initial value `604,800` |
 | `max_market_order_lifetime_seconds` | Seconds | Upper bound on a market entry's `expires_at`; initial value `300` |
@@ -2608,18 +2571,17 @@ Global configuration applies to the complete vault.
 | `max_variable_borrow_bps_day` | Bps/day | Maximum utilization-dependent addition; initial value `250` |
 | `fee_lp_revenue_share_bps` | Bps | LP share of collected opening and closing fees; initial value `9,000` |
 | `borrow_lp_revenue_share_bps` | Bps | LP share of collected borrow; initial value `9,000` |
-| `referral_fee_share_bps` | Bps | Referral share of collected opening and closing fees; initial value `250` and carved from protocol revenue |
 | `config_timelock_seconds` | Seconds | Delay between proposing and applying a parameter change; initial value `172,800` |
 | `max_active_markets` | Count | Hard bound on the active-market registry and any synchronized LP-accounting loop |
 | `global_hard_cap_factor_limit_bps` | Bps | Bound on aggregate configured hard-cap exposure across market sides |
 | `hard_cap_relatch_band_bps` | Bps | Growth in a latched side's positive PnL that triggers a fresh hard-cap snapshot; initial value `2,500` |
 
 The protocol share is not stored as a separate percentage. It is the exact
-remainder after the configured LP and applicable referral shares. Configuration
-validation therefore requires:
+remainder after the configured LP share. Configuration validation therefore
+requires:
 
 ```text
-fee_lp_revenue_share_bps + referral_fee_share_bps <= BPS
+fee_lp_revenue_share_bps <= BPS
 borrow_lp_revenue_share_bps <= BPS
 ```
 
@@ -2650,7 +2612,6 @@ risk counters, and borrow clock:
 | `pending_receiver_funding_total` | Cash | Sum of guaranteed receiver funding attributed to every market but not yet relabelled into receiver positions |
 | `action_escrow_total` | Cash | Sum of collateral committed to pending trader actions and held inside the vault |
 | `protocol_claimable_total` | Cash | Collected protocol revenue not yet withdrawn |
-| `referral_claimable_total` | Cash | Sum of all unclaimed referrer balances |
 | `unclaimed_payout_total` | Cash | Sum of payouts and refunds held for owners who could not receive them (§12.1) |
 | `total_risk_units` | Cash-scaled risk units | Sum of risk units across every open position |
 | `open_position_count` | Count | Number of stored open positions |
@@ -2795,13 +2756,12 @@ One open position stores:
 | `lp_payer_index_snapshot` | Index | LP-backed payer index for the direction at the last funding boundary |
 | `receiver_index_snapshot` | Index | Receiver-credit index for the direction at the last funding boundary |
 | `opened_at` | Timestamp | Time the first exposure was successfully created |
-| `last_size_increase_at` | Timestamp | Start of the current minimum-position-lifetime restriction |
-| `pending_mutation_action_id` | Optional identifier | The one pending voluntary increase, decrease, or close for this position |
+| `pending_mutation_action_id` | Optional identifier | The one pending voluntary decrease or close for this position |
 | `take_profit` | Optional trigger | Attached take-profit instruction |
 | `stop_loss` | Optional trigger | Attached stop-loss instruction |
 
 There is no separately authoritative entry price. Size and base exposure
-together preserve the complete price exposure, including multiple increases.
+together preserve the complete price exposure.
 There is also no execution budget, keeper reserve allocation, accrued-fee
 counter, cached PnL, cached effective collateral, or cached health value.
 
@@ -2871,13 +2831,6 @@ LimitOpen {
     stop_loss
 }
 
-Increase {
-    position_id
-    size_added
-    collateral_added
-    acceptable_price
-}
-
 Decrease {
     position_id
     size_removed
@@ -2907,8 +2860,8 @@ committed size, trigger, acceptable price, direction, or collateral amount with
 new caller input.
 
 `pending_mutation_action_id` provides an O(1) reverse reference from a position
-to its one ordinary pending mutation. It prevents conflicting increases,
-decreases, or closes from being committed against the same pre-action state.
+to its one ordinary pending mutation. It prevents conflicting decreases or
+closes from being committed against the same pre-action state.
 Liquidation and ADL remain able to invalidate this reference as forced safety
 actions.
 
@@ -2933,9 +2886,7 @@ For a market or limit entry:
 escrowed_collateral = submitted_collateral
 ```
 
-For an increase that adds collateral, the added amount is likewise committed
-at creation. An increase without added collateral and every decrease or close
-has zero escrow.
+Every decrease or close has zero escrow.
 
 Escrow is an explicit non-LP claim. It is physical cash in the vault but is not
 LP equity, position collateral, fee revenue, or available risk backing. It does
@@ -2946,7 +2897,7 @@ Terminal distribution must reduce both the action's escrow and
 
 ```text
 successful entry:
-    opening fee       -> LP/protocol/referral ownership
+    opening fee       -> LP/protocol ownership
     keeper reward     -> keeper transfer
     remainder         -> position collateral
 
@@ -2967,22 +2918,7 @@ No terminal action can leave positive escrow attached to a removed record.
 
 ### 5.8 Referral state
 
-Referral accounting uses three persistent maps and one global aggregate:
-
-| Mapping | Value | Rule |
-|---|---|---|
-| `referral_code_owner[code]` | Address | First valid registration wins; owner is immutable |
-| `trader_referrer[trader]` | Optional address | Trader can replace it; self-referral is invalid |
-| `referral_balance[referrer]` | Cash | Accumulated unclaimed rewards |
-| `referral_claimable_total` | Cash aggregate | Must equal the sum of all referral balances |
-
-A fee uses the trader's valid referrer at the moment the fee is collected.
-Accrual increases the individual balance and aggregate in the same operation.
-A claim decreases both by the exact transferred amount.
-
-Referral ownership and positive balances are durable economic state. Storage
-maintenance or archival must never silently erase a code owner or unclaimed
-balance.
+*Removed in `5fad1d6`* with the referral program: no referral codes, referrer links, referral balances, or `referral_claimable_total` in the ledger.
 
 ### 5.9 LP claim state
 
@@ -3034,7 +2970,6 @@ The global keeper-reward group contains:
 |---|---|
 | `keeper_open_reward` | Entry escrow |
 | `keeper_limit_order_reward` | Entry escrow |
-| `keeper_increase_reward` | Stored position collateral |
 | `keeper_decrease_reward` | Stored position collateral |
 | `keeper_close_reward` | Position value |
 | `keeper_tp_reward` | Position value |
@@ -3061,7 +2996,7 @@ applicable open, limit, or expiry reward.
 The payments capped at what their source holds are listed in §3.5: the failure
 reward on a position action, `keeper_lp_resolve_reward`,
 `keeper_liquidation_reward`, and the reward of a terminal exit (close, TP, SL,
-ADL). A surviving increase or decrease pays its reward in full through
+ADL). A surviving decrease pays its reward in full through
 `pay_keeper_from_position`, which its preflight has already guaranteed.
 
 The blanket bound still matters for the surviving actions. Without it, a
@@ -3127,7 +3062,6 @@ non_lp_claims =
     + pending_receiver_funding_total
     + action_escrow_total
     + protocol_claimable_total
-    + referral_claimable_total
     + unclaimed_payout_total
 
 if physical_cash >= non_lp_claims:
@@ -3197,14 +3131,14 @@ Cleanup is part of every terminal transition:
   and checkpoint timestamp remain monotonic.
 - When a market has no open positions, its unassigned guaranteed-receiver
   residue is released to LP equity and deducted from the global aggregate.
-- A claimed protocol, referral, or unclaimed-payout balance is reduced before
+- A claimed protocol or unclaimed-payout balance is reduced before
   its cash transfer; a failed transfer reverts both changes.
 - A payout or refund owed to an owner who cannot receive it becomes an
   unclaimed payout balance rather than reverting its settlement (§12.1).
 - A terminal LP request retains its status for FIFO history but holds no
   escrow. The FIFO pointer cannot remain on a terminal request.
 
-No live position, pending action, escrow, referral balance, unclaimed payout,
+No live position, pending action, escrow, unclaimed payout,
 or protocol claim may disappear because of storage expiry. Storage lifetime must be extended or
 the state must remain restorable for as long as the economic obligation
 exists. §12.4 assigns each of these a storage class and requires every
@@ -3907,9 +3841,7 @@ initial_position_collateral =
 ```
 
 The fee is collected and distributed only after every successful-entry check
-passes. A size increase uses `size_added` and deducts the fee from the
-position's available value as part of successful settlement. A collateral-only
-addition never calls this function.
+passes. A collateral addition never calls this function.
 
 ### 6.9 Calculate the closing fee
 
@@ -3976,7 +3908,7 @@ There are two capitalization paths because a surviving mutation must settle
 its old index window before changing exposure, while a terminal settlement can
 use the position's complete final value.
 
-For an increase or partial decrease that will leave the position open:
+For a partial decrease that will leave the position open:
 
 ```text
 function capitalize_for_surviving_mutation(
@@ -4141,7 +4073,6 @@ function settle_terminal_position(inputs):
         distribute_open_close_revenue(
             ledger,
             closing_collected,
-            inputs.referrer,
             inputs.global_config
         )
 
@@ -4173,7 +4104,6 @@ Opening and closing fee distribution:
 function distribute_open_close_revenue(
     ledger,
     collected_fee,
-    referrer,
     global_config
 ):
     require collected_fee >= 0
@@ -4184,29 +4114,12 @@ function distribute_open_close_revenue(
         BPS
     )
 
-    referral_amount =
-        if referrer exists:
-            mul_div_floor(
-                collected_fee,
-                global_config.referral_fee_share_bps,
-                BPS
-            )
-        else:
-            0
-
-    protocol_amount =
-        collected_fee - lp_amount - referral_amount
-
+    protocol_amount = collected_fee - lp_amount
     ledger.protocol_claimable_total += protocol_amount
-
-    if referral_amount > 0:
-        referral_balance[referrer] += referral_amount
-        ledger.referral_claimable_total += referral_amount
 
     return RevenueSplit {
         lp_amount,
-        protocol_amount,
-        referral_amount
+        protocol_amount
     }
 ```
 
@@ -4229,8 +4142,7 @@ function distribute_borrow_revenue(ledger, collected_borrow, global_config):
 
     return RevenueSplit {
         lp_amount,
-        protocol_amount,
-        referral_amount: 0
+        protocol_amount
     }
 ```
 
@@ -4243,7 +4155,6 @@ function keeper_reward_for(action_kind, global_config):
     match action_kind:
         MarketOpen  -> keeper_open_reward
         LimitOpen   -> keeper_limit_order_reward
-        Increase    -> keeper_increase_reward
         Decrease    -> keeper_decrease_reward
         Close       -> keeper_close_reward
         TakeProfit  -> keeper_tp_reward
@@ -4728,7 +4639,7 @@ function verify_no_final_receiver_residue(ledger):
 ```
 
 Fee split residue goes to the protocol because protocol revenue is calculated
-as the amount collected minus the floored LP and referral shares. Proportional
+as the amount collected minus the floored LP share. Proportional
 position reductions assign their rounding difference to the removed exposure,
 and a final close removes every remainder. In a clean terminal vault, the final
 LP withdrawal may receive all residual cash LP equity so virtual share
@@ -4797,7 +4708,7 @@ function fail_entry_action(action, ledger, keeper, reward, reason):
 
 It never charges an opening fee or creates exposure.
 
-The corresponding terminal helper for an increase, decrease, or close is:
+The corresponding terminal helper for a decrease or close is:
 
 ```text
 function fail_position_action(action, position, keeper, reward, reason):
@@ -4839,7 +4750,7 @@ zero; the action is consumed either way.
 
 Refusing to terminate when the full reward is unpayable would leave an
 eligible action pending indefinitely while `pending_mutation_action_id` blocks
-every further increase, decrease, or close on that position — and position
+every further decrease or close on that position — and position
 mutations have neither a cancel operation nor an expiry, so the only exits
 would be `add_collateral` or liquidation. It would also break first-attempt
 finality: an action that survives an eligible attempt is a free retry.
@@ -5006,8 +4917,7 @@ projected_minimum_borrow = mul_div_ceil(
 At the initial parameters the term is small — at most about `2.9` bps of size
 against an initial margin of `500` bps — but it is not zero, and including it
 is what makes "resulting position is healthy after every charge" literally
-true. The same term belongs in the increase preflight in §7.8, evaluated
-against the full resulting risk units rather than only the added ones.
+true.
 
 On success:
 
@@ -5019,7 +4929,6 @@ ledger.action_escrow_total -= opening_fee
 distribute_open_close_revenue(
     ledger,
     opening_fee,
-    current_referrer(action.owner),
     global_config
 )
 
@@ -5042,7 +4951,6 @@ add_exposure(
 ledger.open_position_count += 1
 
 position.opened_at = now
-position.last_size_increase_at = now
 position.pending_mutation_action_id = None
 
 snapshot funding indices from current market indices
@@ -5237,181 +5145,7 @@ path to rescue the position before a liquidation transaction succeeds.
 
 ### 7.8 Create and settle an increase
 
-Creation:
-
-```text
-function create_increase(position_id, owner, request):
-    require owner authorization
-    require request.size_added > 0
-    require request.collateral_added >= 0
-
-    position = load position
-    require position.owner == owner
-    require position.pending_mutation_action_id is None
-
-    commit_price = read_stamped_price(position.market_id)
-
-    require mul_div_floor(
-        request.size_added, PRICE_PRECISION, commit_price.price
-    ) > 0
-    require mul_div_floor(
-        position.size + request.size_added,
-        market.config.market_risk_factor_bps,
-        BPS
-    ) > position.risk_units
-
-    if request.collateral_added > 0:
-        transfer_cash_from(owner, vault, request.collateral_added)
-        ledger.action_escrow_total += request.collateral_added
-
-    action_id = consume_next_action_id()
-    store Increase action with immutable size, collateral, acceptable price,
-        commit observation, and execute-after timestamp
-    position.pending_mutation_action_id = action_id
-
-    store position and ledger atomically
-    return action_id
-```
-
-Creation does not settle the old borrow window, add exposure, or charge a fee.
-
-The two dust checks are what keep an increase settleable. `derive_added_exposure`
-requires positive added base and positive added risk (§6.13), and those are
-`require`s, so failing them is an unexpected failure under §8.9: the call
-reverts and the action survives. A position mutation has no cancel operation
-and no expiry, so an increase small enough to round either quantity to zero
-would occupy `pending_mutation_action_id` permanently and leave the position
-with no increase, decrease, or close available for the rest of its life — only
-an attached trigger or liquidation could still exit it. A size add of one unit
-on a market priced in the tens of thousands is enough to do it. Rejecting at
-creation, against the commitment price, is what makes the settlement-time
-requires unreachable rather than merely defensive.
-
-The commitment price is the right reference even though settlement prices the
-action at the fill. Base rounds to zero only for a size add near the price
-itself, and no fill inside a market's ordinary movement turns a size that
-cleared this check into one that cannot. The risk-unit check does not depend on
-price at all.
-
-Successful settlement:
-
-```text
-function settle_increase(action_id, keeper):
-    require keeper authorization
-    load matching pending action and position
-    require position.pending_mutation_action_id == action_id
-    if now < action.execute_after:
-        return NotReady without state change or reward
-
-    fill = read_stamped_price(position.market_id)
-    if not fresh_for_commit(fill, action):
-        return NotReady without state change or reward
-
-    accrue_global_borrow(ledger, now)
-    accrue_market_funding(ledger, market, now, global_config)
-
-    pending_funding = calculate_pending_funding(position, market)
-    pending_borrow = calculate_pending_borrow(position, ledger)
-
-    if position is liquidatable at this snapshot:
-        return RequiresLiquidation without state change or reward
-    if not entry_price_allowed(position.direction, fill.price, acceptable):
-        return fail_position_action(
-            action,
-            position,
-            keeper,
-            keeper_increase_reward,
-            Slippage
-        )
-
-    preflight side_accepts_new_exposure(position side), the complete
-        resulting position, capacity, and market caps
-
-    if an expected preflight check fails:
-        return fail_position_action(
-            action,
-            position,
-            keeper,
-            keeper_increase_reward,
-            failed_check
-        )
-```
-
-An expected first-attempt failure consumes the market-style action. It pays
-`keeper_increase_reward` from stored position collateral when the position can
-safely pay it, refunds all added-collateral escrow, clears the reverse
-reference, and charges no opening fee. A liquidatable position is left for the
-liquidation path rather than charged for an ordinary failed attempt.
-
-On success:
-
-```text
-senior = capitalize_for_surviving_mutation(
-    position,
-    side,
-    ledger,
-    market,
-    pending_funding,
-    pending_borrow,
-    global_config
-)
-
-if action.collateral_added > 0:
-    move complete action escrow into position collateral
-
-opening_fee = calculate_opening_fee(action.size_added, market.config)
-remove_position_collateral(position, side, ledger, opening_fee)
-distribute_open_close_revenue(
-    ledger,
-    opening_fee,
-    current_referrer(position.owner),
-    global_config
-)
-
-pay_keeper_from_position(
-    position,
-    side,
-    ledger,
-    keeper,
-    global_config.keeper_increase_reward
-)
-
-exposure = derive_added_exposure(
-    position.direction,
-    position.size,
-    position.risk_units,
-    action.size_added,
-    fill.price,
-    market.config
-)
-add_exposure(
-    position,
-    side,
-    ledger,
-    exposure.size_added,
-    exposure.base_added,
-    exposure.risk_added
-)
-
-require resulting collateral >= min_collateral
-require resulting effective collateral
-    >= initial_margin(resulting size) + projected_minimum_borrow
-enforce global capacity and market exposure caps
-
-position.last_size_increase_at = now
-snapshot all funding indices for resulting size
-refresh market display and risk state
-refresh_borrow_rate(ledger, physical_cash, global_config)
-initialize_borrow_window(position, ledger, global_config)
-
-clear position.pending_mutation_action_id
-remove pending action with zero escrow
-store all state and emit increase result
-```
-
-The completed old borrow window is paid from pre-existing position collateral
-before added collateral joins the position. The new minimum uses the full
-resulting risk units and post-increase borrow rate.
+*Removed in `b42e5fe`.* Position mutations are decrease (§7.9) and close (§7.10) only. Neither escrows collateral, so a pending mutation has nothing to refund when it is superseded.
 
 ### 7.9 Create and settle a decrease
 
@@ -5444,7 +5178,7 @@ function settle_decrease(action_id, keeper):
     load matching action and position
     if now < action.execute_after:
         return NotReady without state change or reward
-    if now < position.last_size_increase_at + min_position_lifetime:
+    if now < position.opened_at + min_position_lifetime:
         return NotReady without state change or reward
 
     fill = read_stamped_price(position.market_id)
@@ -5534,7 +5268,6 @@ remove_position_collateral(position, side, ledger, closing_collected)
 distribute_open_close_revenue(
     ledger,
     closing_collected,
-    current_referrer(position.owner),
     global_config
 )
 
@@ -5611,7 +5344,7 @@ function settle_close(action_id, keeper):
     load matching action and position
     if now < action.execute_after:
         return NotReady without state change or reward
-    if now < position.last_size_increase_at + min_position_lifetime:
+    if now < position.opened_at + min_position_lifetime:
         return NotReady without state change or reward
 
     fill = read_stamped_price(position.market_id)
@@ -5694,7 +5427,7 @@ function execute_take_profit(position_id, keeper):
     load position and take-profit instruction
     if now < instruction.execute_after:
         return NotReady without state change or reward
-    if now < position.last_size_increase_at + min_position_lifetime:
+    if now < position.opened_at + min_position_lifetime:
         return NotReady without state change or reward
 
     fill = read_stamped_price(position.market_id)
@@ -5891,64 +5624,11 @@ queue position.
 
 ### 7.15 Register or change a referrer
 
-Register an immutable code owner:
-
-```text
-function register_referral_code(referrer, code):
-    require referrer authorization
-    require code is valid and unregistered
-
-    referral_code_owner[code] = referrer
-    emit code-registered result
-```
-
-Select or replace a trader's referrer:
-
-```text
-function set_referrer(trader, code):
-    require trader authorization
-    referrer = referral_code_owner[code]
-    require referrer exists
-    require referrer != trader
-
-    trader_referrer[trader] = referrer
-    emit referrer-updated result
-```
-
-Changing the mapping affects only fees collected afterward. It does not move
-or recalculate previously accrued referral balances.
+*Removed in `5fad1d6`* with the referral program.
 
 ### 7.16 Claim referral revenue
 
-```text
-function claim_referral_revenue(referrer):
-    require referrer authorization
-
-    amount = referral_balance[referrer]
-    require amount > 0
-    require ledger.referral_claimable_total >= amount
-
-    referral_balance[referrer] = 0
-    ledger.referral_claimable_total -= amount
-    transfer_cash(referrer, amount)
-
-    emit referral-claimed result
-    return amount
-```
-
-The debit occurs before the transfer in the logical sequence. Atomic reversion
-restores both if the transfer fails.
-
-Protocol revenue follows the same claim pattern:
-
-```text
-function claim_protocol_revenue(protocol_recipient, amount):
-    require protocol authority
-    require 0 < amount <= ledger.protocol_claimable_total
-
-    ledger.protocol_claimable_total -= amount
-    transfer_cash(protocol_recipient, amount)
-```
+*Removed in `5fad1d6`* with the referral program.
 
 ### 7.17 Deposit and withdraw LP liquidity
 
@@ -6281,6 +5961,14 @@ Its cumulative indices and checkpoint timestamp are retained, not reset, so a
 later re-registration cannot rewind an index that a historical position was
 priced against.
 
+**Implementation note (`10c845d`).** `register_market` and `deregister_market`
+are entered through the MarketGovernor (§12.3): `propose_market_config` for a
+brand-new market installs it at once, and `deregister_market` forwards to the
+PositionManager's governor-only entry point. The PositionManager still enforces
+every check above at install, including the market count and the hard-cap sum.
+Re-registering a deregistered market is a timelocked change, not an immediate
+registration.
+
 ## 8. Order lifecycle and failure behavior
 
 This section defines whether an action remains live, terminates, pays a keeper,
@@ -6316,7 +6004,7 @@ eligible =
   and fill_observed_at > created_at
   and, for expiring entries, now < expires_at
   and, for actions that remove exposure,
-      now >= position.last_size_increase_at + min_position_lifetime
+      now >= position.opened_at + min_position_lifetime
 ```
 
 The first, second and fourth clauses are timing gates that a later call can
@@ -6352,7 +6040,6 @@ action records.
 Market-style commitments include:
 
 - market-open entries;
-- increases;
 - partial decreases; and
 - voluntary full closes.
 
@@ -6435,7 +6122,7 @@ An open position can have at most one ordinary pending mutation:
 ```text
 pending_mutation_action_id =
     None
-    or one Increase, Decrease, or Close action ID
+    or one Decrease or Close action ID
 ```
 
 Creation fails if this reference is already occupied. This prevents two
@@ -6443,9 +6130,9 @@ commitments from assuming the same starting size, collateral, and debt
 baselines. The reference is cleared only by execution, terminal expected
 failure, or forced-position cleanup.
 
-An increase may carry added-collateral escrow. A decrease or close carries no
-cash escrow because its payment source is the existing position. All three use
-the per-market delay and post-commit observation gate.
+A decrease or close carries no cash escrow because its payment source is the
+existing position. Both use the per-market delay and post-commit observation
+gate.
 
 At the first eligible attempt:
 
@@ -6486,19 +6173,17 @@ delay_satisfied = now >= execute_after
 
 An action that removes exposure has a second, independent timing gate. Unlike
 `execute_after`, it is not frozen at creation: it is read from the position at
-settlement, so a size increase that lands between creation and settlement moves
-it forward.
+settlement. A position's size never grows, so in practice the gate runs from
+`opened_at`.
 
 ```text
 lifetime_satisfied =
-    now >= position.last_size_increase_at + min_position_lifetime
+    now >= position.opened_at + min_position_lifetime
 ```
 
-The gate is measured from `last_size_increase_at`, not `opened_at`, and it
-applies uniformly to decrease, close, take-profit, and stop-loss. This is
-deliberate. A size increase therefore re-locks the position for
-`min_position_lifetime`, including against its own attached stop-loss, so for
-one minute after aggregating exposure the only available exit is liquidation.
+The gate is measured from `opened_at` and applies uniformly to decrease,
+close, take-profit, and stop-loss, including against a position's own
+attached stop-loss.
 
 The alternative — exempting the risk-reducing stop-loss from the re-lock —
 was considered and rejected. Exempting stop-loss alone leaves take-profit as
@@ -6638,8 +6323,8 @@ trigger:
 
 | Action | Direction | Accepted fill |
 |---|---|---|
-| Open or increase | Long | `price <= acceptable_price` |
-| Open or increase | Short | `price >= acceptable_price` |
+| Open | Long | `price <= acceptable_price` |
+| Open | Short | `price >= acceptable_price` |
 | Decrease or close | Long | `price >= acceptable_price` |
 | Decrease or close | Short | `price <= acceptable_price` |
 
@@ -6659,7 +6344,7 @@ execute on a later qualifying observation.
 
 ### 8.8 Capacity failure
 
-Pending opens and increases do not reserve risk capacity, market-side size, or
+Pending opens do not reserve risk capacity, market-side size, or
 base exposure. They also do not affect funding skew or open interest before
 successful settlement.
 
@@ -6680,11 +6365,6 @@ terminal failure:
 - charge no opening fee;
 - create no position; and
 - remove the pending order.
-
-For an increase, insufficient capacity is likewise terminal after the action
-becomes eligible. The keeper receives `keeper_increase_reward` from the
-existing position if that payment is safe, added-collateral escrow is fully
-refunded, no opening fee is charged, and existing exposure remains unchanged.
 
 Concurrent pending orders can each appear individually fillable. Atomic
 settlement means the first successful transaction consumes capacity and later
@@ -6741,9 +6421,6 @@ Every escrowed unit has one terminal destination:
 | Expected entry failure | `0` | Open or limit reward | Remaining escrow | `0` |
 | Owner limit cancellation | `0` | `0` | Complete escrow | `0` |
 | Entry expiry cleanup | `0` | Expiry reward | Remaining escrow | `0` |
-| Successful increase | Collected on added size | Increase reward from position | `0` | Complete added-collateral escrow |
-| Expected increase failure | `0` | Increase reward from position | Complete added-collateral escrow | Existing position remains |
-| Liquidation or ADL supersedes increase | `0` | Only forced-action reward | Complete added-collateral escrow | Position is removed |
 
 Refunds always go to the owner frozen in the action. The settlement caller
 cannot redirect them. A refund the owner cannot receive is held for them as an
@@ -6761,7 +6438,6 @@ Exactly one keeper-reward field is selected per call:
 |---|---|
 | Successful or expected-failed market entry | `keeper_open_reward` |
 | Successful or expected-failed triggered limit entry | `keeper_limit_order_reward` |
-| Successful or expected-failed increase | `keeper_increase_reward` |
 | Successful or expected-failed decrease | `keeper_decrease_reward` |
 | Successful or expected-failed voluntary close | `keeper_close_reward` |
 | Successful TP | `keeper_tp_reward` |
@@ -6779,7 +6455,7 @@ Cleanup performed inside liquidation or ADL is not a second keeper action. The
 caller receives only the liquidation or ADL reward, not the reward of the
 superseded voluntary action or an expiry reward.
 
-Entry and expiry rewards come from action escrow. Increase, decrease, close,
+Entry and expiry rewards come from action escrow. Decrease, close,
 TP, and SL rewards come from position value. ADL uses payable position value or
 collateral. Liquidation alone may draw on LP residual equity for a price-gap
 shortfall, and only as far as that equity reaches.
@@ -6890,7 +6566,6 @@ non_lp_claims =
     + pending_receiver_funding_total
     + action_escrow_total
     + protocol_claimable_total
-    + referral_claimable_total
     + unclaimed_payout_total
 ```
 
@@ -6918,7 +6593,6 @@ For each aggregate claim:
 ```text
 position_collateral_total = sum(position.stored_collateral)
 action_escrow_total       = sum(pending_action.escrowed_collateral)
-referral_claimable_total  = sum(referral_balance[referrer])
 unclaimed_payout_total    = sum(unclaimed_payout[owner])
 ```
 
@@ -6931,31 +6605,30 @@ Only a fee actually collected from escrow or position value can be
 distributed. For every collected opening or closing fee:
 
 ```text
-collected_fee = lp_amount + protocol_amount + referral_amount
+collected_fee = lp_amount + protocol_amount
 ```
 
 For every collected borrow payment:
 
 ```text
 collected_borrow = lp_amount + protocol_amount
-referral_amount = 0
 ```
 
 All configured percentage shares use the collected amount as their base.
-Floor rounding is applied to the LP and referral shares, and the protocol
+Floor rounding is applied to the LP share, and the protocol
 receives the exact remainder. Therefore the split cannot over-distribute and
 cannot leave unowned fee dust.
 
 LP revenue creates no explicit claim. Removing the collected amount from the
-trader-owned label, then adding only the protocol and referral labels, leaves
-the LP share in residual equity. Protocol and referral claim totals increase
-by exactly their calculated amounts. Keepers receive no percentage of fee
+trader-owned label, then adding only the protocol label, leaves the LP share
+in residual equity. The protocol claim total increases by exactly its
+calculated amount. Keepers receive no percentage of fee
 revenue, and no keeper reserve exists.
 
 ### 9.3 Funding conservation
 
 Funding is a risk-balancing transfer, not protocol revenue. It never invokes
-opening-fee, closing-fee, borrow-fee, referral, or keeper distribution.
+opening-fee, closing-fee, borrow-fee, or keeper distribution.
 
 Each funding window divides payer flow into two non-overlapping parts:
 
@@ -7097,7 +6770,7 @@ settlement.
 
 ### 9.8 Risk-capacity enforcement
 
-Every successful open or increase must satisfy the post-settlement capacity
+Every successful open must satisfy the post-settlement capacity
 condition using the resulting claims, LP equity, fees, keeper reward, and
 exposure:
 
@@ -7134,8 +6807,8 @@ effective_collateral =
     + payable_pnl
 ```
 
-An open or increase must leave the resulting position at or above initial
-margin after all entry/increase charges and after the minimum-borrow floor
+An open must leave the resulting position at or above initial
+margin after all entry charges and after the minimum-borrow floor
 that its new window will quote. The floor is part of pending borrow from the
 first second of the window, so admitting a position without it would accept a
 position that is already below initial margin. A partial decrease must pay every
@@ -7235,11 +6908,6 @@ failed or superseded increase with added collateral:
 action.escrowed_collateral_after = 0
 ```
 
-For a successful increase, the complete added-collateral escrow joins the
-position first. The opening fee and increase keeper reward are then separate
-debits from the resulting position value; they are not second distributions of
-the same escrow.
-
 The individual escrow and `action_escrow_total` decrease by identical amounts.
 The action record cannot be removed while positive escrow remains attached.
 Refunds always use the owner stored at commitment; the caller cannot redirect
@@ -7252,7 +6920,7 @@ or expiry reward remains payable after a later configuration update.
 
 ### 9.12 No opening fee on failed entry
 
-An opening fee is collected only after an entry or increase passes every
+An opening fee is collected only after an entry passes every
 execution check and is committed successfully.
 
 For an expected failed market entry or triggered limit entry:
@@ -7267,11 +6935,6 @@ owner_refund = escrow - keeper_reward
 For an owner-cancelled limit entry, both the opening fee and keeper reward are
 zero and the complete escrow is refunded. For expiry cleanup, the opening fee
 is zero; only the expiry reward is deducted.
-
-An expected failed increase likewise charges no opening fee on the proposed
-added size, leaves existing exposure unchanged, and refunds all added-
-collateral escrow. Its action-specific keeper reward may be taken from the
-existing position only when doing so leaves that position safe.
 
 ### 9.13 Closing-fee boundaries
 
@@ -7344,7 +7007,7 @@ one operation are atomic, including:
 - position collateral and aggregate-collateral updates;
 - exposure aggregates and risk state;
 - pending-action records and reverse references;
-- escrow, protocol, referral, and receiver-funding claims;
+- escrow, protocol, and receiver-funding claims;
 - keeper payments, trader refunds, payouts, and LP transfers; and
 - events describing the outcome.
 
@@ -7378,7 +7041,7 @@ Global parameters affect the complete vault.
 | Parameter | Unit | Initial value | Meaning |
 |---|---:|---:|---|
 | `min_collateral` | Cash | `10,000,000` (`$1.00`) | Minimum stored collateral for every surviving position |
-| `min_position_lifetime` | Seconds | `60` | Time after open or the latest size increase before voluntary exposure removal |
+| `min_position_lifetime` | Seconds | `60` | Time after open before voluntary exposure removal |
 | `max_price_age_seconds` | Seconds | `60` | Oldest observation any action accepts (§8.6); must cover the feed's publication cadence (§12.7.4) |
 | `max_order_lifetime_seconds` | Seconds | `604,800` | Longest permitted limit-entry lifetime, one week (§8.5) |
 | `max_market_order_lifetime_seconds` | Seconds | `300` | Longest permitted market-entry lifetime, five minutes (§8.5) |
@@ -7394,25 +7057,19 @@ Global parameters affect the complete vault.
 |---|---:|---:|---|
 | `fee_lp_revenue_share_bps` | Bps | `9,000` | LP share of collected opening and closing fees |
 | `borrow_lp_revenue_share_bps` | Bps | `9,000` | LP share of collected borrow |
-| `referral_fee_share_bps` | Bps | `250` | Referrer share of collected opening and closing fees when eligible |
 
 The protocol percentage is derived rather than configured:
 
 ```text
-open_or_close_protocol_share_without_referrer =
+open_or_close_protocol_share =
     BPS - fee_lp_revenue_share_bps
-
-open_or_close_protocol_share_with_referrer =
-    BPS - fee_lp_revenue_share_bps - referral_fee_share_bps
 
 borrow_protocol_share =
     BPS - borrow_lp_revenue_share_bps
 ```
 
 With the initial values, opening and closing fees pay LPs `90%` and the
-protocol `10%` without a referrer. With a referrer they pay LPs `90%`, the
-referrer `2.5%`, and the protocol `7.5%`, subject to integer residue going to
-the protocol. Borrow pays LPs `90%` and the protocol `10%`.
+protocol `10%`, with integer residue going to the protocol. Borrow pays LPs `90%` and the protocol `10%`.
 
 #### 10.1.3 Keeper rewards
 
@@ -7422,7 +7079,6 @@ Every action has an independent fixed reward:
 |---|---:|---|
 | `keeper_open_reward` | `2,500,000` (`$0.25`) | Entry escrow |
 | `keeper_limit_order_reward` | `2,500,000` (`$0.25`) | Entry escrow |
-| `keeper_increase_reward` | `2,500,000` (`$0.25`) | Position value |
 | `keeper_decrease_reward` | `2,500,000` (`$0.25`) | Position value |
 | `keeper_close_reward` | `2,500,000` (`$0.25`) | Position value |
 | `keeper_tp_reward` | `2,500,000` (`$0.25`) | Position value |
@@ -7469,7 +7125,7 @@ capacity bounds, forced-risk thresholds, and trader-action delay.
 
 | Parameter | Unit | Initial value | Meaning |
 |---|---:|---:|---|
-| `open_fee_bps` | Bps of size added | `0` | Opening fee on opens and size increases |
+| `open_fee_bps` | Bps of size | `0` | Opening fee on opens |
 | `close_size_fee_bps` | Bps of size removed | `5` | Size component of the closing fee (`0.05%`) |
 | `close_pnl_fee_bps` | Bps of positive payable PnL | `1,000` | PnL component of the closing fee (`10%`) |
 | `max_funding_rate_bps_day` | Bps/day on position size | `80` | Payer funding rate at full blended skew |
@@ -7543,7 +7199,7 @@ every keeper reward <= min_collateral
 0 <= base_borrow_rate_bps_day <= BPS
 0 <= max_variable_borrow_bps_day <= BPS
 
-fee_lp_revenue_share_bps + referral_fee_share_bps <= BPS
+fee_lp_revenue_share_bps <= BPS
 borrow_lp_revenue_share_bps <= BPS
 
 max_active_markets > 0
@@ -7674,7 +7330,6 @@ base_borrow_rate_bps_day             = 25
 max_variable_borrow_bps_day          = 250
 fee_lp_revenue_share_bps             = 9,000           # 90%
 borrow_lp_revenue_share_bps          = 9,000           # 90%
-referral_fee_share_bps               = 250             # 2.5%
 config_timelock_seconds              = 172,800         # 48 hours
 max_active_markets                   = 8
 global_hard_cap_factor_limit_bps     = 10,000
@@ -7685,7 +7340,6 @@ min_deposit_nav_factor_bps           = 1,000           # 10%
 KEEPER REWARDS
 keeper_open_reward                   = 2,500,000        # $0.25
 keeper_limit_order_reward            = 2,500,000        # $0.25
-keeper_increase_reward               = 2,500,000        # $0.25
 keeper_decrease_reward               = 2,500,000        # $0.25
 keeper_close_reward                  = 2,500,000        # $0.25
 keeper_tp_reward                     = 2,500,000        # $0.25
@@ -7730,7 +7384,6 @@ insolvency-touch reward.
 
 These examples use the initial parameters unless a different rate is stated.
 Dollar values are displayed to seven decimal places where rounding matters.
-They assume no referral unless one is explicitly included.
 
 Common values are:
 
@@ -7793,7 +7446,7 @@ post-settlement risk units pass capacity    => capacity passes
 The action escrow becomes zero, the keeper receives `$0.25`, and `$5,099.75`
 is relabelled as position collateral. The position snapshots its funding and
 borrow indices at settlement. With the opening fee set to zero,
-LP, protocol, and referral opening-fee revenue are all zero.
+LP and protocol opening-fee revenue are both zero.
 
 ### 11.2 Market open rejected by slippage
 
@@ -7865,7 +7518,7 @@ The trader keeps all original collateral but none of this small price profit.
 The closing fee did not consume collateral; senior charges reduced how much of
 the nominal closing fee was collectible.
 
-Without a referrer, the collected closing fee splits as:
+The collected closing fee splits as:
 
 ```text
 LP residual       = floor($29.4895833 * 90%) = $26.5406249
@@ -7901,16 +7554,15 @@ Final payout:
 $5,000 + $2,000 - $87.50 - $0.25 - $200 = $6,712.25
 ```
 
-Assume this trader has an eligible referrer. The closing fee distributes:
+The closing fee distributes:
 
 ```text
 LP residual       = $180.00
-referrer claim    =   $5.00
-protocol claim    =  $15.00
+protocol claim    =  $20.00
 ```
 
 Borrow separately distributes `$78.75` to LP residual and `$8.75` to the
-protocol. The referrer and keeper receive no share of borrow.
+protocol. The keeper receives no share of borrow.
 
 ### 11.5 Losing close
 
@@ -7933,70 +7585,7 @@ still pays borrow and the fixed close reward. Collected borrow distributes
 
 ### 11.6 Increase and borrow-window reset
 
-A position begins with:
-
-```text
-size                     = $100,000
-risk units               =  $10,000
-stored collateral        =  $10,000
-rate at old-window quote = 35 bps/day on risk units
-rate during elapsed time = 35 bps/day on risk units
-old-window age           = 5 minutes
-```
-
-The trader commits a `$50,000` size increase with `$3,000` additional
-collateral. The added collateral is transferred at creation but remains action
-escrow until settlement.
-
-The old window's actual borrow is:
-
-```text
-actual borrow = ceil(
-    $10,000 * 35 / 10,000 * 300 / 86,400
-) = $0.1215278
-```
-
-Its stored 15-minute minimum is:
-
-```text
-minimum borrow = ceil(
-    $10,000 * 35 / 10,000 * 900 / 86,400
-) = $0.3645834
-
-old-window borrow due = max($0.1215278, $0.3645834)
-                      = $0.3645834
-```
-
-Settlement first charges the completed old window against the pre-existing
-position collateral, then applies the increase:
-
-```text
-old stored collateral                 $10,000.0000000
-- old-window borrow                        $0.3645834
-+ added collateral                     $3,000.0000000
-- opening fee on $50,000                    $0.0000000
-- increase keeper reward                   $0.2500000
------------------------------------------------------
-resulting stored collateral            $12,999.3854166
-
-resulting size                         $150,000
-resulting risk units                    $15,000
-required initial margin                  $7,500
-```
-
-The position passes initial margin. Suppose the post-mutation utilization
-refresh sets the new borrow rate to `40` bps/day. The old window and minimum are
-discarded after payment, the borrow snapshot is retaken at the current index,
-and the full resulting exposure receives a new minimum:
-
-```text
-new minimum borrow = ceil(
-    $15,000 * 40 / 10,000 * 900 / 86,400
-) = $0.6250000
-```
-
-The new window starts with zero actual index accrual and a stored minimum of
-`$0.6250000`. The `$50,000` increase is not tracked as a separate fee tranche.
+*Removed in `b42e5fe`* together with position increase.
 
 ### 11.7 Partial decrease
 
@@ -8107,7 +7696,7 @@ short net funding benefit = $288 - $87.50 - $0.25
 
 Both closes have zero price PnL, so both closing fees are zero. Funding sends
 `$288` to the receiver and `$864` to LP residual; it sends nothing to the
-protocol, referrer, or keeper. The combined `$437.50` borrow payment separately
+protocol or keeper. The combined `$437.50` borrow payment separately
 sends `$393.75` to LP residual and `$43.75` to the protocol.
 
 ### 11.9 Liquidation after a violent price movement
@@ -8460,8 +8049,8 @@ function side_accepts_new_exposure(side):
 ```
 
 A pause is therefore a vault-wide restricted state, and every path that adds
-exposure already knows what to do. A pending market open, limit open, or
-increase that becomes eligible during a pause takes the ordinary
+exposure already knows what to do. A pending market open or limit open that
+becomes eligible during a pause takes the ordinary
 expected-failure route of §8.9: it terminates, pays its action reward, refunds
 its escrow, charges no opening fee, and creates no position. A pause drains
 the pending risk-adding queue rather than freezing it, so no order waits for
@@ -8469,15 +8058,14 @@ an unpause that may never come.
 
 | Operation | While paused |
 |---|---|
-| Create any entry order or increase | Rejected at creation |
-| Settle a pending entry or increase | Terminates as an expected failure |
+| Create any entry order | Rejected at creation |
+| Settle a pending entry | Terminates as an expected failure |
 | Cancel a limit order, clean up an expired order | Allowed |
 | Add collateral | Allowed |
 | Decrease, close, take-profit, stop-loss | Allowed |
 | Liquidation, ADL | Allowed |
 | Create or resolve an LP request | Rejected; pending requests wait (vault pause or protocol pause) |
 | Disable a market / enable a market | Allowed / `unpause_authority` only |
-| Claim referral revenue | Allowed |
 | Claim protocol revenue | Rejected |
 | Global and market checkpoints | Always run |
 
@@ -8495,7 +8083,6 @@ request's escrow intact.
 Two entries in that table need their reasons stated. Protocol revenue claims
 are blocked because the same authority can generally pause; leaving both
 available at once creates a pause-and-drain path that costs nothing to close.
-Referral balances are ordinary user funds and are not withheld.
 
 Accrual never pauses. The global borrow index, every market's funding index,
 and both checkpoint clocks advance across a pause exactly as they would
@@ -8512,10 +8099,10 @@ should be distinct keys.
 
 | Authority | May |
 |---|---|
-| `configuration_authority` | Propose and cancel parameter changes, register markets |
+| `configuration_authority` | Propose and cancel parameter changes, register and deregister markets (all through the MarketGovernor) |
 | `pause_authority` | Set `paused` and disable a market; may not clear either |
 | `unpause_authority` | Clear `paused` and re-enable a market |
-| `oracle_authority` | Propose and cancel a replacement price feed |
+| `oracle_authority` | Propose and cancel a replacement price feed (`configuration_authority` may also cancel one, so revoking a compromised oracle key is enough to stop its proposal) |
 | `protocol_recipient` | Claim accumulated protocol revenue |
 
 Pausing and unpausing are split on purpose. Pausing is a safety action whose
@@ -8540,6 +8127,21 @@ cancel_configuration(authority, proposal_id):
     remove the proposal
 ```
 
+**Where this lives.** Proposals, timelocks, lapse windows, and the
+conservative fast path live in a separate **MarketGovernor** contract, split
+out of the PositionManager in `10c845d` to fit the network's contract-size
+limit. The PositionManager keeps the live configuration, because every
+settlement reads it. It accepts changes only through governor-only
+`install_global_config`, `install_market_config`, `install_price_feed`, and
+`deregister_market`, each carrying the `actor` who triggered the change so
+events still name a person. The governor's address is fixed in the
+PositionManager's constructor. The PositionManager re-validates every
+install: §10.3's per-config checks, plus the market-count and hard-cap-sum
+bounds over the whole market set. A compromised governor can therefore
+install only configurations the PositionManager would itself accept. The
+governor runs the per-config checks again at proposal time, so an invalid
+proposal fails up front instead of lapsing at apply.
+
 Applying is permissionless — the authorization happened at proposal and the
 delay is the protection — so a proposal must also **lapse**. One that nobody
 applied within `config_timelock_seconds` of becoming effective expires; without
@@ -8555,7 +8157,9 @@ whole book. The cost is stated rather than hidden — replacing a failed provide
 waits out the timelock, during which §12.7.3's outage behaviour applies.
 
 An upgrade can change anything a configuration change can, so every
-contract's upgrade timelock is at least `config_timelock_seconds`; a shorter
+contract's upgrade timelock is at least `config_timelock_seconds`. That
+includes the MarketGovernor: upgrading it must never be a faster path to new
+configuration than proposing it; a shorter
 upgrade delay would be a way around the configuration delay. The configuration
 manager, which owns roles rather than economic state, cannot read that value
 and relies on its own minimum.
@@ -8572,26 +8176,31 @@ governance action and a surprise.
 config_timelock_seconds initial value: 172,800   # 48 hours
 ```
 
+`config_timelock_seconds` itself cannot be set below one day, so a single
+delayed proposal cannot make every later change effectively instant.
+
 Two categories are exempt, and only these two: setting `paused`, and any
 change that is validated to move an **admission** bound in the more
 conservative direction — lowering an exposure ceiling, lowering
 `risk_capacity_limit_bps`, raising `initial_margin_bps`. Those bind only when
-new risk is admitted. `maintenance_margin_bps` is not exempt in either
+new risk is admitted. Registering a brand-new market also installs at once,
+since it has no positions to affect; re-registering a market that was
+deregistered waits out the timelock like any other change to a known market. `maintenance_margin_bps` is not exempt in either
 direction: raising it is conservative for the vault and is also the change that
 makes open positions liquidatable on the spot. A protocol that must wait 48 hours to become safer has the
 timelock pointed the wrong way. Every exempt change still checkpoints under
 the old value first, and still emits.
 
 Nothing in this specification grants an authority the ability to move position
-collateral, escrow, referral balances, or LP equity directly. There is no
+collateral, escrow, or LP equity directly. There is no
 administrative transfer, no forced position closure outside liquidation and
 ADL, and no path from any authority to a trader's funds other than the
 economics defined in sections 3 and 6.
 
 ### 12.4 Storage lifetime, upgrade, and migration
 
-§5.14 requires that no live position, pending action, escrow, referral
-balance, or protocol claim disappears through storage expiry. On Soroban that
+§5.14 requires that no live position, pending action, escrow, or protocol
+claim disappears through storage expiry. On Soroban that
 is a statement about storage type and TTL, so it is made concrete here.
 
 | State | Storage | TTL |
@@ -8599,13 +8208,13 @@ is a statement about storage type and TTL, so it is made concrete here.
 | Global ledger, configuration, authorities | Instance | Extended on every operation |
 | Position, pending action, LP request | Persistent | Extended on every touch |
 | Market configuration and accounting | Persistent | Extended on every touch |
-| Referral code owner, referrer map, balance | Persistent | Extended on every touch |
 | Unclaimed payout balance (§12.1) | Persistent | Extended on every touch |
 
 Nothing economic is stored as temporary. Every persistent entry must be
 extendable permissionlessly, because a position whose owner has gone quiet
-must still be liquidatable, and a referral balance must survive its owner's
-inactivity. An implementation that lets an entry expire has destroyed a claim,
+must still be liquidatable. Any account can extend any entry with the
+network's `ExtendFootprintTTL` operation, so the contracts expose no
+extension entry points of their own. An implementation that lets an entry expire has destroyed a claim,
 which no rule in §9 permits.
 
 `state_version` is the migration guard:
@@ -8723,7 +8332,7 @@ The required events and the fields a consumer cannot do without:
 | `FundingCheckpoint` | market, payer side per segment, index deltas, liability delta, EMA after |
 | `BorrowCheckpoint` | index delta, rate applied, rate after |
 | `RiskStateChanged` | market, side, previous state, next state, PnL factor |
-| `RevenueDistributed` | source, collected amount, LP, protocol, and referral shares |
+| `RevenueDistributed` | source, collected amount, LP and protocol shares |
 | `PayoutDeferred` / `PayoutClaimed` | owner, amount — a payout or refund held under §12.1, and its later withdrawal |
 | `LpRequestCreated` / `LpRequestResolved` | request id, owner, kind, escrow, shares, assets, NAV used, reward |
 | `ConfigurationProposed` / `ConfigurationApplied` | field, old value, new value, effective timestamp |
