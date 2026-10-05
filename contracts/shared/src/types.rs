@@ -440,6 +440,8 @@ pub struct LpRequest {
     pub owner: Address,
     pub kind: LpRequestKind,
     pub amount: i128,
+    /// The resolve reward fixed when the request was made.
+    pub reward: i128,
     pub request_time: u64,
     pub execute_after: u64,
     pub status: LpRequestStatus,

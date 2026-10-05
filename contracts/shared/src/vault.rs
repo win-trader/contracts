@@ -33,14 +33,15 @@ pub trait VaultInterface {
         assets: i128,
     ) -> SettlementResult;
 
-    /// Settle a matured withdrawal (request router only). Pays the resolve reward to
-    /// `executor` and the owner's assets to the router.
+    /// Settle a matured withdrawal (request router only). Pays `reward` (capped at the
+    /// assets) to `executor` and the owner's assets to the router.
     fn settle_withdrawal(
         env: Env,
         caller: Address,
         owner: Address,
         shares: i128,
         executor: Address,
+        reward: i128,
     ) -> SettlementResult;
 
     /// The live `keeper_lp_resolve_reward`.

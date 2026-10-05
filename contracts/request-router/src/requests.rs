@@ -83,7 +83,9 @@ fn authorize_vault_asset_pull(env: &Env, amount: i128) {
 
 pub(crate) fn request_deposit(env: &Env, owner: Address, assets: i128) -> u64 {
     owner.require_auth();
-    if assets <= VaultClient::new(env, &storage::vault(env)).lp_resolve_reward() {
+    // The reward is fixed now, so a later config change cannot reprice a queued request (T-22).
+    let reward = VaultClient::new(env, &storage::vault(env)).lp_resolve_reward();
+    if assets <= reward {
         panic_with_error!(env, RequestRouterError::InvalidAmount);
     }
     ensure_lp_actions_open(env);
@@ -105,6 +107,7 @@ pub(crate) fn request_deposit(env: &Env, owner: Address, assets: i128) -> u64 {
         owner,
         kind: LpRequestKind::Deposit,
         amount: assets,
+        reward,
         request_time: now,
         execute_after: now.saturating_add(delay),
         status: LpRequestStatus::Pending,
@@ -115,6 +118,7 @@ pub(crate) fn request_deposit(env: &Env, owner: Address, assets: i128) -> u64 {
         owner: request.owner,
         kind: request.kind,
         amount: assets,
+        reward,
         execute_after: request.execute_after,
     }
     .publish(env);
@@ -126,6 +130,7 @@ pub(crate) fn request_withdrawal(env: &Env, owner: Address, shares: i128) -> u64
     if shares <= 0 {
         panic_with_error!(env, RequestRouterError::InvalidAmount);
     }
+    let reward = VaultClient::new(env, &storage::vault(env)).lp_resolve_reward();
     ensure_lp_actions_open(env);
     transfer(
         env,
@@ -145,6 +150,7 @@ pub(crate) fn request_withdrawal(env: &Env, owner: Address, shares: i128) -> u64
         owner,
         kind: LpRequestKind::Withdrawal,
         amount: shares,
+        reward,
         request_time: now,
         execute_after: now.saturating_add(delay),
         status: LpRequestStatus::Pending,
@@ -155,6 +161,7 @@ pub(crate) fn request_withdrawal(env: &Env, owner: Address, shares: i128) -> u64
         owner: request.owner,
         kind: request.kind,
         amount: shares,
+        reward,
         execute_after: request.execute_after,
     }
     .publish(env);
@@ -188,7 +195,7 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
     let vault_client = VaultClient::new(env, &vault_address);
     let current = env.current_contract_address();
     let result = if request.kind == LpRequestKind::Deposit {
-        let reward = core::cmp::min(vault_client.lp_resolve_reward(), request.amount);
+        let reward = core::cmp::min(request.reward, request.amount);
         let deposit_assets = request.amount - reward;
         let asset = storage::asset(env);
         if reward > 0 {
@@ -204,7 +211,13 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
         settled
     } else {
         let settled =
-            vault_client.settle_withdrawal(&current, &request.owner, &request.amount, &executor);
+            vault_client.settle_withdrawal(
+                &current,
+                &request.owner,
+                &request.amount,
+                &executor,
+                &request.reward,
+            );
         match settled.status {
             SettlementStatus::Settled => {
                 deliver_or_hold(env, &request.owner, settled.amount - settled.reward)

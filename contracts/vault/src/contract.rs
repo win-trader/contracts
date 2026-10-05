@@ -274,9 +274,10 @@ impl VaultInterface for VaultContract {
         owner: Address,
         shares: i128,
         executor: Address,
+        reward: i128,
     ) -> SettlementResult {
         require_router(&env, &caller);
-        if shares <= 0 || Base::balance(&env, &caller) < shares {
+        if shares <= 0 || reward < 0 || Base::balance(&env, &caller) < shares {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
         if lp_paused(&env) {
@@ -319,7 +320,7 @@ impl VaultInterface for VaultContract {
             return failed();
         }
 
-        let reward = core::cmp::min(lp_resolve_reward(&env), assets);
+        let reward = core::cmp::min(reward, assets);
         let to_owner = assets - reward;
 
         Base::burn(&env, &caller, shares);

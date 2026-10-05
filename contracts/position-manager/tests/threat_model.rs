@@ -140,3 +140,26 @@ fn the_market_registry_is_capped_at_sixteen() {
     wide.max_active_markets = 16;
     p.gov().propose_global_config(&p.admin, &wide);
 }
+
+/// T-22 — the LP resolve reward was read at resolution, so a reward raised
+/// after a request was queued charged that request the new rate.
+#[test]
+fn a_queued_lp_request_pays_the_reward_in_force_when_it_was_made() {
+    let p = Protocol::new();
+    let lp = soroban_sdk::Address::generate(&p.env);
+    p.mint(&lp, usd(1_000));
+    let id = p.router_client().request_deposit(&lp, &usd(1_000));
+    let queued = defaults::KEEPER_REWARD;
+    assert_eq!(p.router_client().get_request(&id).reward, queued);
+
+    let mut raised = defaults::global_config();
+    raised.keeper_rewards.lp_resolve = queued * 4;
+    p.gov().propose_global_config(&p.admin, &raised);
+    p.observe(defaults::CONFIG_TIMELOCK_SECONDS, FILL);
+    p.gov().apply_global_config(&p.keeper);
+    assert_eq!(p.vault_client().lp_resolve_reward(), queued * 4);
+
+    let settled = p.router_client().resolve_next(&soroban_sdk::Address::generate(&p.env));
+    assert_eq!(settled.status, shared::SettlementStatus::Settled);
+    assert_eq!(settled.reward, queued, "the queued request keeps its original reward");
+}

@@ -9,6 +9,7 @@ pub struct LpRequestCreated {
     pub owner: Address,
     pub kind: LpRequestKind,
     pub amount: i128,
+    pub reward: i128,
     pub execute_after: u64,
 }
 

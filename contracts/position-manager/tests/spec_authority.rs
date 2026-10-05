@@ -124,7 +124,7 @@ fn the_vaults_cash_moving_entry_points_admit_only_their_one_caller() {
         "RequestRouter only"
     );
     assert!(v
-        .try_settle_withdrawal(&thief, &thief, &usd(100), &thief)
+        .try_settle_withdrawal(&thief, &thief, &usd(100), &thief, &0)
         .is_err());
     assert!(v.try_set_request_router(&thief, &thief).is_err());
     assert!(v.try_set_lp_config(&thief, &v.get_lp_config()).is_err());
