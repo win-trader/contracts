@@ -163,3 +163,21 @@ fn a_queued_lp_request_pays_the_reward_in_force_when_it_was_made() {
     assert_eq!(settled.status, shared::SettlementStatus::Settled);
     assert_eq!(settled.reward, queued, "the queued request keeps its original reward");
 }
+
+/// T-04 — `set_lp_config` is instant, and a withdrawal-utilization gate of 0
+/// froze every LP withdrawal without notice.
+#[test]
+fn the_admin_cannot_close_the_withdrawal_gate() {
+    use vault::VaultError;
+    let p = Protocol::new();
+    let mut config = p.vault_client().get_lp_config();
+    config.max_withdraw_utilization_bps = 0;
+    assert_eq!(
+        p.vault_client().try_set_lp_config(&p.admin, &config),
+        Err(Ok(contract_error(VaultError::InvalidConfig as u32)))
+    );
+    config.max_withdraw_utilization_bps = 4_999;
+    assert!(p.vault_client().try_set_lp_config(&p.admin, &config).is_err());
+    config.max_withdraw_utilization_bps = 5_000;
+    p.vault_client().set_lp_config(&p.admin, &config);
+}

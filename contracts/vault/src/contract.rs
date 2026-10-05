@@ -50,8 +50,14 @@ fn require_router(env: &Env, caller: &Address) {
     shared::bump_instance_ttl(env);
 }
 
+// `set_lp_config` takes effect immediately, so it may tune the withdrawal
+// gate but not close it: below this floor an admin could freeze every
+// withdrawal without notice (THREAT_MODEL T-04).
+const MIN_WITHDRAW_UTILIZATION_BPS: u32 = 5_000;
+
 fn validate_config(env: &Env, config: &LpConfig) {
-    if config.max_withdraw_utilization_bps > BPS as u32
+    if config.max_withdraw_utilization_bps < MIN_WITHDRAW_UTILIZATION_BPS
+        || config.max_withdraw_utilization_bps > BPS as u32
         || config.min_deposit_nav_factor_bps > BPS as u32
         || config.lp_request_delay_seconds == 0
         || config.lp_request_delay_seconds > shared::constants::SHARED_BUMP_SECONDS
