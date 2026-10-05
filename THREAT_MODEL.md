@@ -231,7 +231,7 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 | **T-12** | Asymmetric NAV favours depositors when traders are net losing | Medium | Design/Residual | Have auditors quantify the value transfer. Consider including net-negative side PnL (haircut) and accrued receivables in NAV for deposits only. |
 | T-f | Funding manipulation through the instant-weight term | Medium | Design/Residual | Economic review; consider a lower `instant_weight_bps` cap in `validate_market`. |
 | **T-07** | Pending price-feed proposal survives ORACLE revocation | Low–Med | **Fixed in `10c845d`** | ADMIN can cancel a price-feed proposal on the MarketGovernor, so revoking the ORACLE key and cancelling is enough. |
-| **T-13** | Unbounded `max_active_markets` versus Soroban resource limits | Low–Med | Confirmed (bound kept in the PM) | Benchmark the worst case `resolve_next` → `prepare_lp_snapshot` and enforce a hard ceiling in `validate_global`. |
+| **T-13** | Unbounded `max_active_markets` versus Soroban resource limits | Low–Med | Measured; bound kept in the PM | `resolve_next` costs 99.8M of the 400M budget with 8 markets (§9.1), about 12M per market. Enforce a hard ceiling in `validate_global` (16 or below keeps resolution under half the budget). |
 | **T-24** | MarketGovernor compromise equals config compromise | Medium | Design/Residual | A compromised governor can install any config that passes the PM's own checks: fees, margins and caps anywhere within their validated bounds, at once. Bounds: the PM re-validates every install (per-config validity, market count, hard-cap sum), the governor's address is fixed in the PM constructor, and the governor's upgrade delay is never shorter than the config timelock. Hold UPGRADER for the governor as tightly as for the PM, and monitor `upgprp` on it too. |
 | T-25 | Governor and PM must be wired to each other | Low | Mitigated | No setter on either side. `deploy.sh` derives the governor's address from a salt, deploys the PM pinned to it, deploys the governor at that salt, and fails unless `PM.governor()` and `governor.position_manager()` match. |
 | T-15 | `set_vault` and `set_request_router` are one-shot with no back-reference check | Low | Mitigated off-chain | `deploy.sh` now checks the wiring after deploy: the feed and asset addresses, and a simulated `update_indices` that only succeeds through PM's stored vault. The contracts still expose no vault or router getters and do no on-chain back-reference check. |
@@ -296,7 +296,16 @@ Measured upload cost (instructions): PositionManager 102.6M, Vault 62.4M, Market
 
 Keeper note (re-run on the stellar-optimized WASM): `resolve_next` passed simulation but was rejected at submission with `ResourceLimitExceeded`, and settled once submitted with `--instruction-leeway 1000000` (about 0.25% of the 400M budget). Simulation slightly underestimates it, probably because accrual covers more elapsed time by the time the transaction lands. Keepers and the LP resolver must submit with an instruction leeway; otherwise the LP queue head can fail repeatedly (compare D-1).
 
-Not measured: runtime CPU of settlement and LP resolution, because the CLI's cost report shows fees, not instruction counts. Measure both on testnet before mainnet, with all markets registered (see T-13).
+Runtime CPU on testnet (canonical build, eight markets registered, the default `max_active_markets`). These are throwaway contracts behind a mock feed, recorded in scratch files only; the repo's `deployments/testnet.json` is unchanged. Counts are from simulation against the deployed contracts, and every transaction was then submitted successfully with a 2M instruction leeway:
+
+| Call | Instructions | Share of 400M |
+|---|---|---|
+| `settle_market_open` | 22.9M | 5.7% |
+| `liquidate_position` (after a 50% price crash) | 25.4M | 6.3% |
+| `settle_close` | 31.2M | 7.8% |
+| `resolve_next` (prices and snapshots all 8 markets) | 99.8M | 25.0% |
+
+LP resolution is the only call whose cost grows with the market count, at about 12M per market. It sits at a quarter of the budget at eight markets, so the market-count bound (T-13) has real slack but should stay low double-digits at most.
 
 ### 9.2 Code-quality ("ponytail") review
 

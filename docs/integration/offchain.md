@@ -63,7 +63,7 @@ the reward.
 
 **Submit with an instruction leeway.** `resolve_next` passed simulation but
 failed at submission with `ResourceLimitExceeded` on a local network, and
-succeeded with `--instruction-leeway 1000000`. Accrual covers more elapsed
+succeeded with `--instruction-leeway 1000000`. On testnet, every settlement, liquidation, and LP resolution went through with a 2M leeway. Accrual covers more elapsed
 time by the time the transaction lands than when it was simulated. Add a
 leeway to every settlement, liquidation, and LP resolution, or the LP queue
 head can fail repeatedly (THREAT_MODEL D-1).
