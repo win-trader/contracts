@@ -7,6 +7,23 @@ pub struct UpgradeProposed {
     pub eta: u64,
 }
 
+/// A one-shot cross-contract wiring (`set_vault`, `set_request_router`).
+#[contractevent(topics = ["wired"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Wired {
+    pub target: Symbol,
+    pub address: Address,
+    pub caller: Address,
+}
+
+/// A completed post-upgrade migration.
+#[contractevent(topics = ["migrated"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Migrated {
+    pub version: u32,
+    pub operator: Address,
+}
+
 #[contractevent(topics = ["upgcan"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeCancelled {

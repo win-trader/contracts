@@ -241,6 +241,7 @@ impl MarketGovernorContract {
         require_role(&env, &operator, ROLE_UPGRADER);
         ensure_can_complete_migration(&env);
         storage::save_version(&env, data.version);
+        shared::events::Migrated { version: data.version, operator }.publish(&env);
         complete_migration(&env);
     }
 }

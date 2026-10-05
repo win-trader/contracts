@@ -181,3 +181,50 @@ fn the_admin_cannot_close_the_withdrawal_gate() {
     config.max_withdraw_utilization_bps = 5_000;
     p.vault_client().set_lp_config(&p.admin, &config);
 }
+
+/// R-1 — the one-shot wirings left no event, so the audit trail could not show
+/// who connected the PositionManager to its vault, or the vault to its router.
+#[test]
+fn one_shot_wirings_are_evented() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::{TryFromVal, Val, Vec};
+    let p = Protocol::new();
+    let wired = |source: &soroban_sdk::Address| -> Vec<Val> {
+        let topic = Symbol::new(&p.env, "wired");
+        p.env
+            .events()
+            .all()
+            .iter()
+            .find(|(src, topics, _)| {
+                src == source
+                    && topics.first().map(|t| Symbol::try_from_val(&p.env, &t) == Ok(topic.clone())).unwrap_or(false)
+            })
+            .map(|(_, _, data)| Vec::<Val>::try_from_val(&p.env, &data).unwrap())
+            .expect("a wired event")
+    };
+
+    let pm = p.env.register(
+        position_manager::PositionManagerContract,
+        (
+            p.config_manager.clone(),
+            soroban_sdk::Address::generate(&p.env),
+            p.feed.clone(),
+            defaults::global_config(),
+        ),
+    );
+    position_manager::PositionManagerContractClient::new(&p.env, &pm).set_vault(&p.admin, &p.vault);
+    let data = wired(&pm);
+    assert_eq!(Symbol::try_from_val(&p.env, &data.get(0).unwrap()), Ok(Symbol::new(&p.env, "vault")));
+    assert_eq!(soroban_sdk::Address::try_from_val(&p.env, &data.get(2).unwrap()), Ok(p.admin.clone()));
+
+    let vault = p.env.register(
+        vault::VaultContract,
+        (p.token.clone(), p.config_manager.clone(), pm.clone(), p.vault_client().get_lp_config()),
+    );
+    vault::VaultContractClient::new(&p.env, &vault).set_request_router(&p.admin, &p.router);
+    let data = wired(&vault);
+    assert_eq!(
+        Symbol::try_from_val(&p.env, &data.get(0).unwrap()),
+        Ok(Symbol::new(&p.env, "request_router"))
+    );
+}

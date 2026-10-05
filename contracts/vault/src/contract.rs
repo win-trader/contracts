@@ -183,6 +183,12 @@ impl VaultInterface for VaultContract {
             panic_with_error!(&env, VaultError::AlreadyInitialized);
         }
         storage::set(&env, &storage::Key::RequestRouter, &request_router);
+        shared::events::Wired {
+            target: soroban_sdk::Symbol::new(&env, "request_router"),
+            address: request_router,
+            caller,
+        }
+        .publish(&env);
     }
 
     fn receive_collateral(env: Env, caller: Address, from: Address, amount: i128) {
@@ -430,6 +436,7 @@ impl VaultContract {
         require_role(&env, &operator, ROLE_UPGRADER);
         ensure_can_complete_migration(&env);
         storage::save_version(&env, data.version);
+        shared::events::Migrated { version: data.version, operator }.publish(&env);
         complete_migration(&env);
     }
 }

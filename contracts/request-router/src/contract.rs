@@ -88,6 +88,7 @@ impl RequestRouterContract {
         require_role(&env, &operator, ROLE_UPGRADER);
         ensure_can_complete_migration(&env);
         storage::save_version(&env, &data);
+        shared::events::Migrated { version: data.version, operator }.publish(&env);
         complete_migration(&env);
     }
 }

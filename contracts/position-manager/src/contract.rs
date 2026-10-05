@@ -150,6 +150,12 @@ impl PositionManager for PositionManagerContract {
             panic_with_error!(&env, PositionManagerError::AlreadyInitialized);
         }
         storage::save_vault(&env, &vault);
+        shared::events::Wired {
+            target: Symbol::new(&env, "vault"),
+            address: vault,
+            caller,
+        }
+        .publish(&env);
     }
 
     fn create_market_open(env: Env, owner: Address, market: Symbol, request: OpenPayload) -> u64 {
@@ -503,6 +509,7 @@ impl PositionManagerContract {
         ledger.state_version = ledger::STATE_VERSION;
         storage::save_ledger(&env, &ledger);
         storage::save_version(&env, migration_data.version);
+        shared::events::Migrated { version: migration_data.version, operator }.publish(&env);
         complete_migration(&env);
     }
 }
