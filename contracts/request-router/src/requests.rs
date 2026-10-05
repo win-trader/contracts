@@ -232,3 +232,39 @@ pub(crate) fn resolve_next(env: &Env, executor: Address) -> SettlementResult {
     .publish(env);
     result
 }
+
+/// How long a request must have been resolvable before the pause key may skip it.
+pub(crate) const SKIP_GRACE_SECONDS: u64 = 86_400;
+
+// The escape hatch for a queue head that cannot resolve (THREAT_MODEL T-02):
+// the request is refunded in full and the queue moves on. It can only return
+// escrow to its owner, never redirect it.
+pub(crate) fn skip_head(env: &Env, caller: Address) {
+    let id = storage::next_to_resolve(env);
+    let mut request = storage::load_request(env, id);
+    if request.status != LpRequestStatus::Pending {
+        panic_with_error!(env, RequestRouterError::InvalidRequest);
+    }
+    if env.ledger().timestamp() < request.execute_after.saturating_add(SKIP_GRACE_SECONDS) {
+        panic_with_error!(env, RequestRouterError::TooEarly);
+    }
+    request.status = LpRequestStatus::Failed;
+    storage::save_request(env, &request);
+    storage::advance_next_to_resolve(env, id);
+    if request.kind == LpRequestKind::Deposit {
+        deliver_or_hold(env, &request.owner, request.amount);
+    } else {
+        let current = env.current_contract_address();
+        transfer(env, &storage::vault(env), &current, &request.owner, request.amount);
+    }
+    events::LpRequestResolved {
+        request_id: id,
+        owner: request.owner,
+        kind: request.kind,
+        status: request.status,
+        settled_amount: 0,
+        reward: 0,
+    }
+    .publish(env);
+    events::LpRequestSkipped { request_id: id, caller }.publish(env);
+}

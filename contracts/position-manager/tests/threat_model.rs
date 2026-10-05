@@ -10,7 +10,7 @@ use spec_harness::*;
 use market_governor::MarketGovernorError;
 use position_manager::PositionManagerError;
 use shared::{defaults, ActionOutcome};
-use soroban_sdk::Symbol;
+use soroban_sdk::{testutils::Address as _, Symbol};
 
 fn contract_error(code: u32) -> soroban_sdk::Error {
     soroban_sdk::Error::from_contract_error(code)
@@ -64,4 +64,64 @@ fn a_displaced_action_keeps_the_accrual_it_announced() {
     );
     assert_eq!(c.get_market(&p.market).last_funding_checkpoint, p.now());
     p.assert_conserved("after a displaced close");
+}
+
+/// T-02 — LP settlement priced every registered market, so one market with no
+/// usable price, even an empty one, halted every deposit and withdrawal.
+#[test]
+fn an_empty_market_without_a_price_does_not_block_lp_settlement() {
+    let p = Protocol::new();
+    // Registered, but the feed has never priced it and nobody trades it.
+    p.gov()
+        .propose_market_config(&p.admin, &Symbol::new(&p.env, "ETH"), &defaults::market_config());
+
+    let lp = soroban_sdk::Address::generate(&p.env);
+    p.mint(&lp, usd(1_000));
+    p.router_client().request_deposit(&lp, &usd(1_000));
+    p.observe(defaults::LP_REQUEST_DELAY_LOCAL, FILL);
+    assert_eq!(
+        p.router_client().resolve_next(&soroban_sdk::Address::generate(&p.env)).status,
+        shared::SettlementStatus::Settled
+    );
+    p.assert_conserved("after settling past an unpriced empty market");
+}
+
+/// T-02 — a queue head that cannot resolve (here: a live market whose price
+/// went stale) blocked every LP request behind it, with no way past. The pause
+/// key can now refund it in full and move on, but only after a day's grace.
+#[test]
+fn the_pause_key_can_refund_a_stuck_queue_head_after_a_grace_period() {
+    use request_router::RequestRouterError;
+    let p = Protocol::new();
+    p.open_position();
+    let lp = soroban_sdk::Address::generate(&p.env);
+    p.mint(&lp, usd(1_000));
+    let id = p.router_client().request_deposit(&lp, &usd(1_000));
+
+    // The live market's feed stops publishing past max_price_age.
+    p.wait(defaults::LP_REQUEST_DELAY_LOCAL + defaults::MAX_PRICE_AGE_SECONDS + 1);
+    let executor = soroban_sdk::Address::generate(&p.env);
+    assert!(p.router_client().try_resolve_next(&executor).is_err(), "the head is stuck");
+
+    let outsider = soroban_sdk::Address::generate(&p.env);
+    assert_eq!(
+        p.router_client().try_skip_head(&outsider),
+        Err(Ok(contract_error(RequestRouterError::Unauthorized as u32)))
+    );
+    assert_eq!(
+        p.router_client().try_skip_head(&p.admin),
+        Err(Ok(contract_error(RequestRouterError::TooEarly as u32)))
+    );
+
+    p.wait(86_400);
+    p.router_client().skip_head(&p.admin);
+    assert_eq!(p.cash(&lp), usd(1_000), "the whole escrow comes back, no reward taken");
+    assert_eq!(p.router_client().next_request_to_resolve(), id + 1);
+    assert_eq!(
+        p.router_client().get_request(&id).status,
+        shared::LpRequestStatus::Failed
+    );
+    // The conservation check prices the book, so the feed has to be live again.
+    p.publish(FILL);
+    p.assert_conserved("after skipping a stuck head");
 }

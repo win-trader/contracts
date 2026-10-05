@@ -15,4 +15,6 @@ pub enum RequestRouterError {
     UpgradeNoPending = 440,
     UpgradeTimelockNotElapsed = 441,
     UpgradeHashMismatch = 442,
+
+    TooEarly = 450,
 }

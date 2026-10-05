@@ -56,6 +56,11 @@ impl RequestRouter for RequestRouterContract {
         storage::next_to_resolve(&env)
     }
 
+    fn skip_head(env: Env, caller: Address) {
+        require_role(&env, &caller, ROLE_PAUSER);
+        requests::skip_head(&env, caller);
+    }
+
     fn claim_lp_payout(env: Env, owner: Address) -> i128 {
         requests::claim_lp_payout(&env, owner)
     }

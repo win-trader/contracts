@@ -102,6 +102,7 @@ fn ranges() -> [(&'static str, u32, u32, Vec<u32>); 5] {
                 Rr::UpgradeNoPending as u32,
                 Rr::UpgradeTimelockNotElapsed as u32,
                 Rr::UpgradeHashMismatch as u32,
+                Rr::TooEarly as u32,
             ],
         ),
         (

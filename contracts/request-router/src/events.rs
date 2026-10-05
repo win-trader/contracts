@@ -30,6 +30,13 @@ pub struct LpPayoutDeferred {
     pub amount: i128,
 }
 
+#[contractevent(topics = ["lpskip"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LpRequestSkipped {
+    pub request_id: u64,
+    pub caller: Address,
+}
+
 #[contractevent(topics = ["lpclaim"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LpPayoutClaimed {

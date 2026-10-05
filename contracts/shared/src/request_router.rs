@@ -20,6 +20,10 @@ pub trait RequestRouter {
     /// The id of the queue head.
     fn next_request_to_resolve(env: Env) -> u64;
 
+    /// Refund the queue head in full and move past it (PAUSER). Only once it has
+    /// been resolvable for a day; the escape hatch for a head that cannot resolve.
+    fn skip_head(env: Env, caller: Address);
+
     /// Withdraw LP payouts and refunds that could not be delivered at resolution.
     fn claim_lp_payout(env: Env, owner: Address) -> i128;
 

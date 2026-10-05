@@ -47,8 +47,14 @@ pub fn build_snapshot(
     let mut i = 0u32;
     while i < markets.len() {
         let symbol = markets.get(i).unwrap();
-        let price = read_stamped_price(env, &symbol).price;
         let mut market = storage::get_market(env, &symbol);
+        // An empty market contributes no PnL at any price, so a stale or
+        // delisted feed for it must not block LP settlement (THREAT_MODEL T-02).
+        let empty = market.long.size_open_interest == 0
+            && market.short.size_open_interest == 0
+            && market.long.base_exposure == 0
+            && market.short.base_exposure == 0;
+        let price = if empty { 0 } else { read_stamped_price(env, &symbol).price };
 
         let long_num = math::sub(
             env,

@@ -822,6 +822,8 @@ fn an_observation_is_refused_only_once_it_is_older_than_the_limit() {
     let p = Protocol::new();
     let c = p.pm();
     let limit = defaults::MAX_PRICE_AGE_SECONDS;
+    // Only a market with exposure is priced by the snapshot (THREAT_MODEL T-02).
+    p.open_position();
 
     p.publish(FILL);
     p.wait(limit);
