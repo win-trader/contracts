@@ -26,6 +26,7 @@ pub enum StorageKey {
     NextActionId,
     UnclaimedPayout(Address),
     Governor,
+    PriceFeedDecimals,
 }
 
 pub fn is_paused(env: &Env) -> bool {
@@ -169,6 +170,17 @@ pub fn save_price_feed(env: &Env, price_feed: &Address) {
     env.storage()
         .instance()
         .set(&StorageKey::PriceFeed, price_feed);
+}
+
+pub fn get_price_feed_decimals(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::PriceFeedDecimals)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
+}
+
+pub fn save_price_feed_decimals(env: &Env, decimals: u32) {
+    env.storage().instance().set(&StorageKey::PriceFeedDecimals, &decimals);
 }
 
 pub fn get_governor(env: &Env) -> Address {

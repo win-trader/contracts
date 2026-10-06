@@ -7,7 +7,7 @@ use crate::{
 };
 use position::{adl, entry, liquidate, mutation, trigger};
 use shared::constants::{
-    INDEX_PRECISION, PRICE_DECIMALS, ROLE_ADMIN, ROLE_PAUSER, ROLE_PROTOCOL,
+    INDEX_PRECISION, ROLE_ADMIN, ROLE_PAUSER, ROLE_PROTOCOL,
     ROLE_UNPAUSER, ROLE_UPGRADER,
 };
 use shared::{
@@ -21,11 +21,14 @@ use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complet
 #[contract]
 pub struct PositionManagerContract;
 
-fn require_feed_decimals(env: &Env, price_feed: &Address) {
-    match PriceFeedClient::new(env, price_feed).try_decimals() {
-        Ok(Ok(decimals)) if decimals == PRICE_DECIMALS => {}
+// Installs a feed and the decimals its prices are rescaled from.
+fn set_price_feed(env: &Env, price_feed: &Address) {
+    let decimals = match PriceFeedClient::new(env, price_feed).try_decimals() {
+        Ok(Ok(d)) if d <= shared::price_feed::MAX_FEED_DECIMALS => d,
         _ => panic_with_error!(env, PositionManagerError::PriceUnavailable),
-    }
+    };
+    storage::save_price_feed(env, price_feed);
+    storage::save_price_feed_decimals(env, decimals);
 }
 
 fn validate_global_against_markets(env: &Env, config: &GlobalConfig) {
@@ -129,8 +132,7 @@ impl PositionManagerContract {
         validation::validate_global(&env, &config);
         storage::save_config_manager(&env, &config_manager);
         storage::save_governor(&env, &governor);
-        require_feed_decimals(&env, &price_feed);
-        storage::save_price_feed(&env, &price_feed);
+        set_price_feed(&env, &price_feed);
         storage::save_global_config(&env, &config);
         let initial_rate = math::mul(&env, config.base_borrow_rate_bps_day, INDEX_PRECISION);
         storage::save_ledger(&env, &Ledger::new(env.ledger().timestamp(), initial_rate));
@@ -287,8 +289,7 @@ impl PositionManager for PositionManagerContract {
 
     fn install_price_feed(env: Env, caller: Address, actor: Address, price_feed: Address) {
         require_governor(&env, &caller);
-        require_feed_decimals(&env, &price_feed);
-        storage::save_price_feed(&env, &price_feed);
+        set_price_feed(&env, &price_feed);
         events::emit_price_feed_changed(&env, &actor, &price_feed);
     }
 

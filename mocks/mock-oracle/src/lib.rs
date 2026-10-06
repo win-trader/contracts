@@ -1,6 +1,10 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Env, Symbol};
+//! Test-only SEP-40 price feed. Anyone can set prices; never deploy it outside
+//! local and test networks. It defines its own `Asset`, as a third-party feed
+//! would, so the protocol is exercised against the SEP-40 wire format.
+
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10,8 +14,16 @@ pub struct PriceData {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Asset {
+    Stellar(Address),
+    Other(Symbol),
+}
+
+#[contracttype]
 pub enum StorageKey {
     Price(Symbol),
+    Decimals,
 }
 
 #[contract]
@@ -38,11 +50,19 @@ impl MockOracle {
             .set(&StorageKey::Price(symbol), &data);
     }
 
-    pub fn lastprice(env: Env, symbol: Symbol) -> Option<PriceData> {
-        env.storage().instance().get(&StorageKey::Price(symbol))
+    /// Report prices with `decimals` places (default 7).
+    pub fn set_decimals(env: Env, decimals: u32) {
+        env.storage().instance().set(&StorageKey::Decimals, &decimals);
     }
 
-    pub fn decimals(_env: Env) -> u32 {
-        7
+    pub fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
+        match asset {
+            Asset::Other(symbol) => env.storage().instance().get(&StorageKey::Price(symbol)),
+            Asset::Stellar(_) => None,
+        }
+    }
+
+    pub fn decimals(env: Env) -> u32 {
+        env.storage().instance().get(&StorageKey::Decimals).unwrap_or(7)
     }
 }

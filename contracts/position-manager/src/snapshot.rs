@@ -1,7 +1,7 @@
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
-use shared::constants::{BPS, PRICE_PRECISION};
-use shared::{AccountingSnapshot, PriceFeedClient, StampedPrice};
+use shared::constants::{BPS, PRICE_DECIMALS, PRICE_PRECISION};
+use shared::{AccountingSnapshot, Asset, PriceFeedClient, StampedPrice};
 
 use crate::errors::PositionManagerError;
 use crate::ledger::Ledger;
@@ -10,12 +10,19 @@ use crate::{math, storage};
 
 pub fn read_stamped_price(env: &Env, symbol: &Symbol) -> StampedPrice {
     let feed = storage::get_price_feed(env);
-    let data = match PriceFeedClient::new(env, &feed).try_lastprice(symbol) {
+    let data = match PriceFeedClient::new(env, &feed).try_lastprice(&Asset::Other(symbol.clone())) {
         Ok(Ok(Some(data))) => data,
         _ => panic_with_error!(env, PositionManagerError::PriceUnavailable),
     };
+    // Rescale the feed's decimals to PRICE_DECIMALS (floor when dropping digits).
+    let decimals = storage::get_price_feed_decimals(env);
+    let price = if decimals >= PRICE_DECIMALS {
+        data.price / 10i128.pow(decimals - PRICE_DECIMALS)
+    } else {
+        math::mul(env, data.price, 10i128.pow(PRICE_DECIMALS - decimals))
+    };
     let now = env.ledger().timestamp();
-    if data.price <= 0 || data.timestamp > now {
+    if price <= 0 || data.timestamp > now {
         panic_with_error!(env, PositionManagerError::PriceUnavailable);
     }
     let max_age = storage::get_global_config(env).max_price_age_seconds;
@@ -23,7 +30,7 @@ pub fn read_stamped_price(env: &Env, symbol: &Symbol) -> StampedPrice {
         panic_with_error!(env, PositionManagerError::StalePrice);
     }
     StampedPrice {
-        price: data.price,
+        price,
         observed_at: data.timestamp,
     }
 }

@@ -43,7 +43,7 @@ invoke() {
     "$@"
 }
 
-if [[ "$(invoke --send=no --id "$FEED_ID" -- lastprice --symbol "$SYMBOL")" == "null" ]]; then
+if [[ "$(invoke --send=no --id "$FEED_ID" -- lastprice --asset "{\"Other\":\"$SYMBOL\"}")" == "null" ]]; then
   echo "❌ The price feed has no price for $SYMBOL. Publish one before registering the market."
   exit 1
 fi

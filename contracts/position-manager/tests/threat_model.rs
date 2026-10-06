@@ -228,3 +228,62 @@ fn one_shot_wirings_are_evented() {
         Ok(Symbol::new(&p.env, "request_router"))
     );
 }
+
+/// T-26 — the feed interface did not match SEP-40 (`lastprice(Symbol)` instead
+/// of `lastprice(Asset)`) and required exactly 7 decimals, so no third-party
+/// SEP-40 provider could have priced the protocol. A feed with any supported
+/// decimals is now rescaled to PRICE_DECIMALS.
+#[test]
+fn a_sep40_feed_with_other_decimals_is_rescaled() {
+    use shared::constants::{PRICE_PRECISION, ROLE_ORACLE};
+    for decimals in [14u32, 4u32] {
+        let p = Protocol::new();
+        let oracle = soroban_sdk::Address::generate(&p.env);
+        config_manager::ConfigManagerClient::new(&p.env, &p.config_manager).grant_role(
+            &p.admin,
+            &Symbol::new(&p.env, ROLE_ORACLE),
+            &oracle,
+        );
+        let feed = p.env.register(mock_oracle::MockOracle, ());
+        let feed_client = mock_oracle::MockOracleClient::new(&p.env, &feed);
+        feed_client.set_decimals(&decimals);
+        p.gov().propose_price_feed(&oracle, &feed);
+        p.observe(defaults::CONFIG_TIMELOCK_SECONDS, FILL);
+        p.gov().apply_price_feed(&p.keeper);
+
+        // $50,000 in the feed's own units.
+        let in_feed_units = |whole: i128| whole * 10i128.pow(decimals);
+        let c = p.pm();
+        let mut order = p.open_payload(300);
+        order.acceptable_price = 0;
+        feed_client.set_price(&p.market, &in_feed_units(50_000));
+        let action = c.create_market_open(&p.trader, &p.market, &order);
+        p.wait(6);
+        feed_client.set_price(&p.market, &in_feed_units(50_000));
+        assert_eq!(c.settle_market_open(&p.keeper, &action), ActionOutcome::Executed);
+        let position = c.get_position(&1);
+        assert_eq!(
+            position.base_exposure,
+            order.size * PRICE_PRECISION / usd(50_000),
+            "{decimals}-decimal feed opened at $50,000"
+        );
+    }
+}
+
+#[test]
+fn a_feed_with_too_many_decimals_is_refused() {
+    use shared::constants::ROLE_ORACLE;
+    let p = Protocol::new();
+    let oracle = soroban_sdk::Address::generate(&p.env);
+    config_manager::ConfigManagerClient::new(&p.env, &p.config_manager).grant_role(
+        &p.admin,
+        &Symbol::new(&p.env, ROLE_ORACLE),
+        &oracle,
+    );
+    let feed = p.env.register(mock_oracle::MockOracle, ());
+    mock_oracle::MockOracleClient::new(&p.env, &feed).set_decimals(&19);
+    assert_eq!(
+        p.gov().try_propose_price_feed(&oracle, &feed),
+        Err(Ok(contract_error(MarketGovernorError::PriceUnavailable as u32)))
+    );
+}

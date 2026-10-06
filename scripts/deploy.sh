@@ -10,9 +10,9 @@
 #     ORACLE_ADDR=G... PROTOCOL_ADDR=G... bash scripts/deploy.sh
 #
 # External inputs:
-#   PRICE_FEED_ADDR  SEP-40 feed (`lastprice`, `decimals() == 7`) from the
-#                    oracles repo. Required off local; local deploys the
-#                    unauthenticated mock-oracle instead.
+#   PRICE_FEED_ADDR  Third-party SEP-40 feed (`lastprice(Asset)`, `decimals()`
+#                    of 18 or fewer; prices are rescaled to 7). Required off
+#                    local; local deploys the unauthenticated mock-oracle.
 #   ASSET_ADDR       Collateral token (USDC SAC, 7 decimals). Required on
 #                    mainnet; elsewhere the mock-token faucet is deployed.
 #   *_ROLE addresses Role holders. Mainnet requires every one of them, none
@@ -65,7 +65,7 @@ holder() { local v="${1}_ADDR"; echo "${!v:-}"; }
 
 # ---------- Guardrails ----------
 if [[ -z "$PRICE_FEED_ADDR" && "$NETWORK_KEY" != "local" ]]; then
-  echo "❌ PRICE_FEED_ADDR is required on '$NETWORK_KEY'. Deploy the feed from the oracles repo first."
+  echo "❌ PRICE_FEED_ADDR is required on '$NETWORK_KEY'. Use the third-party SEP-40 feed's address."
   echo "    The mock-oracle accepts prices from anyone and is only deployed on local."
   exit 1
 fi
@@ -295,7 +295,7 @@ for role in "${ROLES[@]}"; do
 done
 # LP settlement needs a fresh price for every registered market (THREAT_MODEL T-02).
 for ticker in "${TICKERS[@]}"; do
-  if [[ "$(invoke --send=no --id "$PRICE_FEED_ADDR" -- lastprice --symbol "$ticker")" == "null" ]]; then
+  if [[ "$(invoke --send=no --id "$PRICE_FEED_ADDR" -- lastprice --asset "{\"Other\":\"$ticker\"}")" == "null" ]]; then
     echo "  ⚠ price feed has no price for $ticker yet — LP requests cannot resolve until it does"
   fi
 done

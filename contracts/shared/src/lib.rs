@@ -21,7 +21,7 @@ use soroban_sdk::{contractclient, Address, Env, Symbol};
 pub use config_manager::{ConfigManager, ConfigManagerClient};
 pub use market_governor::{MarketGovernor, MarketGovernorClient};
 pub use position_manager::{PositionManager, PositionManagerClient};
-pub use price_feed::{PriceData, PriceFeed, PriceFeedClient, StampedPrice};
+pub use price_feed::{Asset, PriceData, PriceFeed, PriceFeedClient, StampedPrice};
 pub use request_router::{RequestRouter, RequestRouterClient};
 pub use types::{
     AccountingSnapshot, ActionKind, ActionOutcome, ActionPayload, ClosePayload, DecreasePayload,

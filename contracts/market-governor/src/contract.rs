@@ -62,7 +62,7 @@ fn require_valid_market(env: &Env, config: &MarketConfig) {
 
 fn require_feed_decimals(env: &Env, price_feed: &Address) {
     match PriceFeedClient::new(env, price_feed).try_decimals() {
-        Ok(Ok(decimals)) if decimals == shared::constants::PRICE_DECIMALS => {}
+        Ok(Ok(decimals)) if decimals <= shared::price_feed::MAX_FEED_DECIMALS => {}
         _ => panic_with_error!(env, MarketGovernorError::PriceUnavailable),
     }
 }
