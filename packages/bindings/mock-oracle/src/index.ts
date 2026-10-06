@@ -33,13 +33,15 @@ if (typeof window !== "undefined") {
 
 
 
+export type Asset = {tag: "Stellar", values: readonly [string]} | {tag: "Other", values: readonly [string]};
+
 
 export interface PriceData {
   price: i128;
   timestamp: u64;
 }
 
-export type StorageKey = {tag: "Price", values: readonly [string]};
+export type StorageKey = {tag: "Price", values: readonly [string]} | {tag: "Decimals", values: void};
 
 export interface Client {
   /**
@@ -50,7 +52,7 @@ export interface Client {
   /**
    * Construct and simulate a lastprice transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
-  lastprice: ({symbol}: {symbol: string}, options?: MethodOptions) => Promise<AssembledTransaction<Option<PriceData>>>
+  lastprice: ({asset}: {asset: Asset}, options?: MethodOptions) => Promise<AssembledTransaction<Option<PriceData>>>
 
   /**
    * Construct and simulate a set_price transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -61,6 +63,12 @@ export interface Client {
    * Construct and simulate a initialize transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   initialize: (options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a set_decimals transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Report prices with `decimals` places (default 7).
+   */
+  set_decimals: ({decimals}: {decimals: u32}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
    * Construct and simulate a set_price_at transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -85,12 +93,14 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAAAQAAAAAAAAAAAAAACVByaWNlRGF0YQAAAAAAAAIAAAAAAAAABXByaWNlAAAAAAAACwAAAAAAAAAJdGltZXN0YW1wAAAAAAAABg==",
-        "AAAAAgAAAAAAAAAAAAAAClN0b3JhZ2VLZXkAAAAAAAEAAAABAAAAAAAAAAVQcmljZQAAAAAAAAEAAAAR",
+      new ContractSpec([ "AAAAAgAAAAAAAAAAAAAABUFzc2V0AAAAAAAAAgAAAAEAAAAAAAAAB1N0ZWxsYXIAAAAAAQAAABMAAAABAAAAAAAAAAVPdGhlcgAAAAAAAAEAAAAR",
+        "AAAAAQAAAAAAAAAAAAAACVByaWNlRGF0YQAAAAAAAAIAAAAAAAAABXByaWNlAAAAAAAACwAAAAAAAAAJdGltZXN0YW1wAAAAAAAABg==",
+        "AAAAAgAAAAAAAAAAAAAAClN0b3JhZ2VLZXkAAAAAAAIAAAABAAAAAAAAAAVQcmljZQAAAAAAAAEAAAARAAAAAAAAAAAAAAAIRGVjaW1hbHM=",
         "AAAAAAAAAAAAAAAIZGVjaW1hbHMAAAAAAAAAAQAAAAQ=",
-        "AAAAAAAAAAAAAAAJbGFzdHByaWNlAAAAAAAAAQAAAAAAAAAGc3ltYm9sAAAAAAARAAAAAQAAA+gAAAfQAAAACVByaWNlRGF0YQAAAA==",
+        "AAAAAAAAAAAAAAAJbGFzdHByaWNlAAAAAAAAAQAAAAAAAAAFYXNzZXQAAAAAAAfQAAAABUFzc2V0AAAAAAAAAQAAA+gAAAfQAAAACVByaWNlRGF0YQAAAA==",
         "AAAAAAAAAAAAAAAJc2V0X3ByaWNlAAAAAAAAAgAAAAAAAAAGc3ltYm9sAAAAAAARAAAAAAAAAAVwcmljZQAAAAAAAAsAAAAA",
         "AAAAAAAAAAAAAAAKaW5pdGlhbGl6ZQAAAAAAAAAAAAA=",
+        "AAAAAAAAADFSZXBvcnQgcHJpY2VzIHdpdGggYGRlY2ltYWxzYCBwbGFjZXMgKGRlZmF1bHQgNykuAAAAAAAADHNldF9kZWNpbWFscwAAAAEAAAAAAAAACGRlY2ltYWxzAAAABAAAAAA=",
         "AAAAAAAAAAAAAAAMc2V0X3ByaWNlX2F0AAAAAwAAAAAAAAAGc3ltYm9sAAAAAAARAAAAAAAAAAVwcmljZQAAAAAAAAsAAAAAAAAACXRpbWVzdGFtcAAAAAAAAAYAAAAA" ]),
       options
     )
@@ -100,6 +110,7 @@ export class Client extends ContractClient {
         lastprice: this.txFromJSON<Option<PriceData>>,
         set_price: this.txFromJSON<null>,
         initialize: this.txFromJSON<null>,
+        set_decimals: this.txFromJSON<null>,
         set_price_at: this.txFromJSON<null>
   }
 }
