@@ -45,7 +45,7 @@ TS packages:
 Local network + deploy:
 
 - `make up` / `make down` / `make reset` — local Stellar network
-- `make deploy` / `make deploy-testnet` / `make deploy-mainnet` — deploy and record addresses. Local deploys the mock oracle and mock token. Testnet needs `PRICE_FEED_ADDR` (the feed comes from the oracles repo). Mainnet also needs `ASSET_ADDR` (the USDC SAC) and `UPGRADER_ADDR`, `PAUSER_ADDR`, `UNPAUSER_ADDR`, `ORACLE_ADDR`, `PROTOCOL_ADDR`, none of which may be the admin
+- `make deploy` / `make deploy-testnet` / `make deploy-mainnet` — deploy and record addresses. Local deploys the mock oracle and mock token. Testnet needs `PRICE_FEED_ADDR` (a third-party SEP-40 feed). Mainnet also needs `ASSET_ADDR` (the USDC SAC) and `UPGRADER_ADDR`, `PAUSER_ADDR`, `UNPAUSER_ADDR`, `ORACLE_ADDR`, `PROTOCOL_ADDR`, none of which may be the admin
 - `make deploy-testnet-full` — provision testnet keys, then deploy the core contracts
 - `make upgrade-propose` / `make upgrade-execute` — timelocked upgrade in two steps (set `NETWORK_KEY`, and `UPGRADE_SOURCE` to the UPGRADER identity)
 - `make add-market SYMBOL=…` — register a market the price feed already serves
@@ -84,7 +84,7 @@ Run the on-chain testnet deploy from this repo:
 PRICE_FEED_ADDR=C... make deploy-testnet-full
 ```
 
-`PRICE_FEED_ADDR` is the SEP-40 feed deployed from the `oracles` repo.
+`PRICE_FEED_ADDR` is the third-party SEP-40 price feed. The in-repo mock oracle is local-only.
 
 That produces:
 

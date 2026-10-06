@@ -15,6 +15,9 @@
 >   into test builds. Previews come from `@win-trader/protocol-math`, and the
 >   totals are in `accounting_snapshot` and the event stream.
 >
+> - **Oracle:** the feed is a third-party SEP-40 provider, read as
+>   `lastprice(Asset::Other(market))`, with its decimals rescaled to 7.
+>
 > The security review of these changes is in `THREAT_MODEL.md`.
 
 ## Contents

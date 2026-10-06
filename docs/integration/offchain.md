@@ -33,7 +33,7 @@ under the live app), not a patch.
 | `positionManager` | PositionManager: positions, actions, live config, events for trading |
 | `vault` | Vault: cash and `sLP` |
 | `requestRouter` | RequestRouter: LP deposit and withdrawal queue |
-| `oracleRouter` | The SEP-40 price feed (`lastprice`, `decimals`), from the `oracles` repo |
+| `oracleRouter` | The third-party SEP-40 price feed (`lastprice(Asset)`, `decimals()`); read as `Asset::Other(market)` |
 | `mockToken`, `oracle` | Local and testnet only |
 
 Index events from all of `configManager`, `governor`, `positionManager`,
