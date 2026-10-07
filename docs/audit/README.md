@@ -20,7 +20,7 @@ In scope, all under `contracts/`:
 | `vault` | Holds all collateral cash; LP share token (`sLP`); deposit and withdrawal settlement |
 | `request-router` | FIFO queue for delayed LP deposits and withdrawals; `skip_head` escape hatch |
 
-That is about 10k lines of Rust, `soroban-sdk 23.5.2`.
+That is about 8,200 lines of functional Rust (excluding tests, comments and blank lines), `soroban-sdk 23.5.2`.
 
 Out of scope:
 

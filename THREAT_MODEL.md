@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Scope** | `contracts/{config-manager,position-manager,vault,request-router,shared}` (~10.6k LOC Soroban/Rust, `soroban-sdk 23.5.2`) plus the deploy/upgrade scripts in `scripts/` |
+| **Scope** | `contracts/{shared,config-manager,market-governor,position-manager,vault,request-router}`: about 8,200 lines of functional Soroban/Rust (`soroban-sdk 23.5.2`), excluding tests. The deploy and upgrade scripts in `scripts/` are reviewed as context only. |
 | **Commit** | Modelled at `48c846e`; every finding re-checked at the audit tag `audit-2026-10-06` (branch `fix/review-findings`). See §9 and `docs/audit/`. |
 | **Line references** | Point at `48c846e` unless a row says otherwise |
-| **Date** | 2026-10-04 |
+| **Date** | 2026-10-04, updated 2026-10-07 |
 | **Purpose** | Pre-audit threat model: give auditors the system's trust boundaries, privileged surfaces, and the highest-risk areas to focus on, and list what to fix before handing over the code |
 | **Method** | Manual review of all contract sources against STRIDE, per component and per trust boundary. The spec in `docs/design/trading-fees-and-settlement-specification.md` was used for intended behaviour. |
 
@@ -24,66 +24,56 @@ WinTrader is a perpetual-futures DEX. Liquidity providers deposit a single colla
 | **PositionManager (PM)** | Accounting ledger: markets, positions, pending actions, fee and funding indices, risk states, the live configuration, and the non-LP claim buckets. Directs every cash movement. Since `10c845d` it accepts configuration only from the MarketGovernor and re-validates it. | No (directs the vault) |
 | **Vault** | Holds all collateral cash and issues the LP share token (`sLP`, SEP-41). Moves cash only on PM or router instruction. Prices LP shares from the PM snapshot. | **Yes — all protocol cash** |
 | **RequestRouter** | FIFO queue for delayed LP deposits and withdrawals. Escrows assets and shares while requests are pending, and holds LP payouts that could not be delivered. | Yes (in-flight LP escrow) |
-| **Price feed** (external, `oracles` repo) | SEP-40 `lastprice(symbol)` and `decimals()`. Called "oracle-router" in deployments. | No |
+| **Price feed** (third-party SEP-40 provider) | `lastprice(Asset)` and `decimals()`; markets are read as `Asset::Other(market symbol)` and prices rescaled to 7 decimals. Out of scope; see `docs/audit/KNOWN_ISSUES.md` K-1. | No |
 
 ### 1.1 Data-flow diagram and trust boundaries
 
 ```mermaid
-flowchart LR
-  subgraph EXT["Untrusted (any Stellar account)"]
+flowchart TB
+  subgraph EXT["TB-1 · Untrusted: any Stellar account"]
     T[Trader]
     LP[Liquidity provider]
-    K[Keeper — permissionless]
-    R[Referrer]
-    D[Donor / recapitalizer]
+    K[Keeper, permissionless]
   end
 
-  subgraph PRIV["Privileged keys (TB-2)"]
+  subgraph PRIV["TB-2 · Privileged keys (roles in ConfigManager)"]
     ADM[ADMIN]
-    UPG[UPGRADER]
-    PAU[PAUSER / UNPAUSER]
-    ORA[ORACLE role]
-    PRO[PROTOCOL role]
+    ORA[ORACLE]
+    OPS[UPGRADER · PAUSER · UNPAUSER · PROTOCOL]
   end
 
-  subgraph CHAIN["On-chain protocol (TB-3: contract ↔ contract)"]
-    CM[(ConfigManager)]
+  subgraph CHAIN["TB-3 · On-chain protocol"]
     GOV[(MarketGovernor)]
     PM[(PositionManager)]
-    V[(Vault — holds cash + sLP)]
     RR[(RequestRouter)]
+    V[(Vault: all cash + sLP)]
+    CM[(ConfigManager: roles)]
   end
 
-  subgraph DEP["External dependencies (TB-4)"]
-    PF[[Price feed / oracle-router]]
-    PUB[CEX price publishers]
+  subgraph DEP["TB-4 · External dependencies"]
+    PF[[Third-party SEP-40 price feed]]
     TOK[[USDC SAC + issuer]]
   end
 
-  GOV -- install_* (governor only) --> PM
-  GOV -- has_role --> CM
-  T -- commit/cancel/TP-SL/add collateral --> PM
-  K -- settle/liquidate/ADL/expire --> PM
-  K -- resolve_next --> RR
-  LP -- request deposit/withdraw --> RR
-  R -- register/claim --> PM
-  D -- recapitalize --> PM
-  ADM & UPG & PAU & ORA & PRO -- role-gated calls --> PM & V & RR & CM
-
-  PM -- has_role --> CM
-  V -- has_role --> CM
-  RR -- has_role --> CM
-  PM -- receive/transfer_claim/transfer_safety_claim --> V
-  V -- prepare_lp_snapshot/refresh_borrow_rate --> PM
-  RR -- settle_deposit/settle_withdrawal --> V
-  PM -- lastprice --> PF
-  PUB -- publish prices --> PF
-  V & RR -- transfer --> TOK
+  T -->|orders, TP/SL, collateral| PM
+  K -->|settle, liquidate, ADL| PM
+  K -->|resolve_next| RR
+  LP -->|deposit and withdrawal requests| RR
+  ADM -->|config proposals| GOV
+  ORA -->|price-feed proposals| GOV
+  OPS -.->|upgrades, pause, revenue claims| CHAIN
+  GOV -->|install_* only| PM
+  PM -->|cash instructions| V
+  V -->|LP snapshot| PM
+  RR -->|settle deposit or withdrawal| V
+  PM -->|"lastprice(Asset)"| PF
+  V -->|transfers| TOK
+  GOV & PM & V & RR -.->|has_role| CM
 ```
 
 | ID | Trust boundary | What crosses it | Primary control |
 |---|---|---|---|
-| TB-1 | Untrusted account → protocol entrypoints | Orders, LP requests, keeper settlements, referral ops | `require_auth` on the owner or caller; input validation; commit→settle delay with fresh-price rule |
+| TB-1 | Untrusted account → protocol entrypoints | Orders, LP requests, keeper settlements | `require_auth` on the owner or caller; input validation; commit→settle delay with fresh-price rule |
 | TB-2 | Privileged key → protocol | Role-gated config, pause, upgrade, revenue claim | ConfigManager roles; timelocks on *some* paths (see §5) |
 | TB-3 | Contract → contract | Cash instructions (PM→Vault), LP settlement (Router→Vault→PM), role checks (*→CM) | Callee checks the stored caller address plus `require_auth`; addresses are set once |
 | TB-4 | Protocol → external dependency | Prices; token transfers | Staleness and positivity check on price; decimals check on the feed and asset; `try_transfer` with fallback to a claim |
@@ -98,7 +88,7 @@ flowchart LR
 | A1 | Vault cash (LP capital + all trader collateral + escrow + claims) | Vault token balance | Total loss |
 | A2 | Integrity of the LP share price (NAV) | `snapshot::build_snapshot` → vault share maths | Value transfer between LP cohorts |
 | A3 | Trader position state and collateral | PM persistent `Position(id)` | Wrongful liquidation, theft, or locked funds |
-| A4 | Non-LP claim buckets (escrow, protocol, referral, unclaimed payouts, receiver funding) | PM `Ledger` (instance storage) | Mis-accounting of which cash belongs to LPs |
+| A4 | Non-LP claim buckets (escrow, protocol, unclaimed payouts, receiver funding) | PM `Ledger` (instance storage) | Mis-accounting of which cash belongs to LPs |
 | A5 | Price-feed address and price integrity | PM `PriceFeed`, external oracle | Arbitrary PnL and liquidations |
 | A6 | Role assignments and admin key | ConfigManager | Escalation to everything above |
 | A7 | Contract code (WASM) | Each contract's upgrade path | Total loss |
@@ -121,7 +111,7 @@ flowchart LR
 | ORACLE | Trusted | Propose and cancel price-feed replacement (through the MarketGovernor; ADMIN can also cancel) | Yes (`config_timelock_seconds`) |
 | **MarketGovernor** (contract) | Trusted by the PM | Install global/market config and price feed into the PM; deregister markets | Its own proposals are timelocked; its upgrade delay is `max(CM timelock, config_timelock)` |
 | PROTOCOL | Trusted | `claim_protocol` to any recipient, up to `protocol_claimable_total` | No |
-| Price publishers | **Fully trusted, implicitly** | Set every price the protocol uses | No |
+| Price provider (third-party) | **Fully trusted, implicitly** | Sets every price the protocol uses | No (feed changes go through the governor's timelock) |
 | USDC issuer | External, trusted | Freeze or deauthorize the vault's balance | — |
 
 ---
@@ -132,7 +122,7 @@ flowchart LR
 2. Soroban forbids contract re-entrancy. Any accidental re-entrant path traps (a liveness failure) rather than creating a theft window.
 3. Archived persistent entries are restored automatically (Protocol 23 / CAP-66), so TTL expiry of a `Position` or `Request` costs a fee but does not lose state.
 4. Privileged roles are held by separate keys, and ADMIN and UPGRADER are multisig accounts. This is **not enforced on-chain**. Since `eba596b`, `deploy.sh` refuses a mainnet deploy unless every role has a non-admin holder and UPGRADER ≠ PAUSER; multisig is still a convention.
-5. The external price feed returns `price` with 7 decimals and stamps `timestamp` honestly. The protocol cannot detect a publisher who lies about either.
+5. The third-party SEP-40 feed reports honest prices and timestamps, with `decimals()` of 18 or fewer (rescaled to 7). The protocol cannot detect a provider that lies about either.
 
 ---
 
@@ -148,7 +138,7 @@ Severity reflects likelihood × impact for a mainnet deployment holding meaningf
 | S-2 | Impersonating PM or router to make the vault move cash | `require_pm` / `require_router` compare the caller with the stored address **and** `require_auth` (`vault/src/contract.rs:37-51`) | Holds provided the addresses were wired correctly at deploy (see T-15) | Low |
 | S-3 | Impersonating the vault to call `prepare_lp_snapshot` / `refresh_borrow_rate` with a forged `physical_cash` | `require_vault` (`position-manager/src/auth.rs:23`) | None | Low |
 | S-4 | Redirecting a keeper reward to an address that did not do the work | `keeper.require_auth()` on every settlement, so the reward goes to the signer | None | Info |
-| S-5 | **Spoofed or manipulated price data** | Price must be `> 0`, `timestamp ≤ now`, and `now − timestamp ≤ max_price_age_seconds` (`snapshot.rs:11-29`); feed decimals checked on propose and apply | **No deviation bound, confidence check, TWAP, or second source inside the protocol.** The publisher sets `timestamp`, so freshness is self-attested. A compromised publisher key or oracle-router can mint arbitrary PnL, liquidate any position, or drain the vault through a winning position. **→ T-01** | **Critical** |
+| S-5 | **Spoofed or manipulated price data** | Price must be `> 0`, `timestamp ≤ now`, and `now − timestamp ≤ max_price_age_seconds` (`snapshot.rs:11-29`); feed decimals checked on propose and apply | **No deviation bound, confidence check, TWAP, or second source inside the protocol.** The provider sets `timestamp`, so freshness is self-attested. A compromised or faulty provider can mint arbitrary PnL, liquidate any position, or drain the vault through a winning position. **→ T-01, K-1** | **Critical** |
 | ~~S-6~~ | *Retired: the referral program was removed in `5fad1d6`.* Referral self-referral through a sybil address | `referrer != trader` check (`referral.rs:62`) | Sybils get up to `referral_fee_share_bps` (2.5%) of their own fees back. Accepted by design. | Info |
 
 ### 5.2 Tampering
@@ -180,7 +170,7 @@ All on-chain state is public; the contracts store no secrets. The relevant threa
 | ID | Threat | Severity |
 |---|---|---|
 | I-1 | Commit transactions are public before settlement. Keepers and MEV searchers can see pending orders and their `acceptable_price`. The fresh-price rule limits what that information is worth. | Low |
-| I-2 | **Operator secrets.** `provision-keys.sh` / `deploy.sh` write admin, keeper and oracle-publisher secrets into the plaintext `stellar` CLI identity store and `.env.<network>` files. Leaking the **oracle publisher** key equals S-5 (critical). Oracle-publisher keys are now owned by the oracles repo (`deploy-cex-oracles.sh` removed in `eba596b`); the admin and keeper secrets still live here. | **High** (operational) |
+| I-2 | **Operator secrets.** `provision-keys.sh` / `deploy.sh` write the admin and keeper secrets into the plaintext `stellar` CLI identity store and `.env.<network>` files. Prices come from a third-party provider, so there are no in-house oracle publisher keys. | **High** (operational) |
 
 ### 5.5 Denial of service
 
@@ -220,7 +210,7 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 | **T-14** | Deploy and upgrade tooling is out of sync with the contracts and deploys mocks unconditionally | High | **Fixed in `eba596b`** | `deploy.sh:80-82` builds `GlobalConfig`, `LpConfig` and `MarketConfig` JSON with **fields that no longer exist** (`borrow_exponent_bps`, `lp_request_delay`, `close_fee_low_bps`, …). Lines 234-245 deploy **mock oracles published by the admin key, and a mock token**, regardless of network. Lines 330/336 grant a `KEEPER` role the contracts no longer use. `upgrade.sh:146` calls `upgrade` with no `propose_upgrade` first. **Done:** `deploy.sh` was rebuilt on a shared `scripts/lib/protocol.sh` that mirrors `shared::types`. It needs `PRICE_FEED_ADDR` off local and `ASSET_ADDR` on mainnet. Mocks never reach mainnet, and the mock oracle (unauthenticated) is local-only. Every mainnet role needs a separate non-admin holder, with UPGRADER ≠ PAUSER. After deploying, the script verifies wiring, roles and per-market prices. The WASM hash check now fails closed; it previously called a removed CLI command and always passed. `upgrade.sh` is now two-phase (propose, then execute). The dead `grant-keepers.sh` and `deploy-cex-oracles.sh` were removed. Verified end to end on a local quickstart network. **Remaining:** the multisig custody runbook, and see T-23. |
 | **T-02** | LP queue halts if any market's price is unavailable | High | **Fixed in `4f2bc35`** | The LP snapshot no longer prices markets with no open exposure, so an empty market with a dead feed cannot block the queue. For any other stuck head, PAUSER can `skip_head`: a full refund and the queue moves on, only once the request has been resolvable for a day, and never redirecting funds. **Residual:** a *live* market whose feed dies still pauses LP flows until the feed recovers or PAUSER skips each head (see D-2). |
 | **T-03** | Upgrade authority is the dominant risk; CM has the weakest timelock | High | Design/Residual | Hold UPGRADER and ADMIN in Stellar native multisig accounts. Split proposer and executor. Give CM `max(own, config_timelock)` or a longer floor. Publish reproducible builds and verify `wasm_hash`. Run 24/7 monitoring on `upgprp` events. |
-| **I-2** | Hot keys for admin and oracle publishers in plaintext CLI store and `.env` files | High | Operational | Move ADMIN, UPGRADER and ORACLE to hardware or multisig. Keep publisher keys in a KMS or HSM. Keep `.env.*` out of shared hosts. |
+| **I-2** | Hot admin and keeper keys in the plaintext CLI store and `.env` files | High | Operational | Hold ADMIN, UPGRADER, PAUSER, ORACLE and PROTOCOL in hardware or multisig accounts; use the CLI store only for local and testnet. Keep `.env.*` out of shared hosts. |
 | **D-2** | Oracle outage stops liquidations | High | Design/Residual | Runbook, staleness alerting, and a documented `max_price_age_seconds` policy |
 | **T-04** | Instant privileged changes: role grants, `set_lp_config`, new or re-registered market config, `set_upgrade_timelock` | Medium | **Fixed for the harmful cases** (`10c845d`, `bbd2bfc`) | Re-registering a market is timelocked. `max_withdraw_utilization_bps` cannot go below 50%, so the instant `set_lp_config` can no longer freeze withdrawals. **Remaining instant by design:** role grants (bounded by the role model), the deposit NAV gate, the LP request delay (capped), and `set_upgrade_timelock` (floored at one day). |
 | **T-05** | No floor on `config_timelock_seconds` | Medium | **Fixed in `e077d2d`** | `validate_global` rejects values below 86,400s. Regression test: `tests/threat_model.rs`. |
@@ -246,8 +236,8 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 
 ## 7. Suggested audit focus areas
 
-0. **Contract size (T-00).** The PositionManager must be restructured to fit 128 KiB before any audit result applies to deployable code. If it is split, re-run this threat model, because the split adds a new contract-to-contract trust boundary.
-1. **Oracle trust boundary (T-01, D-2).** Decide whether the oracle-router and publishers are in scope. If not, the report should state the full trust assumption.
+0. **Contract size (T-00, fixed).** The PositionManager has about 3 KB of headroom under the 131,072-byte cap, so remediation that adds code needs to stay within it.
+1. **Oracle boundary (T-01, T-26, D-2).** The provider is out of scope; the protocol's side is in: the SEP-40 call, decimal rescaling, staleness and fresh-observation rules, and behaviour when a feed is missing or stale.
 2. **Settlement waterfall and rounding** (`settle.rs`, `fees.rs`, `ledger.rs`, `funding.rs`, `window.rs`). Check conservation of cash across every terminal path (close, liquidation, ADL, TP/SL, partial decrease), including bad debt and the LP keeper backstop in `keeper::pay_liquidation`.
 3. **`transfer_safety_claim` callers.** This vault entrypoint skips the conservation check (`vault/src/contract.rs:209`). Every PM caller must have debited a ledger bucket or position collateral first. Check that this holds on every path.
 4. **Preflight and settle parity** for decrease and close (D-4 / T-10). Position increase was removed in `b42e5fe`, taking the hardest parity path with it.
@@ -258,8 +248,8 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 
 ## 8. Out of scope / not covered
 
-- The external `oracles` repo (oracle-router, CEX publishers), the `offchain` keeper and indexer, and the `app` frontend and API. They appear here only as trust boundaries.
-- `mocks/*` (test-only; but see T-14 — they are currently deployed by `deploy.sh`).
+- The third-party price provider, the `offchain` keeper and indexer, and the `app` frontend and API. They appear here only as trust boundaries.
+- `mocks/*`: test-only. `deploy.sh` deploys the mock oracle only on local networks, and the mock token never on mainnet (T-14).
 - TypeScript packages in `packages/` beyond noting that `protocol-math` mirrors on-chain maths. Divergence there causes UX errors, not on-chain loss.
 - Economic parameter tuning (fee levels, margins). The model flags only manipulation vectors.
 
