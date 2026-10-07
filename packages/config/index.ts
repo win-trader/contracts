@@ -16,6 +16,9 @@ export interface NetworkContracts {
   requestRouter: ContractInfo;
   positionManager: ContractInfo;
   configManager: ContractInfo;
+  /** MarketGovernor: proposals and timelocks for config changes. Absent on deployments predating the split. */
+  governor?: ContractInfo;
+  /** The third-party SEP-40 price feed the PositionManager reads. */
   oracleRouter: ContractInfo;
   oracle: ContractInfo;
   /** Secondary admin-published oracle used before live CEX sources are wired. */

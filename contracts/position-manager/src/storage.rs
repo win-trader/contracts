@@ -1,13 +1,7 @@
-//! Storage layout.
-//!
-//! Instance storage holds the wiring addresses, configs, pause flag, and the
-//! one `Ledger` aggregate (all global accounting lives inside it — business
-//! logic never reads a bare accounting key). Positions and markets are
-//! persistent entries with explicit TTL extension; anyone can re-extend a
-//! position via `bump_position`.
-
 use shared::constants::{SHARED_BUMP, SHARED_THRESHOLD};
-use shared::{EntryOrder, GlobalConfig, Market, Position};
+use shared::{
+    GlobalConfig, Market, PendingAction, Position,
+};
 use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol, Vec};
 
 use crate::errors::PositionManagerError;
@@ -17,10 +11,9 @@ use crate::ledger::Ledger;
 #[derive(Clone)]
 pub enum StorageKey {
     ConfigManager,
-    OracleRouter,
+    PriceFeed,
     Vault,
     GlobalConfig,
-    Initialized,
     Paused,
     NextPositionId,
     ActiveMarkets,
@@ -29,15 +22,11 @@ pub enum StorageKey {
     Position(u64),
     Market(Symbol),
     MarketDisabled(Symbol),
-    EntryOrder(u64),
-    NextEntryOrderId,
-    /// Referral code → owning referrer address (owner immutable once set).
-    ReferralCode(Symbol),
-    /// Trader → their referrer address (freely re-set by the trader).
-    Referrer(Address),
-    /// Referrer → accrued unclaimed referral rewards. The per-referrer
-    /// allocation of `Ledger::referral_claimable_total`.
-    ReferralBalance(Address),
+    PendingAction(u64),
+    NextActionId,
+    UnclaimedPayout(Address),
+    Governor,
+    PriceFeedDecimals,
 }
 
 pub fn is_paused(env: &Env) -> bool {
@@ -50,8 +39,6 @@ pub fn is_paused(env: &Env) -> bool {
 pub fn save_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&StorageKey::Paused, &paused);
 }
-
-// POSITION
 
 pub fn get_position(env: &Env, id: u64) -> Position {
     env.storage()
@@ -72,105 +59,26 @@ pub fn remove_position(env: &Env, id: u64) {
     env.storage().persistent().remove(&StorageKey::Position(id));
 }
 
-// ENTRY ORDER
-
-pub fn get_entry_order(env: &Env, id: u64) -> EntryOrder {
+pub fn get_unclaimed_payout(env: &Env, owner: &Address) -> i128 {
     env.storage()
         .persistent()
-        .get(&StorageKey::EntryOrder(id))
-        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::OrderNotFound))
-}
-
-pub fn save_entry_order(env: &Env, order: &EntryOrder) {
-    let key = StorageKey::EntryOrder(order.id);
-    env.storage().persistent().set(&key, order);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
-}
-
-pub fn remove_entry_order(env: &Env, id: u64) {
-    env.storage()
-        .persistent()
-        .remove(&StorageKey::EntryOrder(id));
-}
-
-pub fn get_next_entry_order_id(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&StorageKey::NextEntryOrderId)
-        .unwrap_or(1)
-}
-
-pub fn save_next_entry_order_id(env: &Env, id: u64) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::NextEntryOrderId, &id);
-}
-
-pub fn update_entry_order_id(env: &Env) {
-    save_next_entry_order_id(env, get_next_entry_order_id(env) + 1);
-}
-
-// REFERRAL
-//
-// Three persistent maps. `ReferralBalance` and `ReferralCode`/`Referrer`
-// entries are archived (not deleted) if their TTL lapses, and are
-// restorable — so an unclaimed balance can never be lost, only deferred.
-// Every write bumps the TTL.
-
-pub fn try_get_referral_code_owner(env: &Env, code: &Symbol) -> Option<Address> {
-    env.storage()
-        .persistent()
-        .get(&StorageKey::ReferralCode(code.clone()))
-}
-
-pub fn save_referral_code_owner(env: &Env, code: &Symbol, owner: &Address) {
-    let key = StorageKey::ReferralCode(code.clone());
-    env.storage().persistent().set(&key, owner);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
-}
-
-pub fn get_referrer(env: &Env, trader: &Address) -> Option<Address> {
-    env.storage()
-        .persistent()
-        .get(&StorageKey::Referrer(trader.clone()))
-}
-
-pub fn save_referrer(env: &Env, trader: &Address, referrer: &Address) {
-    let key = StorageKey::Referrer(trader.clone());
-    env.storage().persistent().set(&key, referrer);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
-}
-
-pub fn get_referral_balance(env: &Env, referrer: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&StorageKey::ReferralBalance(referrer.clone()))
+        .get(&StorageKey::UnclaimedPayout(owner.clone()))
         .unwrap_or(0)
 }
 
-pub fn save_referral_balance(env: &Env, referrer: &Address, amount: i128) {
-    let key = StorageKey::ReferralBalance(referrer.clone());
+pub fn save_unclaimed_payout(env: &Env, owner: &Address, amount: i128) {
+    let key = StorageKey::UnclaimedPayout(owner.clone());
     env.storage().persistent().set(&key, &amount);
     env.storage()
         .persistent()
         .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
 }
 
-// MARKET
-
 pub fn get_market(env: &Env, symbol: &Symbol) -> Market {
     try_get_market(env, symbol)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::MarketNotConfigured))
 }
 
-/// Non-panicking market lookup — for callers (config admin) where absence is
-/// a legal state, not an error.
 pub fn try_get_market(env: &Env, symbol: &Symbol) -> Option<Market> {
     env.storage()
         .persistent()
@@ -193,17 +101,23 @@ pub fn is_market_disabled(env: &Env, market: &Symbol) -> bool {
 }
 
 pub fn set_market_disabled(env: &Env, market: &Symbol, disabled: bool) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::MarketDisabled(market.clone()), &disabled);
+    let key = StorageKey::MarketDisabled(market.clone());
+    if disabled {
+        env.storage().instance().set(&key, &true);
+    } else {
+        env.storage().instance().remove(&key);
+    }
 }
 
-// todo do we have 1 pos manager for all or per market?
 pub fn get_active_markets(env: &Env) -> Vec<Symbol> {
     env.storage()
         .instance()
         .get(&StorageKey::ActiveMarkets)
         .unwrap_or(Vec::new(env))
+}
+
+pub fn is_market_registered(env: &Env, market: &Symbol) -> bool {
+    get_active_markets(env).iter().any(|s| s == *market)
 }
 
 pub fn save_active_markets(env: &Env, markets: &Vec<Symbol>) {
@@ -212,17 +126,24 @@ pub fn save_active_markets(env: &Env, markets: &Vec<Symbol>) {
         .set(&StorageKey::ActiveMarkets, markets);
 }
 
-// LEDGER
-
-pub fn get_ledger(env: &Env) -> Ledger {
+pub fn get_ledger_unguarded(env: &Env) -> Ledger {
     env.storage()
         .instance()
         .get(&StorageKey::Ledger)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
+pub fn get_ledger(env: &Env) -> Ledger {
+    let ledger = get_ledger_unguarded(env);
+    if ledger.state_version != crate::ledger::STATE_VERSION {
+        panic_with_error!(env, PositionManagerError::StateVersionMismatch);
+    }
+    ledger
+}
+
 pub fn save_ledger(env: &Env, ledger: &Ledger) {
     env.storage().instance().set(&StorageKey::Ledger, ledger);
+    shared::bump_instance_ttl(env);
 }
 
 pub fn get_config_manager(env: &Env) -> Address {
@@ -238,17 +159,39 @@ pub fn save_config_manager(env: &Env, config_manager: &Address) {
         .set(&StorageKey::ConfigManager, config_manager);
 }
 
-pub fn get_oracle_router(env: &Env) -> Address {
+pub fn get_price_feed(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get(&StorageKey::OracleRouter)
+        .get(&StorageKey::PriceFeed)
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
-pub fn save_oracle_router(env: &Env, oracle_router: &Address) {
+pub fn save_price_feed(env: &Env, price_feed: &Address) {
     env.storage()
         .instance()
-        .set(&StorageKey::OracleRouter, oracle_router);
+        .set(&StorageKey::PriceFeed, price_feed);
+}
+
+pub fn get_price_feed_decimals(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::PriceFeedDecimals)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
+}
+
+pub fn save_price_feed_decimals(env: &Env, decimals: u32) {
+    env.storage().instance().set(&StorageKey::PriceFeedDecimals, &decimals);
+}
+
+pub fn get_governor(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&StorageKey::Governor)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
+}
+
+pub fn save_governor(env: &Env, governor: &Address) {
+    env.storage().instance().set(&StorageKey::Governor, governor);
 }
 
 pub fn get_vault(env: &Env) -> Address {
@@ -256,7 +199,6 @@ pub fn get_vault(env: &Env) -> Address {
         .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
 }
 
-/// Non-panicking vault lookup — `set_vault` uses absence as "not wired yet".
 pub fn try_get_vault(env: &Env) -> Option<Address> {
     env.storage().instance().get(&StorageKey::Vault)
 }
@@ -278,19 +220,6 @@ pub fn save_global_config(env: &Env, config: &GlobalConfig) {
         .set(&StorageKey::GlobalConfig, config);
 }
 
-pub fn get_initialized(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&StorageKey::Initialized)
-        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::NotInitialized))
-}
-
-pub fn save_initialized(env: &Env) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::Initialized, &true);
-}
-
 pub fn save_version(env: &Env, version: u32) {
     env.storage().instance().set(&StorageKey::Version, &version);
 }
@@ -310,4 +239,44 @@ pub fn save_next_position_id(env: &Env, id: u64) {
 
 pub fn update_position_id(env: &Env) {
     save_next_position_id(env, get_next_position_id(env) + 1);
+}
+
+pub fn try_get_pending_action(env: &Env, id: u64) -> Option<PendingAction> {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::PendingAction(id))
+}
+
+pub fn get_pending_action(env: &Env, id: u64) -> PendingAction {
+    try_get_pending_action(env, id)
+        .unwrap_or_else(|| panic_with_error!(env, PositionManagerError::ActionNotFound))
+}
+
+pub fn save_pending_action(env: &Env, action: &PendingAction) {
+    let key = StorageKey::PendingAction(action.action_id);
+    env.storage().persistent().set(&key, action);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, SHARED_THRESHOLD, SHARED_BUMP);
+}
+
+pub fn remove_pending_action(env: &Env, id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&StorageKey::PendingAction(id));
+}
+
+pub fn get_next_action_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::NextActionId)
+        .unwrap_or(1)
+}
+
+pub fn take_next_action_id(env: &Env) -> u64 {
+    let id = get_next_action_id(env);
+    env.storage()
+        .instance()
+        .set(&StorageKey::NextActionId, &(id + 1));
+    id
 }

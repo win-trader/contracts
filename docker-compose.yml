@@ -2,7 +2,11 @@ services:
   stellar:
     image: stellar/quickstart:testing
     container_name: stellar-local
-    command: --local --enable-soroban-rpc
+    # Unlimited: quickstart's presets (including `--limits testnet`) allow 100M
+    # instructions per tx, a quarter of real testnet's and mainnet's 400M, and
+    # the PositionManager upload alone needs more than that. The 131,072-byte
+    # size cap is enforced at build time by scripts/check-sizes.sh instead.
+    command: --local --limits unlimited --enable-soroban-rpc
     ports:
       - "8000:8000"
     # Healthy = friendbot can answer for a real address. getLatestLedger

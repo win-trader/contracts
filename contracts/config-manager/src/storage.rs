@@ -9,16 +9,9 @@ pub struct PendingAdminProposal {
 
 #[contracttype]
 pub enum StorageKey {
-    Initialized,
     UpgradeTimelock,
     PendingAdmin,
     Version,
-}
-
-pub fn set_initialized(env: &Env) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::Initialized, &true);
 }
 
 pub fn save_pending_admin(env: &Env, addr: &Address) {

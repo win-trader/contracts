@@ -34,132 +34,86 @@ if (typeof window !== "undefined") {
 
 
 export const RequestRouterError = {
-  1: {message:"InvalidAmount"},
-  2: {message:"InvalidRequest"},
-  3: {message:"TooEarly"},
-  4: {message:"QueueBlocked"},
-  5: {message:"LpActionBlocked"},
-  6: {message:"NoOracleRound"},
-  7: {message:"Unauthorized"},
-  /**
-   * `upgrade` called with no pending proposal.
-   */
-  8: {message:"UpgradeNoPending"},
-  /**
-   * `upgrade` called before the proposal's timelock eta.
-   */
-  9: {message:"UpgradeTimelockNotElapsed"},
-  /**
-   * `upgrade` called with a hash that differs from the proposal.
-   */
-  10: {message:"UpgradeHashMismatch"}
+  400: {message:"Unauthorized"},
+  410: {message:"InvalidRequest"},
+  420: {message:"LpActionBlocked"},
+  430: {message:"InvalidAmount"},
+  440: {message:"UpgradeNoPending"},
+  441: {message:"UpgradeTimelockNotElapsed"},
+  442: {message:"UpgradeHashMismatch"},
+  450: {message:"TooEarly"}
 }
+
+
 
 
 
 
 /**
- * Authoritative per-market state: the side aggregates, the funding indices,
- * the funding EMA, and the market configuration.
- * 
- * Soroban limits UDT field names to 30 characters, so where a doc glossary
- * term is longer the field drops the redundant qualifier and its doc
- * comment carries the full term (e.g. `receiver_backed_index_long` is the
- * doc's `receiver_backed_payer_index` for the long side).
+ * SEP-40 asset identifier. Markets are quoted as `Other(market symbol)`.
  */
-export interface Market {
-  config: MarketConfig;
-  /**
- * `INDEX_PRECISION`-scaled bps/day payer rate as of the last refresh.
- */
-current_payer_rate: i128;
-  current_payer_side: PayerSide;
-  last_funding_checkpoint: u64;
-  long: MarketSide;
-  /**
- * Cumulative payer fee per unit of dominant-side size that is LP
- * revenue on collection (§8.2).
- */
-lp_backed_index_long: i128;
-  lp_backed_index_short: i128;
-  lp_payer_remainder: i128;
-  /**
- * Sub-stroop carry of the receiver-liability accrual (§8.3).
- */
-pending_remainder: i128;
-  /**
- * Cumulative payer fee per unit of dominant-side size whose collection
- * restores cash backing an already-accrued receiver claim (§8.2).
- */
-receiver_backed_index_long: i128;
-  receiver_backed_index_short: i128;
-  /**
- * Cumulative funding credit per unit of light-side size (§8.2).
- */
-receiver_index_long: i128;
-  receiver_index_remainder: i128;
-  receiver_index_short: i128;
-  receiver_payer_remainder: i128;
-  short: MarketSide;
-  /**
- * §8.1 signed EMA of the instantaneous skew: a fraction of one at
- * `INDEX_PRECISION` scale, positive when history says longs dominate.
- * Decays toward the current skew with the global half-life.
- */
-skew_ema: i128;
+export type Asset = {tag: "Stellar", values: readonly [string]} | {tag: "Other", values: readonly [string]};
+
+
+export interface PriceData {
+  price: i128;
+  timestamp: u64;
 }
 
 
+export interface StampedPrice {
+  observed_at: u64;
+  price: i128;
+}
+
+
+export interface Market {
+  config: MarketConfig;
+  current_payer_rate: i128;
+  current_payer_side: PayerSide;
+  last_funding_checkpoint: u64;
+  long: MarketSide;
+  long_payer_remainders: RemainderGroup;
+  lp_backed_index_long: i128;
+  lp_backed_index_short: i128;
+  pending_receiver_funding: i128;
+  receiver_backed_index_long: i128;
+  receiver_backed_index_short: i128;
+  receiver_index_long: i128;
+  receiver_index_short: i128;
+  short: MarketSide;
+  short_payer_remainders: RemainderGroup;
+  skew_ema: i128;
+}
+
+export type Trigger = {tag: "None", values: void} | {tag: "Attached", values: readonly [TriggerInstruction]};
+
+
 export interface LpConfig {
-  lp_request_delay: u64;
+  lp_request_delay_seconds: u64;
   max_withdraw_utilization_bps: u32;
   min_deposit_nav_factor_bps: u32;
 }
 
 
-/**
- * Represents a single trader's open leveraged position.
- */
 export interface Position {
-  /**
- * Asset units at `PRICE_PRECISION`.
- */
-base_exposure: i128;
-  borrow_debt: i128;
-  /**
- * Cash owned by an optional-order executor.
- */
-execution_budget: i128;
-  funding_paid_to_lps_debt: i128;
-  funding_paid_to_receivers_debt: i128;
-  funding_received_debt: i128;
+  base_exposure: i128;
+  borrow_index_snapshot: i128;
   id: u64;
   is_long: boolean;
-  last_increased_time: u64;
+  lp_payer_index_snapshot: i128;
   market: string;
+  opened_at: u64;
   owner: string;
-  /**
- * Fixed gross capacity assigned when risk opens.
- */
-risk_units: i128;
-  /**
- * USD notional at `PRICE_PRECISION`.
- */
-size: i128;
-  /**
- * Trigger price for the optional stop-loss order; `0` = none.
- */
-stop_loss: i128;
-  /**
- * Trader-owned collateral recorded in contract state (the doc's
- * "stored collateral"). Effective collateral — stored collateral after
- * pending fees and funding credits — is always derived, never stored.
- */
-stored_collateral: i128;
-  /**
- * Trigger price for the optional take-profit order; `0` = none.
- */
-take_profit: i128;
+  pending_mutation_action_id: Option<u64>;
+  receiver_index_snapshot: i128;
+  receiver_payer_index_snapshot: i128;
+  risk_units: i128;
+  size: i128;
+  stop_loss: Trigger;
+  stored_collateral: i128;
+  stored_minimum_borrow_fee: i128;
+  take_profit: Trigger;
 }
 
 
@@ -170,57 +124,24 @@ export interface LpRequest {
   kind: LpRequestKind;
   owner: string;
   request_time: u64;
+  /**
+ * The resolve reward fixed when the request was made.
+ */
+reward: i128;
   status: LpRequestStatus;
 }
 
-/**
- * Which side currently pays funding (§8.1: the side the blended integral
- * skew points at — under the EMA this can be the *lighter* side for a
- * while after the book flips). `None` when the blend is exactly zero.
- */
 export type PayerSide = {tag: "None", values: void} | {tag: "Long", values: void} | {tag: "Short", values: void};
 
 export type RiskState = {tag: "Normal", values: void} | {tag: "Warning", values: void} | {tag: "Adl", values: void} | {tag: "HardCap", values: void};
 
-
-/**
- * A pending limit/stop entry order: the frozen `open_position` arguments
- * plus a trigger condition and an expiry. Placing one only writes this
- * record — no funds move. A keeper's `execute_entry_order` pulls the
- * collateral via the owner's token allowance and opens the position
- * exactly as a market open would.
- */
-export interface EntryOrder {
-  acceptable_price: i128;
-  collateral: i128;
-  execution_budget: i128;
-  /**
- * Ledger timestamp after which the order is dead and swept on the next
- * touch (user-configurable max TTL).
- */
-expires_at: u64;
-  id: u64;
-  is_long: boolean;
-  market: string;
-  owner: string;
-  size: i128;
-  stop_loss: i128;
-  take_profit: i128;
-  /**
- * True → fill when price ≥ trigger (stop/breakout entry); false → fill
- * when price ≤ trigger (limit/dip entry). Inferred at placement from
- * the trigger vs. the current price.
- */
-trigger_above: boolean;
-  /**
- * The oracle price at which the order becomes fillable.
- */
-trigger_price: i128;
-}
+export type ActionKind = {tag: "MarketOpen", values: void} | {tag: "LimitOpen", values: void} | {tag: "Decrease", values: void} | {tag: "Close", values: void};
 
 
 export interface MarketSide {
   base_exposure: i128;
+  hard_cap_payout_factor: i128;
+  hard_cap_reference_pnl: i128;
   risk_state: RiskState;
   risk_units: i128;
   size_open_interest: i128;
@@ -228,197 +149,201 @@ export interface MarketSide {
 }
 
 
-export interface RoundPrice {
-  price: i128;
-  symbol: string;
+export interface OpenPayload {
+  acceptable_price: i128;
+  expires_at: u64;
+  is_long: boolean;
+  size: i128;
+  stop_loss: i128;
+  submitted_collateral: i128;
+  take_profit: i128;
 }
 
 
-export interface OracleRound {
-  id: u64;
-  previous_id: u64;
-  previous_timestamp: u64;
-  prices: Array<RoundPrice>;
-  timestamp: u64;
+export interface ClosePayload {
+  acceptable_price: i128;
+  position_id: u64;
 }
 
 
 export interface GlobalConfig {
   base_borrow_rate_bps_day: i128;
-  /**
- * §9.2 borrow-curve exponent, bps: 20_000 = u² (legacy quadratic),
- * 10_000 = linear. Bounded to ≤ 100_000 (e ≤ 10) by validation.
- */
-borrow_exponent_bps: u32;
-  /**
- * §8.1 half-life of the funding skew EMA, seconds (global: one memory
- * horizon for every market).
- */
-funding_half_life_seconds: u64;
-  hard_cap_factor_limit_bps: u32;
-  lp_revenue_share_bps: u32;
+  borrow_lp_revenue_share_bps: u32;
+  config_timelock_seconds: u64;
+  fee_lp_revenue_share_bps: u32;
+  funding_half_life_seconds: u64;
+  global_hard_cap_limit_bps: u32;
+  hard_cap_relatch_band_bps: u32;
+  keeper_rewards: KeeperRewards;
   max_active_markets: u32;
-  max_adl_reward: i128;
-  max_insolvent_touch_reward: i128;
+  max_market_order_lifetime: u64;
+  max_order_lifetime_seconds: u64;
+  max_price_age_seconds: u64;
   max_variable_borrow_bps_day: i128;
-  /**
- * §11.2 minimum borrow charge per capitalization: an index delta at
- * `INDEX_PRECISION` scale applied to the position's risk units
- * (2e11 = 2 bps of notional at a 10% market risk factor). Zero
- * disables the floor.
- */
-min_borrow_index_delta: i128;
+  min_borrow_fee_seconds: u64;
   min_collateral: i128;
   min_position_lifetime: u64;
-  /**
- * §11.1 share of a closing fee routed to the trader's referrer, carved
- * from the protocol slice (keeper and LP shares are untouched). `0`
- * disables referral accrual globally — a kill switch. Validated so
- * `lp + keeper + referral ≤ BPS`, keeping the protocol remainder ≥ 0.
- */
-referral_fee_share_bps: u32;
   risk_capacity_limit_bps: u32;
-  risk_keeper_revenue_share_bps: u32;
 }
 
 
 export interface MarketConfig {
   adl_pnl_factor_bps: u32;
-  adl_reward_bps: u32;
-  /**
- * §11.1 closing-fee tier when the close worsens skew.
- */
-close_fee_high_bps: u32;
-  /**
- * §11.1 closing-fee tier when the close improves or preserves skew.
- */
-close_fee_low_bps: u32;
+  close_pnl_fee_bps: u32;
+  close_size_fee_bps: u32;
   hard_cap_pnl_factor_bps: u32;
-  /**
- * Margin required to open or add risk (§12.3). Divides max leverage:
- * a position may not be created closer to liquidation than this.
- */
-initial_margin_bps: u32;
-  /**
- * §8.1 weight of the instantaneous skew in the funding blend, in bps;
- * the rest is the half-life EMA. `BPS` reproduces pure instant skew.
- */
-instant_weight_bps: u32;
-  liquidation_reward_bps: u32;
-  /**
- * Margin below which the position is liquidatable (§12.3). Must not
- * exceed `initial_margin_bps`; the gap is the entry buffer.
- */
-maintenance_margin_bps: u32;
+  initial_margin_bps: u32;
+  instant_weight_bps: u32;
+  maintenance_margin_bps: u32;
   market_risk_factor_bps: u32;
   max_funding_rate_bps_day: i128;
   max_long_base_exposure: i128;
   max_long_size_open_interest: i128;
   max_short_base_exposure: i128;
   max_short_size_open_interest: i128;
+  open_fee_bps: u32;
+  order_execution_delay_seconds: u64;
   recovery_pnl_factor_bps: u32;
   warning_pnl_factor_bps: u32;
 }
 
+export type ActionOutcome = {tag: "Executed", values: void} | {tag: "Failed", values: void} | {tag: "Cancelled", values: void} | {tag: "Expired", values: void} | {tag: "Superseded", values: void} | {tag: "NotReady", values: void} | {tag: "Pending", values: void} | {tag: "RequiresLiquidation", values: void};
 
-/**
- * Global safety thresholds for price validation.
- */
-export interface OracleConfig {
-  /**
- * How long a cached aggregated price remains valid after the router
- * fetch (in seconds). A cache hit also requires every source timestamp
- * used for the cached median to remain within `staleness_threshold`.
- * Must be > 0 and <= `staleness_threshold`.
- */
-cache_duration: u64;
-  /**
- * Maximum allowed spread between oracle sources in basis points
- * (e.g., 100 = 1%). Bounded at `crate::constants::MAX_DEVIATION_BPS_CEILING`.
- */
-max_deviation_bps: i128;
-  /**
- * Minimum number of source responses that must agree within
- * `max_deviation_bps` for OracleRouter to return a price. Floored at
- * `crate::constants::MIN_REQUIRED_SOURCES_FLOOR`, ceilinged at
- * `crate::constants::MAX_ORACLE_SOURCES`.
- */
-min_required_sources: u32;
-  /**
- * Maximum age of an external SEP-40 price feed before it is rejected
- * as stale (in seconds).
- */
-staleness_threshold: u64;
+export type ActionPayload = {tag: "MarketOpen", values: readonly [OpenPayload]} | {tag: "LimitOpen", values: readonly [OpenPayload, TriggerCondition]} | {tag: "Decrease", values: readonly [DecreasePayload]} | {tag: "Close", values: readonly [ClosePayload]};
+
+export type FailureReason = {tag: "PriceBoundExceeded", values: void} | {tag: "CapacityExceeded", values: void} | {tag: "ExposureCapExceeded", values: void} | {tag: "SideRestricted", values: void} | {tag: "InsufficientCollateral", values: void} | {tag: "UnpayableProfit", values: void} | {tag: "PositionGone", values: void} | {tag: "MarketPaused", values: void} | {tag: "SizeTooSmall", values: void};
+
+
+export interface KeeperRewards {
+  adl: i128;
+  close: i128;
+  decrease: i128;
+  expiry: i128;
+  limit_order: i128;
+  liquidation: i128;
+  lp_resolve: i128;
+  open: i128;
+  sl: i128;
+  tp: i128;
 }
 
 export type LpRequestKind = {tag: "Deposit", values: void} | {tag: "Withdrawal", values: void};
 
 
-/**
- * Data required during a WASM migration. Single definition for all contracts.
- */
 export interface MigrationData {
   version: u32;
 }
 
 
-/**
- * Pending WASM upgrade — set by `propose_upgrade`, consumed by `upgrade`
- * (cleared atomically on a successful install), or cleared by `cancel_upgrade`.
- * Single shape across every protocol contract. Contracts store it at
- * the shared `pending_upgrade` Symbol key in their own instance storage (see
- * `crate::upgrade::pending_upgrade_key`). `upgrade` refuses to install
- * unless `pending.wasm_hash` matches the supplied hash and `now >= eta`.
- */
+export interface PendingAction {
+  action_id: u64;
+  commit_observed_at: u64;
+  created_at: u64;
+  escrowed_collateral: i128;
+  execute_after: u64;
+  kind: ActionKind;
+  market_id: string;
+  owner: string;
+  payload: ActionPayload;
+}
+
+
 export interface PendingUpgrade {
   eta: u64;
   wasm_hash: Buffer;
 }
 
-export type LpRequestStatus = {tag: "Pending", values: void} | {tag: "Settled", values: void} | {tag: "Failed", values: void} | {tag: "Expired", values: void};
+
+export interface RemainderGroup {
+  distribution_remainder: i128;
+  lp_payer_remainder: i128;
+  receiver_liability_remainder: i128;
+  receiver_payer_remainder: i128;
+}
 
 
-/**
- * The caller-supplied fields of a `place_entry_order` request, bundled so
- * the entry point stays within Soroban's parameter limit. `owner` and
- * `market` are passed alongside; `id` and `trigger_above` are derived at
- * placement.
- */
-export interface EntryOrderParams {
+export interface DecreasePayload {
   acceptable_price: i128;
-  collateral: i128;
-  execution_budget: i128;
-  expires_at: u64;
-  is_long: boolean;
-  size: i128;
-  stop_loss: i128;
-  take_profit: i128;
-  trigger_price: i128;
+  position_id: u64;
+  size_removed: i128;
+}
+
+export type LpRequestStatus = {tag: "Pending", values: void} | {tag: "Settled", values: void} | {tag: "Failed", values: void};
+
+
+export interface PendingFeesView {
+  borrow: i128;
+  funding_paid_to_lps: i128;
+  funding_paid_to_receivers: i128;
+  funding_received: i128;
+}
+
+
+export interface PendingPriceFeed {
+  effective_at: u64;
+  price_feed: string;
 }
 
 
 export interface SettlementResult {
-  /**
- * Shares minted for a deposit or assets paid for a withdrawal.
- */
-amount: i128;
+  amount: i128;
+  reward: i128;
   status: SettlementStatus;
 }
 
-export type SettlementStatus = {tag: "Settled", values: void} | {tag: "Failed", values: void};
+export type SettlementStatus = {tag: "Settled", values: void} | {tag: "Failed", values: void} | {tag: "NotReady", values: void};
+
+
+export interface TriggerCondition {
+  trigger_above: boolean;
+  trigger_price: i128;
+}
 
 
 export interface AccountingSnapshot {
   cash_lp_equity: i128;
   cash_shortfall: i128;
+  deleveraging_side_count: u32;
   free_lp_capital: i128;
-  lp_blocked_side_count: u32;
+  min_equity_clear_of_adl: i128;
   non_lp_claims: i128;
   open_position_count: u64;
   physical_cash: i128;
   required_risk_backing: i128;
+  restricted_side_count: u32;
   total_risk_units: i128;
   vault_nav: i128;
+}
+
+
+export interface TriggerInstruction {
+  acceptable_price: i128;
+  commit_observed_at: u64;
+  committed_at: u64;
+  execute_after: u64;
+  trigger_price: i128;
+}
+
+
+export interface PendingGlobalConfig {
+  config: GlobalConfig;
+  effective_at: u64;
+}
+
+
+export interface PendingMarketConfig {
+  config: MarketConfig;
+  effective_at: u64;
+}
+
+
+
+
+export interface EventHeader {
+  actor: string;
+  event_version: u32;
+  ledger_timestamp: u64;
+  market: string;
 }
 
 
@@ -448,11 +373,6 @@ export const MerkleDistributorError = {
 }
 
 /**
- * Storage keys for the data associated with `MerkleDistributor`
- */
-export type MerkleDistributorStorageKey = {tag: "Root", values: void} | {tag: "Claimed", values: readonly [u32]};
-
-/**
  * Rounding direction for division operations
  */
 export type Rounding = {tag: "Floor", values: void} | {tag: "Ceil", values: void} | {tag: "Truncate", values: void};
@@ -468,6 +388,24 @@ export const SorobanFixedPointError = {
   1501: {message:"DivisionByZero"}
 }
 
+
+
+export const PausableError = {
+  /**
+   * The operation failed because the contract is paused.
+   */
+  1000: {message:"EnforcedPause"},
+  /**
+   * The operation failed because the contract is not paused.
+   */
+  1001: {message:"ExpectedPause"}
+}
+
+/**
+ * Storage keys for the data associated with `MerkleDistributor`
+ */
+export type MerkleDistributorStorageKey = {tag: "Root", values: void} | {tag: "Claimed", values: readonly [u32]};
+
 export const CryptoError = {
   /**
    * The merkle proof length is out of bounds.
@@ -481,19 +419,6 @@ export const CryptoError = {
    * No data in hasher state.
    */
   1402: {message:"HasherEmptyState"}
-}
-
-
-
-export const PausableError = {
-  /**
-   * The operation failed because the contract is paused.
-   */
-  1000: {message:"EnforcedPause"},
-  /**
-   * The operation failed because the contract is not paused.
-   */
-  1001: {message:"ExpectedPause"}
 }
 
 /**
@@ -513,6 +438,11 @@ export interface Client {
   upgrade: ({new_wasm_hash, operator}: {new_wasm_hash: Buffer, operator: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
+   * Construct and simulate a skip_head transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  skip_head: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
    * Construct and simulate a get_request transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   get_request: ({request_id}: {request_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<LpRequest>>
@@ -526,6 +456,11 @@ export interface Client {
    * Construct and simulate a cancel_upgrade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   cancel_upgrade: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+
+  /**
+   * Construct and simulate a claim_lp_payout transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  claim_lp_payout: ({owner}: {owner: string}, options?: MethodOptions) => Promise<AssembledTransaction<i128>>
 
   /**
    * Construct and simulate a propose_upgrade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -543,6 +478,11 @@ export interface Client {
   request_withdrawal: ({owner, shares}: {owner: string, shares: i128}, options?: MethodOptions) => Promise<AssembledTransaction<u64>>
 
   /**
+   * Construct and simulate a lp_payout_claimable transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   */
+  lp_payout_claimable: ({owner}: {owner: string}, options?: MethodOptions) => Promise<AssembledTransaction<i128>>
+
+  /**
    * Construct and simulate a next_request_to_resolve transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   next_request_to_resolve: (options?: MethodOptions) => Promise<AssembledTransaction<u64>>
@@ -551,7 +491,7 @@ export interface Client {
 export class Client extends ContractClient {
   static async deploy<T = Client>(
         /** Constructor/Initialization Args for the contract's `__constructor` method */
-        {asset_address, vault_address, oracle_router, config_manager_address}: {asset_address: string, vault_address: string, oracle_router: string, config_manager_address: string},
+        {asset_address, vault_address, config_manager_address}: {asset_address: string, vault_address: string, config_manager_address: string},
     /** Options for initializing a Client as well as for calling a method, with extras specific to deploying. */
     options: MethodOptions &
       Omit<ContractClientOptions, "contractId"> & {
@@ -563,57 +503,81 @@ export class Client extends ContractClient {
         format?: "hex" | "base64";
       }
   ): Promise<AssembledTransaction<T>> {
-    return ContractClient.deploy({asset_address, vault_address, oracle_router, config_manager_address}, options)
+    return ContractClient.deploy({asset_address, vault_address, config_manager_address}, options)
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAAElJlcXVlc3RSb3V0ZXJFcnJvcgAAAAAACgAAAAAAAAANSW52YWxpZEFtb3VudAAAAAAAAAEAAAAAAAAADkludmFsaWRSZXF1ZXN0AAAAAAACAAAAAAAAAAhUb29FYXJseQAAAAMAAAAAAAAADFF1ZXVlQmxvY2tlZAAAAAQAAAAAAAAAD0xwQWN0aW9uQmxvY2tlZAAAAAAFAAAAAAAAAA1Ob09yYWNsZVJvdW5kAAAAAAAABgAAAAAAAAAMVW5hdXRob3JpemVkAAAABwAAACpgdXBncmFkZWAgY2FsbGVkIHdpdGggbm8gcGVuZGluZyBwcm9wb3NhbC4AAAAAABBVcGdyYWRlTm9QZW5kaW5nAAAACAAAADRgdXBncmFkZWAgY2FsbGVkIGJlZm9yZSB0aGUgcHJvcG9zYWwncyB0aW1lbG9jayBldGEuAAAAGVVwZ3JhZGVUaW1lbG9ja05vdEVsYXBzZWQAAAAAAAAJAAAAPGB1cGdyYWRlYCBjYWxsZWQgd2l0aCBhIGhhc2ggdGhhdCBkaWZmZXJzIGZyb20gdGhlIHByb3Bvc2FsLgAAABNVcGdyYWRlSGFzaE1pc21hdGNoAAAAAAo=",
-        "AAAABQAAAAAAAAAAAAAAEExwUmVxdWVzdENyZWF0ZWQAAAABAAAABWxwcmVxAAAAAAAABQAAAAAAAAAKcmVxdWVzdF9pZAAAAAAABgAAAAAAAAAAAAAABW93bmVyAAAAAAAAEwAAAAAAAAAAAAAABGtpbmQAAAfQAAAADUxwUmVxdWVzdEtpbmQAAAAAAAAAAAAAREVzY3Jvd2VkIGNvbGxhdGVyYWwgZm9yIGEgZGVwb3NpdDsgZXNjcm93ZWQgc2hhcmVzIGZvciBhIHdpdGhkcmF3YWwuAAAABmFtb3VudAAAAAAACwAAAAAAAAAAAAAADWV4ZWN1dGVfYWZ0ZXIAAAAAAAAGAAAAAAAAAAE=",
-        "AAAABQAAAIRUZXJtaW5hbCBvdXRjb21lIG9mIHRoZSBGSUZPIGhlYWQ6IGBTZXR0bGVkYCB3aXRoIHRoZSBtaW50ZWQgc2hhcmVzIC8KcGFpZCBhc3NldHMsIG9yIGBGYWlsZWRgIC8gYEV4cGlyZWRgIHdpdGggdGhlIGVzY3JvdyByZXR1cm5lZC4AAAAAAAAAEUxwUmVxdWVzdFJlc29sdmVkAAAAAAAAAQAAAAVscHJlcwAAAAAAAAUAAAAAAAAACnJlcXVlc3RfaWQAAAAAAAYAAAAAAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAAAAAAAARraW5kAAAH0AAAAA1McFJlcXVlc3RLaW5kAAAAAAAAAAAAAAAAAAAGc3RhdHVzAAAAAAfQAAAAD0xwUmVxdWVzdFN0YXR1cwAAAAAAAAAAQlNoYXJlcyBtaW50ZWQgKGRlcG9zaXQpIG9yIGFzc2V0cyBwYWlkICh3aXRoZHJhd2FsKTsgMCBvbiBmYWlsdXJlLgAAAAAADnNldHRsZWRfYW1vdW50AAAAAAALAAAAAAAAAAE=",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAAElJlcXVlc3RSb3V0ZXJFcnJvcgAAAAAACAAAAAAAAAAMVW5hdXRob3JpemVkAAABkAAAAAAAAAAOSW52YWxpZFJlcXVlc3QAAAAAAZoAAAAAAAAAD0xwQWN0aW9uQmxvY2tlZAAAAAGkAAAAAAAAAA1JbnZhbGlkQW1vdW50AAAAAAABrgAAAAAAAAAQVXBncmFkZU5vUGVuZGluZwAAAbgAAAAAAAAAGVVwZ3JhZGVUaW1lbG9ja05vdEVsYXBzZWQAAAAAAAG5AAAAAAAAABNVcGdyYWRlSGFzaE1pc21hdGNoAAAAAboAAAAAAAAACFRvb0Vhcmx5AAABwg==",
+        "AAAABQAAAAAAAAAAAAAAD0xwUGF5b3V0Q2xhaW1lZAAAAAABAAAAB2xwY2xhaW0AAAAAAgAAAAAAAAAFb3duZXIAAAAAAAATAAAAAAAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAAE=",
+        "AAAABQAAAAAAAAAAAAAAEExwUGF5b3V0RGVmZXJyZWQAAAABAAAAB2xwZGVmZXIAAAAAAgAAAAAAAAAFb3duZXIAAAAAAAATAAAAAAAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAAE=",
+        "AAAABQAAAAAAAAAAAAAAEExwUmVxdWVzdENyZWF0ZWQAAAABAAAABWxwcmVxAAAAAAAABgAAAAAAAAAKcmVxdWVzdF9pZAAAAAAABgAAAAAAAAAAAAAABW93bmVyAAAAAAAAEwAAAAAAAAAAAAAABGtpbmQAAAfQAAAADUxwUmVxdWVzdEtpbmQAAAAAAAAAAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAAAAAAAAAAAAZyZXdhcmQAAAAAAAsAAAAAAAAAAAAAAA1leGVjdXRlX2FmdGVyAAAAAAAABgAAAAAAAAAB",
+        "AAAABQAAAAAAAAAAAAAAEExwUmVxdWVzdFNraXBwZWQAAAABAAAABmxwc2tpcAAAAAAAAgAAAAAAAAAKcmVxdWVzdF9pZAAAAAAABgAAAAAAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAB",
+        "AAAABQAAAAAAAAAAAAAAEUxwUmVxdWVzdFJlc29sdmVkAAAAAAAAAQAAAAVscHJlcwAAAAAAAAYAAAAAAAAACnJlcXVlc3RfaWQAAAAAAAYAAAAAAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAAAAAAAARraW5kAAAH0AAAAA1McFJlcXVlc3RLaW5kAAAAAAAAAAAAAAAAAAAGc3RhdHVzAAAAAAfQAAAAD0xwUmVxdWVzdFN0YXR1cwAAAAAAAAAAAAAAAA5zZXR0bGVkX2Ftb3VudAAAAAAACwAAAAAAAAAAAAAABnJld2FyZAAAAAAACwAAAAAAAAAB",
         "AAAAAAAAAAAAAAAHbWlncmF0ZQAAAAACAAAAAAAAAARkYXRhAAAH0AAAAA1NaWdyYXRpb25EYXRhAAAAAAAAAAAAAAhvcGVyYXRvcgAAABMAAAAA",
         "AAAAAAAAAAAAAAAHdXBncmFkZQAAAAACAAAAAAAAAA1uZXdfd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAAAAAACG9wZXJhdG9yAAAAEwAAAAA=",
+        "AAAAAAAAAAAAAAAJc2tpcF9oZWFkAAAAAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAA==",
         "AAAAAAAAAAAAAAALZ2V0X3JlcXVlc3QAAAAAAQAAAAAAAAAKcmVxdWVzdF9pZAAAAAAABgAAAAEAAAfQAAAACUxwUmVxdWVzdAAAAA==",
         "AAAAAAAAAAAAAAAMcmVzb2x2ZV9uZXh0AAAAAQAAAAAAAAAIZXhlY3V0b3IAAAATAAAAAQAAB9AAAAAQU2V0dGxlbWVudFJlc3VsdA==",
-        "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAQAAAAAAAAADWFzc2V0X2FkZHJlc3MAAAAAAAATAAAAAAAAAA12YXVsdF9hZGRyZXNzAAAAAAAAEwAAAAAAAAANb3JhY2xlX3JvdXRlcgAAAAAAABMAAAAAAAAAFmNvbmZpZ19tYW5hZ2VyX2FkZHJlc3MAAAAAABMAAAAA",
+        "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAMAAAAAAAAADWFzc2V0X2FkZHJlc3MAAAAAAAATAAAAAAAAAA12YXVsdF9hZGRyZXNzAAAAAAAAEwAAAAAAAAAWY29uZmlnX21hbmFnZXJfYWRkcmVzcwAAAAAAEwAAAAA=",
         "AAAAAAAAAAAAAAAOY2FuY2VsX3VwZ3JhZGUAAAAAAAEAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAA=",
+        "AAAAAAAAAAAAAAAPY2xhaW1fbHBfcGF5b3V0AAAAAAEAAAAAAAAABW93bmVyAAAAAAAAEwAAAAEAAAAL",
         "AAAAAAAAAAAAAAAPcHJvcG9zZV91cGdyYWRlAAAAAAIAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAJd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAA",
         "AAAAAAAAAAAAAAAPcmVxdWVzdF9kZXBvc2l0AAAAAAIAAAAAAAAABW93bmVyAAAAAAAAEwAAAAAAAAAGYXNzZXRzAAAAAAALAAAAAQAAAAY=",
         "AAAAAAAAAAAAAAAScmVxdWVzdF93aXRoZHJhd2FsAAAAAAACAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAABnNoYXJlcwAAAAAACwAAAAEAAAAG",
+        "AAAAAAAAAAAAAAATbHBfcGF5b3V0X2NsYWltYWJsZQAAAAABAAAAAAAAAAVvd25lcgAAAAAAABMAAAABAAAACw==",
         "AAAAAAAAAAAAAAAXbmV4dF9yZXF1ZXN0X3RvX3Jlc29sdmUAAAAAAAAAAAEAAAAG",
-        "AAAAAQAAAYVBdXRob3JpdGF0aXZlIHBlci1tYXJrZXQgc3RhdGU6IHRoZSBzaWRlIGFnZ3JlZ2F0ZXMsIHRoZSBmdW5kaW5nIGluZGljZXMsCnRoZSBmdW5kaW5nIEVNQSwgYW5kIHRoZSBtYXJrZXQgY29uZmlndXJhdGlvbi4KClNvcm9iYW4gbGltaXRzIFVEVCBmaWVsZCBuYW1lcyB0byAzMCBjaGFyYWN0ZXJzLCBzbyB3aGVyZSBhIGRvYyBnbG9zc2FyeQp0ZXJtIGlzIGxvbmdlciB0aGUgZmllbGQgZHJvcHMgdGhlIHJlZHVuZGFudCBxdWFsaWZpZXIgYW5kIGl0cyBkb2MKY29tbWVudCBjYXJyaWVzIHRoZSBmdWxsIHRlcm0gKGUuZy4gYHJlY2VpdmVyX2JhY2tlZF9pbmRleF9sb25nYCBpcyB0aGUKZG9jJ3MgYHJlY2VpdmVyX2JhY2tlZF9wYXllcl9pbmRleGAgZm9yIHRoZSBsb25nIHNpZGUpLgAAAAAAAAAAAAAGTWFya2V0AAAAAAARAAAAAAAAAAZjb25maWcAAAAAB9AAAAAMTWFya2V0Q29uZmlnAAAAQ2BJTkRFWF9QUkVDSVNJT05gLXNjYWxlZCBicHMvZGF5IHBheWVyIHJhdGUgYXMgb2YgdGhlIGxhc3QgcmVmcmVzaC4AAAAAEmN1cnJlbnRfcGF5ZXJfcmF0ZQAAAAAACwAAAAAAAAASY3VycmVudF9wYXllcl9zaWRlAAAAAAfQAAAACVBheWVyU2lkZQAAAAAAAAAAAAAXbGFzdF9mdW5kaW5nX2NoZWNrcG9pbnQAAAAABgAAAAAAAAAEbG9uZwAAB9AAAAAKTWFya2V0U2lkZQAAAAAAXUN1bXVsYXRpdmUgcGF5ZXIgZmVlIHBlciB1bml0IG9mIGRvbWluYW50LXNpZGUgc2l6ZSB0aGF0IGlzIExQCnJldmVudWUgb24gY29sbGVjdGlvbiAowqc4LjIpLgAAAAAAABRscF9iYWNrZWRfaW5kZXhfbG9uZwAAAAsAAAAAAAAAFWxwX2JhY2tlZF9pbmRleF9zaG9ydAAAAAAAAAsAAAAAAAAAEmxwX3BheWVyX3JlbWFpbmRlcgAAAAAACwAAADtTdWItc3Ryb29wIGNhcnJ5IG9mIHRoZSByZWNlaXZlci1saWFiaWxpdHkgYWNjcnVhbCAowqc4LjMpLgAAAAARcGVuZGluZ19yZW1haW5kZXIAAAAAAAALAAAAhUN1bXVsYXRpdmUgcGF5ZXIgZmVlIHBlciB1bml0IG9mIGRvbWluYW50LXNpZGUgc2l6ZSB3aG9zZSBjb2xsZWN0aW9uCnJlc3RvcmVzIGNhc2ggYmFja2luZyBhbiBhbHJlYWR5LWFjY3J1ZWQgcmVjZWl2ZXIgY2xhaW0gKMKnOC4yKS4AAAAAAAAacmVjZWl2ZXJfYmFja2VkX2luZGV4X2xvbmcAAAAAAAsAAAAAAAAAG3JlY2VpdmVyX2JhY2tlZF9pbmRleF9zaG9ydAAAAAALAAAAPkN1bXVsYXRpdmUgZnVuZGluZyBjcmVkaXQgcGVyIHVuaXQgb2YgbGlnaHQtc2lkZSBzaXplICjCpzguMikuAAAAAAATcmVjZWl2ZXJfaW5kZXhfbG9uZwAAAAALAAAAAAAAABhyZWNlaXZlcl9pbmRleF9yZW1haW5kZXIAAAALAAAAAAAAABRyZWNlaXZlcl9pbmRleF9zaG9ydAAAAAsAAAAAAAAAGHJlY2VpdmVyX3BheWVyX3JlbWFpbmRlcgAAAAsAAAAAAAAABXNob3J0AAAAAAAH0AAAAApNYXJrZXRTaWRlAAAAAAC+wqc4LjEgc2lnbmVkIEVNQSBvZiB0aGUgaW5zdGFudGFuZW91cyBza2V3OiBhIGZyYWN0aW9uIG9mIG9uZSBhdApgSU5ERVhfUFJFQ0lTSU9OYCBzY2FsZSwgcG9zaXRpdmUgd2hlbiBoaXN0b3J5IHNheXMgbG9uZ3MgZG9taW5hdGUuCkRlY2F5cyB0b3dhcmQgdGhlIGN1cnJlbnQgc2tldyB3aXRoIHRoZSBnbG9iYWwgaGFsZi1saWZlLgAAAAAACHNrZXdfZW1hAAAACw==",
-        "AAAAAQAAAAAAAAAAAAAACExwQ29uZmlnAAAAAwAAAAAAAAAQbHBfcmVxdWVzdF9kZWxheQAAAAYAAAAAAAAAHG1heF93aXRoZHJhd191dGlsaXphdGlvbl9icHMAAAAEAAAAAAAAABptaW5fZGVwb3NpdF9uYXZfZmFjdG9yX2JwcwAAAAAABA==",
-        "AAAAAQAAADVSZXByZXNlbnRzIGEgc2luZ2xlIHRyYWRlcidzIG9wZW4gbGV2ZXJhZ2VkIHBvc2l0aW9uLgAAAAAAAAAAAAAIUG9zaXRpb24AAAAQAAAAIUFzc2V0IHVuaXRzIGF0IGBQUklDRV9QUkVDSVNJT05gLgAAAAAAAA1iYXNlX2V4cG9zdXJlAAAAAAAACwAAAAAAAAALYm9ycm93X2RlYnQAAAAACwAAAClDYXNoIG93bmVkIGJ5IGFuIG9wdGlvbmFsLW9yZGVyIGV4ZWN1dG9yLgAAAAAAABBleGVjdXRpb25fYnVkZ2V0AAAACwAAAAAAAAAYZnVuZGluZ19wYWlkX3RvX2xwc19kZWJ0AAAACwAAAAAAAAAeZnVuZGluZ19wYWlkX3RvX3JlY2VpdmVyc19kZWJ0AAAAAAALAAAAAAAAABVmdW5kaW5nX3JlY2VpdmVkX2RlYnQAAAAAAAALAAAAAAAAAAJpZAAAAAAABgAAAAAAAAAHaXNfbG9uZwAAAAABAAAAAAAAABNsYXN0X2luY3JlYXNlZF90aW1lAAAAAAYAAAAAAAAABm1hcmtldAAAAAAAEQAAAAAAAAAFb3duZXIAAAAAAAATAAAALkZpeGVkIGdyb3NzIGNhcGFjaXR5IGFzc2lnbmVkIHdoZW4gcmlzayBvcGVucy4AAAAAAApyaXNrX3VuaXRzAAAAAAALAAAAIlVTRCBub3Rpb25hbCBhdCBgUFJJQ0VfUFJFQ0lTSU9OYC4AAAAAAARzaXplAAAACwAAADtUcmlnZ2VyIHByaWNlIGZvciB0aGUgb3B0aW9uYWwgc3RvcC1sb3NzIG9yZGVyOyBgMGAgPSBub25lLgAAAAAJc3RvcF9sb3NzAAAAAAAACwAAAMpUcmFkZXItb3duZWQgY29sbGF0ZXJhbCByZWNvcmRlZCBpbiBjb250cmFjdCBzdGF0ZSAodGhlIGRvYydzCiJzdG9yZWQgY29sbGF0ZXJhbCIpLiBFZmZlY3RpdmUgY29sbGF0ZXJhbCDigJQgc3RvcmVkIGNvbGxhdGVyYWwgYWZ0ZXIKcGVuZGluZyBmZWVzIGFuZCBmdW5kaW5nIGNyZWRpdHMg4oCUIGlzIGFsd2F5cyBkZXJpdmVkLCBuZXZlciBzdG9yZWQuAAAAAAARc3RvcmVkX2NvbGxhdGVyYWwAAAAAAAALAAAAPVRyaWdnZXIgcHJpY2UgZm9yIHRoZSBvcHRpb25hbCB0YWtlLXByb2ZpdCBvcmRlcjsgYDBgID0gbm9uZS4AAAAAAAALdGFrZV9wcm9maXQAAAAACw==",
-        "AAAAAQAAAAAAAAAAAAAACUxwUmVxdWVzdAAAAAAAAAcAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANZXhlY3V0ZV9hZnRlcgAAAAAAAAYAAAAAAAAAAmlkAAAAAAAGAAAAAAAAAARraW5kAAAH0AAAAA1McFJlcXVlc3RLaW5kAAAAAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAADHJlcXVlc3RfdGltZQAAAAYAAAAAAAAABnN0YXR1cwAAAAAH0AAAAA9McFJlcXVlc3RTdGF0dXMA",
-        "AAAAAgAAANFXaGljaCBzaWRlIGN1cnJlbnRseSBwYXlzIGZ1bmRpbmcgKMKnOC4xOiB0aGUgc2lkZSB0aGUgYmxlbmRlZCBpbnRlZ3JhbApza2V3IHBvaW50cyBhdCDigJQgdW5kZXIgdGhlIEVNQSB0aGlzIGNhbiBiZSB0aGUgKmxpZ2h0ZXIqIHNpZGUgZm9yIGEKd2hpbGUgYWZ0ZXIgdGhlIGJvb2sgZmxpcHMpLiBgTm9uZWAgd2hlbiB0aGUgYmxlbmQgaXMgZXhhY3RseSB6ZXJvLgAAAAAAAAAAAAAJUGF5ZXJTaWRlAAAAAAAAAwAAAAAAAAAAAAAABE5vbmUAAAAAAAAAAAAAAARMb25nAAAAAAAAAAAAAAAFU2hvcnQAAAA=",
+        "AAAAAgAAAEZTRVAtNDAgYXNzZXQgaWRlbnRpZmllci4gTWFya2V0cyBhcmUgcXVvdGVkIGFzIGBPdGhlcihtYXJrZXQgc3ltYm9sKWAuAAAAAAAAAAAABUFzc2V0AAAAAAAAAgAAAAEAAAAAAAAAB1N0ZWxsYXIAAAAAAQAAABMAAAABAAAAAAAAAAVPdGhlcgAAAAAAAAEAAAAR",
+        "AAAAAQAAAAAAAAAAAAAACVByaWNlRGF0YQAAAAAAAAIAAAAAAAAABXByaWNlAAAAAAAACwAAAAAAAAAJdGltZXN0YW1wAAAAAAAABg==",
+        "AAAAAQAAAAAAAAAAAAAADFN0YW1wZWRQcmljZQAAAAIAAAAAAAAAC29ic2VydmVkX2F0AAAAAAYAAAAAAAAABXByaWNlAAAAAAAACw==",
+        "AAAAAQAAAAAAAAAAAAAABk1hcmtldAAAAAAAEAAAAAAAAAAGY29uZmlnAAAAAAfQAAAADE1hcmtldENvbmZpZwAAAAAAAAASY3VycmVudF9wYXllcl9yYXRlAAAAAAALAAAAAAAAABJjdXJyZW50X3BheWVyX3NpZGUAAAAAB9AAAAAJUGF5ZXJTaWRlAAAAAAAAAAAAABdsYXN0X2Z1bmRpbmdfY2hlY2twb2ludAAAAAAGAAAAAAAAAARsb25nAAAH0AAAAApNYXJrZXRTaWRlAAAAAAAAAAAAFWxvbmdfcGF5ZXJfcmVtYWluZGVycwAAAAAAB9AAAAAOUmVtYWluZGVyR3JvdXAAAAAAAAAAAAAUbHBfYmFja2VkX2luZGV4X2xvbmcAAAALAAAAAAAAABVscF9iYWNrZWRfaW5kZXhfc2hvcnQAAAAAAAALAAAAAAAAABhwZW5kaW5nX3JlY2VpdmVyX2Z1bmRpbmcAAAALAAAAAAAAABpyZWNlaXZlcl9iYWNrZWRfaW5kZXhfbG9uZwAAAAAACwAAAAAAAAAbcmVjZWl2ZXJfYmFja2VkX2luZGV4X3Nob3J0AAAAAAsAAAAAAAAAE3JlY2VpdmVyX2luZGV4X2xvbmcAAAAACwAAAAAAAAAUcmVjZWl2ZXJfaW5kZXhfc2hvcnQAAAALAAAAAAAAAAVzaG9ydAAAAAAAB9AAAAAKTWFya2V0U2lkZQAAAAAAAAAAABZzaG9ydF9wYXllcl9yZW1haW5kZXJzAAAAAAfQAAAADlJlbWFpbmRlckdyb3VwAAAAAAAAAAAACHNrZXdfZW1hAAAACw==",
+        "AAAAAgAAAAAAAAAAAAAAB1RyaWdnZXIAAAAAAgAAAAAAAAAAAAAABE5vbmUAAAABAAAAAAAAAAhBdHRhY2hlZAAAAAEAAAfQAAAAElRyaWdnZXJJbnN0cnVjdGlvbgAA",
+        "AAAAAQAAAAAAAAAAAAAACExwQ29uZmlnAAAAAwAAAAAAAAAYbHBfcmVxdWVzdF9kZWxheV9zZWNvbmRzAAAABgAAAAAAAAAcbWF4X3dpdGhkcmF3X3V0aWxpemF0aW9uX2JwcwAAAAQAAAAAAAAAGm1pbl9kZXBvc2l0X25hdl9mYWN0b3JfYnBzAAAAAAAE",
+        "AAAAAQAAAAAAAAAAAAAACFBvc2l0aW9uAAAAEQAAAAAAAAANYmFzZV9leHBvc3VyZQAAAAAAAAsAAAAAAAAAFWJvcnJvd19pbmRleF9zbmFwc2hvdAAAAAAAAAsAAAAAAAAAAmlkAAAAAAAGAAAAAAAAAAdpc19sb25nAAAAAAEAAAAAAAAAF2xwX3BheWVyX2luZGV4X3NuYXBzaG90AAAAAAsAAAAAAAAABm1hcmtldAAAAAAAEQAAAAAAAAAJb3BlbmVkX2F0AAAAAAAABgAAAAAAAAAFb3duZXIAAAAAAAATAAAAAAAAABpwZW5kaW5nX211dGF0aW9uX2FjdGlvbl9pZAAAAAAD6AAAAAYAAAAAAAAAF3JlY2VpdmVyX2luZGV4X3NuYXBzaG90AAAAAAsAAAAAAAAAHXJlY2VpdmVyX3BheWVyX2luZGV4X3NuYXBzaG90AAAAAAAACwAAAAAAAAAKcmlza191bml0cwAAAAAACwAAAAAAAAAEc2l6ZQAAAAsAAAAAAAAACXN0b3BfbG9zcwAAAAAAB9AAAAAHVHJpZ2dlcgAAAAAAAAAAEXN0b3JlZF9jb2xsYXRlcmFsAAAAAAAACwAAAAAAAAAZc3RvcmVkX21pbmltdW1fYm9ycm93X2ZlZQAAAAAAAAsAAAAAAAAAC3Rha2VfcHJvZml0AAAAB9AAAAAHVHJpZ2dlcgA=",
+        "AAAAAQAAAAAAAAAAAAAACUxwUmVxdWVzdAAAAAAAAAgAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANZXhlY3V0ZV9hZnRlcgAAAAAAAAYAAAAAAAAAAmlkAAAAAAAGAAAAAAAAAARraW5kAAAH0AAAAA1McFJlcXVlc3RLaW5kAAAAAAAAAAAAAAVvd25lcgAAAAAAABMAAAAAAAAADHJlcXVlc3RfdGltZQAAAAYAAAAzVGhlIHJlc29sdmUgcmV3YXJkIGZpeGVkIHdoZW4gdGhlIHJlcXVlc3Qgd2FzIG1hZGUuAAAAAAZyZXdhcmQAAAAAAAsAAAAAAAAABnN0YXR1cwAAAAAH0AAAAA9McFJlcXVlc3RTdGF0dXMA",
+        "AAAAAgAAAAAAAAAAAAAACVBheWVyU2lkZQAAAAAAAAMAAAAAAAAAAAAAAAROb25lAAAAAAAAAAAAAAAETG9uZwAAAAAAAAAAAAAABVNob3J0AAAA",
         "AAAAAgAAAAAAAAAAAAAACVJpc2tTdGF0ZQAAAAAAAAQAAAAAAAAAAAAAAAZOb3JtYWwAAAAAAAAAAAAAAAAAB1dhcm5pbmcAAAAAAAAAAAAAAAADQWRsAAAAAAAAAAAAAAAAB0hhcmRDYXAA",
-        "AAAAAQAAATJBIHBlbmRpbmcgbGltaXQvc3RvcCBlbnRyeSBvcmRlcjogdGhlIGZyb3plbiBgb3Blbl9wb3NpdGlvbmAgYXJndW1lbnRzCnBsdXMgYSB0cmlnZ2VyIGNvbmRpdGlvbiBhbmQgYW4gZXhwaXJ5LiBQbGFjaW5nIG9uZSBvbmx5IHdyaXRlcyB0aGlzCnJlY29yZCDigJQgbm8gZnVuZHMgbW92ZS4gQSBrZWVwZXIncyBgZXhlY3V0ZV9lbnRyeV9vcmRlcmAgcHVsbHMgdGhlCmNvbGxhdGVyYWwgdmlhIHRoZSBvd25lcidzIHRva2VuIGFsbG93YW5jZSBhbmQgb3BlbnMgdGhlIHBvc2l0aW9uCmV4YWN0bHkgYXMgYSBtYXJrZXQgb3BlbiB3b3VsZC4AAAAAAAAAAAAKRW50cnlPcmRlcgAAAAAADQAAAAAAAAAQYWNjZXB0YWJsZV9wcmljZQAAAAsAAAAAAAAACmNvbGxhdGVyYWwAAAAAAAsAAAAAAAAAEGV4ZWN1dGlvbl9idWRnZXQAAAALAAAAZ0xlZGdlciB0aW1lc3RhbXAgYWZ0ZXIgd2hpY2ggdGhlIG9yZGVyIGlzIGRlYWQgYW5kIHN3ZXB0IG9uIHRoZSBuZXh0CnRvdWNoICh1c2VyLWNvbmZpZ3VyYWJsZSBtYXggVFRMKS4AAAAACmV4cGlyZXNfYXQAAAAAAAYAAAAAAAAAAmlkAAAAAAAGAAAAAAAAAAdpc19sb25nAAAAAAEAAAAAAAAABm1hcmtldAAAAAAAEQAAAAAAAAAFb3duZXIAAAAAAAATAAAAAAAAAARzaXplAAAACwAAAAAAAAAJc3RvcF9sb3NzAAAAAAAACwAAAAAAAAALdGFrZV9wcm9maXQAAAAACwAAALJUcnVlIOKGkiBmaWxsIHdoZW4gcHJpY2Ug4omlIHRyaWdnZXIgKHN0b3AvYnJlYWtvdXQgZW50cnkpOyBmYWxzZSDihpIgZmlsbAp3aGVuIHByaWNlIOKJpCB0cmlnZ2VyIChsaW1pdC9kaXAgZW50cnkpLiBJbmZlcnJlZCBhdCBwbGFjZW1lbnQgZnJvbQp0aGUgdHJpZ2dlciB2cy4gdGhlIGN1cnJlbnQgcHJpY2UuAAAAAAANdHJpZ2dlcl9hYm92ZQAAAAAAAAEAAAA1VGhlIG9yYWNsZSBwcmljZSBhdCB3aGljaCB0aGUgb3JkZXIgYmVjb21lcyBmaWxsYWJsZS4AAAAAAAANdHJpZ2dlcl9wcmljZQAAAAAAAAs=",
-        "AAAAAQAAAAAAAAAAAAAACk1hcmtldFNpZGUAAAAAAAUAAAAAAAAADWJhc2VfZXhwb3N1cmUAAAAAAAALAAAAAAAAAApyaXNrX3N0YXRlAAAAAAfQAAAACVJpc2tTdGF0ZQAAAAAAAAAAAAAKcmlza191bml0cwAAAAAACwAAAAAAAAASc2l6ZV9vcGVuX2ludGVyZXN0AAAAAAALAAAAAAAAABdzdG9yZWRfY29sbGF0ZXJhbF90b3RhbAAAAAAL",
-        "AAAAAQAAAAAAAAAAAAAAClJvdW5kUHJpY2UAAAAAAAIAAAAAAAAABXByaWNlAAAAAAAACwAAAAAAAAAGc3ltYm9sAAAAAAAR",
-        "AAAAAQAAAAAAAAAAAAAAC09yYWNsZVJvdW5kAAAAAAUAAAAAAAAAAmlkAAAAAAAGAAAAAAAAAAtwcmV2aW91c19pZAAAAAAGAAAAAAAAABJwcmV2aW91c190aW1lc3RhbXAAAAAAAAYAAAAAAAAABnByaWNlcwAAAAAD6gAAB9AAAAAKUm91bmRQcmljZQAAAAAAAAAAAAl0aW1lc3RhbXAAAAAAAAAG",
-        "AAAAAQAAAAAAAAAAAAAADEdsb2JhbENvbmZpZwAAAA8AAAAAAAAAGGJhc2VfYm9ycm93X3JhdGVfYnBzX2RheQAAAAsAAACEwqc5LjIgYm9ycm93LWN1cnZlIGV4cG9uZW50LCBicHM6IDIwXzAwMCA9IHXCsiAobGVnYWN5IHF1YWRyYXRpYyksCjEwXzAwMCA9IGxpbmVhci4gQm91bmRlZCB0byDiiaQgMTAwXzAwMCAoZSDiiaQgMTApIGJ5IHZhbGlkYXRpb24uAAAAE2JvcnJvd19leHBvbmVudF9icHMAAAAABAAAAF/CpzguMSBoYWxmLWxpZmUgb2YgdGhlIGZ1bmRpbmcgc2tldyBFTUEsIHNlY29uZHMgKGdsb2JhbDogb25lIG1lbW9yeQpob3Jpem9uIGZvciBldmVyeSBtYXJrZXQpLgAAAAAZZnVuZGluZ19oYWxmX2xpZmVfc2Vjb25kcwAAAAAAAAYAAAAAAAAAGWhhcmRfY2FwX2ZhY3Rvcl9saW1pdF9icHMAAAAAAAAEAAAAAAAAABRscF9yZXZlbnVlX3NoYXJlX2JwcwAAAAQAAAAAAAAAEm1heF9hY3RpdmVfbWFya2V0cwAAAAAABAAAAAAAAAAObWF4X2FkbF9yZXdhcmQAAAAAAAsAAAAAAAAAGm1heF9pbnNvbHZlbnRfdG91Y2hfcmV3YXJkAAAAAAALAAAAAAAAABttYXhfdmFyaWFibGVfYm9ycm93X2Jwc19kYXkAAAAACwAAANDCpzExLjIgbWluaW11bSBib3Jyb3cgY2hhcmdlIHBlciBjYXBpdGFsaXphdGlvbjogYW4gaW5kZXggZGVsdGEgYXQKYElOREVYX1BSRUNJU0lPTmAgc2NhbGUgYXBwbGllZCB0byB0aGUgcG9zaXRpb24ncyByaXNrIHVuaXRzCigyZTExID0gMiBicHMgb2Ygbm90aW9uYWwgYXQgYSAxMCUgbWFya2V0IHJpc2sgZmFjdG9yKS4gWmVybwpkaXNhYmxlcyB0aGUgZmxvb3IuAAAAFm1pbl9ib3Jyb3dfaW5kZXhfZGVsdGEAAAAAAAsAAAAAAAAADm1pbl9jb2xsYXRlcmFsAAAAAAALAAAAAAAAABVtaW5fcG9zaXRpb25fbGlmZXRpbWUAAAAAAAAGAAABEsKnMTEuMSBzaGFyZSBvZiBhIGNsb3NpbmcgZmVlIHJvdXRlZCB0byB0aGUgdHJhZGVyJ3MgcmVmZXJyZXIsIGNhcnZlZApmcm9tIHRoZSBwcm90b2NvbCBzbGljZSAoa2VlcGVyIGFuZCBMUCBzaGFyZXMgYXJlIHVudG91Y2hlZCkuIGAwYApkaXNhYmxlcyByZWZlcnJhbCBhY2NydWFsIGdsb2JhbGx5IOKAlCBhIGtpbGwgc3dpdGNoLiBWYWxpZGF0ZWQgc28KYGxwICsga2VlcGVyICsgcmVmZXJyYWwg4omkIEJQU2AsIGtlZXBpbmcgdGhlIHByb3RvY29sIHJlbWFpbmRlciDiiaUgMC4AAAAAABZyZWZlcnJhbF9mZWVfc2hhcmVfYnBzAAAAAAAEAAAAAAAAABdyaXNrX2NhcGFjaXR5X2xpbWl0X2JwcwAAAAAEAAAAAAAAAB1yaXNrX2tlZXBlcl9yZXZlbnVlX3NoYXJlX2JwcwAAAAAAAAQ=",
-        "AAAAAQAAAAAAAAAAAAAADE1hcmtldENvbmZpZwAAABEAAAAAAAAAEmFkbF9wbmxfZmFjdG9yX2JwcwAAAAAABAAAAAAAAAAOYWRsX3Jld2FyZF9icHMAAAAAAAQAAAA0wqcxMS4xIGNsb3NpbmctZmVlIHRpZXIgd2hlbiB0aGUgY2xvc2Ugd29yc2VucyBza2V3LgAAABJjbG9zZV9mZWVfaGlnaF9icHMAAAAAAAQAAABCwqcxMS4xIGNsb3NpbmctZmVlIHRpZXIgd2hlbiB0aGUgY2xvc2UgaW1wcm92ZXMgb3IgcHJlc2VydmVzIHNrZXcuAAAAAAARY2xvc2VfZmVlX2xvd19icHMAAAAAAAAEAAAAAAAAABdoYXJkX2NhcF9wbmxfZmFjdG9yX2JwcwAAAAAEAAAAgk1hcmdpbiByZXF1aXJlZCB0byBvcGVuIG9yIGFkZCByaXNrICjCpzEyLjMpLiBEaXZpZGVzIG1heCBsZXZlcmFnZToKYSBwb3NpdGlvbiBtYXkgbm90IGJlIGNyZWF0ZWQgY2xvc2VyIHRvIGxpcXVpZGF0aW9uIHRoYW4gdGhpcy4AAAAAABJpbml0aWFsX21hcmdpbl9icHMAAAAAAAQAAACHwqc4LjEgd2VpZ2h0IG9mIHRoZSBpbnN0YW50YW5lb3VzIHNrZXcgaW4gdGhlIGZ1bmRpbmcgYmxlbmQsIGluIGJwczsKdGhlIHJlc3QgaXMgdGhlIGhhbGYtbGlmZSBFTUEuIGBCUFNgIHJlcHJvZHVjZXMgcHVyZSBpbnN0YW50IHNrZXcuAAAAABJpbnN0YW50X3dlaWdodF9icHMAAAAAAAQAAAAAAAAAFmxpcXVpZGF0aW9uX3Jld2FyZF9icHMAAAAAAAQAAAB8TWFyZ2luIGJlbG93IHdoaWNoIHRoZSBwb3NpdGlvbiBpcyBsaXF1aWRhdGFibGUgKMKnMTIuMykuIE11c3Qgbm90CmV4Y2VlZCBgaW5pdGlhbF9tYXJnaW5fYnBzYDsgdGhlIGdhcCBpcyB0aGUgZW50cnkgYnVmZmVyLgAAABZtYWludGVuYW5jZV9tYXJnaW5fYnBzAAAAAAAEAAAAAAAAABZtYXJrZXRfcmlza19mYWN0b3JfYnBzAAAAAAAEAAAAAAAAABhtYXhfZnVuZGluZ19yYXRlX2Jwc19kYXkAAAALAAAAAAAAABZtYXhfbG9uZ19iYXNlX2V4cG9zdXJlAAAAAAALAAAAAAAAABttYXhfbG9uZ19zaXplX29wZW5faW50ZXJlc3QAAAAACwAAAAAAAAAXbWF4X3Nob3J0X2Jhc2VfZXhwb3N1cmUAAAAACwAAAAAAAAAcbWF4X3Nob3J0X3NpemVfb3Blbl9pbnRlcmVzdAAAAAsAAAAAAAAAF3JlY292ZXJ5X3BubF9mYWN0b3JfYnBzAAAAAAQAAAAAAAAAFndhcm5pbmdfcG5sX2ZhY3Rvcl9icHMAAAAAAAQ=",
-        "AAAAAQAAAC5HbG9iYWwgc2FmZXR5IHRocmVzaG9sZHMgZm9yIHByaWNlIHZhbGlkYXRpb24uAAAAAAAAAAAADE9yYWNsZUNvbmZpZwAAAAQAAADzSG93IGxvbmcgYSBjYWNoZWQgYWdncmVnYXRlZCBwcmljZSByZW1haW5zIHZhbGlkIGFmdGVyIHRoZSByb3V0ZXIKZmV0Y2ggKGluIHNlY29uZHMpLiBBIGNhY2hlIGhpdCBhbHNvIHJlcXVpcmVzIGV2ZXJ5IHNvdXJjZSB0aW1lc3RhbXAKdXNlZCBmb3IgdGhlIGNhY2hlZCBtZWRpYW4gdG8gcmVtYWluIHdpdGhpbiBgc3RhbGVuZXNzX3RocmVzaG9sZGAuCk11c3QgYmUgPiAwIGFuZCA8PSBgc3RhbGVuZXNzX3RocmVzaG9sZGAuAAAAAA5jYWNoZV9kdXJhdGlvbgAAAAAABgAAAIlNYXhpbXVtIGFsbG93ZWQgc3ByZWFkIGJldHdlZW4gb3JhY2xlIHNvdXJjZXMgaW4gYmFzaXMgcG9pbnRzCihlLmcuLCAxMDAgPSAxJSkuIEJvdW5kZWQgYXQgYGNyYXRlOjpjb25zdGFudHM6Ok1BWF9ERVZJQVRJT05fQlBTX0NFSUxJTkdgLgAAAAAAABFtYXhfZGV2aWF0aW9uX2JwcwAAAAAAAAsAAADhTWluaW11bSBudW1iZXIgb2Ygc291cmNlIHJlc3BvbnNlcyB0aGF0IG11c3QgYWdyZWUgd2l0aGluCmBtYXhfZGV2aWF0aW9uX2Jwc2AgZm9yIE9yYWNsZVJvdXRlciB0byByZXR1cm4gYSBwcmljZS4gRmxvb3JlZCBhdApgY3JhdGU6OmNvbnN0YW50czo6TUlOX1JFUVVJUkVEX1NPVVJDRVNfRkxPT1JgLCBjZWlsaW5nZWQgYXQKYGNyYXRlOjpjb25zdGFudHM6Ok1BWF9PUkFDTEVfU09VUkNFU2AuAAAAAAAAFG1pbl9yZXF1aXJlZF9zb3VyY2VzAAAABAAAAFlNYXhpbXVtIGFnZSBvZiBhbiBleHRlcm5hbCBTRVAtNDAgcHJpY2UgZmVlZCBiZWZvcmUgaXQgaXMgcmVqZWN0ZWQKYXMgc3RhbGUgKGluIHNlY29uZHMpLgAAAAAAABNzdGFsZW5lc3NfdGhyZXNob2xkAAAAAAY=",
+        "AAAAAgAAAAAAAAAAAAAACkFjdGlvbktpbmQAAAAAAAQAAAAAAAAAAAAAAApNYXJrZXRPcGVuAAAAAAAAAAAAAAAAAAlMaW1pdE9wZW4AAAAAAAAAAAAAAAAAAAhEZWNyZWFzZQAAAAAAAAAAAAAABUNsb3NlAAAA",
+        "AAAAAQAAAAAAAAAAAAAACk1hcmtldFNpZGUAAAAAAAcAAAAAAAAADWJhc2VfZXhwb3N1cmUAAAAAAAALAAAAAAAAABZoYXJkX2NhcF9wYXlvdXRfZmFjdG9yAAAAAAALAAAAAAAAABZoYXJkX2NhcF9yZWZlcmVuY2VfcG5sAAAAAAALAAAAAAAAAApyaXNrX3N0YXRlAAAAAAfQAAAACVJpc2tTdGF0ZQAAAAAAAAAAAAAKcmlza191bml0cwAAAAAACwAAAAAAAAASc2l6ZV9vcGVuX2ludGVyZXN0AAAAAAALAAAAAAAAABdzdG9yZWRfY29sbGF0ZXJhbF90b3RhbAAAAAAL",
+        "AAAAAQAAAAAAAAAAAAAAC09wZW5QYXlsb2FkAAAAAAcAAAAAAAAAEGFjY2VwdGFibGVfcHJpY2UAAAALAAAAAAAAAApleHBpcmVzX2F0AAAAAAAGAAAAAAAAAAdpc19sb25nAAAAAAEAAAAAAAAABHNpemUAAAALAAAAAAAAAAlzdG9wX2xvc3MAAAAAAAALAAAAAAAAABRzdWJtaXR0ZWRfY29sbGF0ZXJhbAAAAAsAAAAAAAAAC3Rha2VfcHJvZml0AAAAAAs=",
+        "AAAAAQAAAAAAAAAAAAAADENsb3NlUGF5bG9hZAAAAAIAAAAAAAAAEGFjY2VwdGFibGVfcHJpY2UAAAALAAAAAAAAAAtwb3NpdGlvbl9pZAAAAAAG",
+        "AAAAAQAAAAAAAAAAAAAADEdsb2JhbENvbmZpZwAAABEAAAAAAAAAGGJhc2VfYm9ycm93X3JhdGVfYnBzX2RheQAAAAsAAAAAAAAAG2JvcnJvd19scF9yZXZlbnVlX3NoYXJlX2JwcwAAAAAEAAAAAAAAABdjb25maWdfdGltZWxvY2tfc2Vjb25kcwAAAAAGAAAAAAAAABhmZWVfbHBfcmV2ZW51ZV9zaGFyZV9icHMAAAAEAAAAAAAAABlmdW5kaW5nX2hhbGZfbGlmZV9zZWNvbmRzAAAAAAAABgAAAAAAAAAZZ2xvYmFsX2hhcmRfY2FwX2xpbWl0X2JwcwAAAAAAAAQAAAAAAAAAGWhhcmRfY2FwX3JlbGF0Y2hfYmFuZF9icHMAAAAAAAAEAAAAAAAAAA5rZWVwZXJfcmV3YXJkcwAAAAAH0AAAAA1LZWVwZXJSZXdhcmRzAAAAAAAAAAAAABJtYXhfYWN0aXZlX21hcmtldHMAAAAAAAQAAAAAAAAAGW1heF9tYXJrZXRfb3JkZXJfbGlmZXRpbWUAAAAAAAAGAAAAAAAAABptYXhfb3JkZXJfbGlmZXRpbWVfc2Vjb25kcwAAAAAABgAAAAAAAAAVbWF4X3ByaWNlX2FnZV9zZWNvbmRzAAAAAAAABgAAAAAAAAAbbWF4X3ZhcmlhYmxlX2JvcnJvd19icHNfZGF5AAAAAAsAAAAAAAAAFm1pbl9ib3Jyb3dfZmVlX3NlY29uZHMAAAAAAAYAAAAAAAAADm1pbl9jb2xsYXRlcmFsAAAAAAALAAAAAAAAABVtaW5fcG9zaXRpb25fbGlmZXRpbWUAAAAAAAAGAAAAAAAAABdyaXNrX2NhcGFjaXR5X2xpbWl0X2JwcwAAAAAE",
+        "AAAAAQAAAAAAAAAAAAAADE1hcmtldENvbmZpZwAAABEAAAAAAAAAEmFkbF9wbmxfZmFjdG9yX2JwcwAAAAAABAAAAAAAAAARY2xvc2VfcG5sX2ZlZV9icHMAAAAAAAAEAAAAAAAAABJjbG9zZV9zaXplX2ZlZV9icHMAAAAAAAQAAAAAAAAAF2hhcmRfY2FwX3BubF9mYWN0b3JfYnBzAAAAAAQAAAAAAAAAEmluaXRpYWxfbWFyZ2luX2JwcwAAAAAABAAAAAAAAAASaW5zdGFudF93ZWlnaHRfYnBzAAAAAAAEAAAAAAAAABZtYWludGVuYW5jZV9tYXJnaW5fYnBzAAAAAAAEAAAAAAAAABZtYXJrZXRfcmlza19mYWN0b3JfYnBzAAAAAAAEAAAAAAAAABhtYXhfZnVuZGluZ19yYXRlX2Jwc19kYXkAAAALAAAAAAAAABZtYXhfbG9uZ19iYXNlX2V4cG9zdXJlAAAAAAALAAAAAAAAABttYXhfbG9uZ19zaXplX29wZW5faW50ZXJlc3QAAAAACwAAAAAAAAAXbWF4X3Nob3J0X2Jhc2VfZXhwb3N1cmUAAAAACwAAAAAAAAAcbWF4X3Nob3J0X3NpemVfb3Blbl9pbnRlcmVzdAAAAAsAAAAAAAAADG9wZW5fZmVlX2JwcwAAAAQAAAAAAAAAHW9yZGVyX2V4ZWN1dGlvbl9kZWxheV9zZWNvbmRzAAAAAAAABgAAAAAAAAAXcmVjb3ZlcnlfcG5sX2ZhY3Rvcl9icHMAAAAABAAAAAAAAAAWd2FybmluZ19wbmxfZmFjdG9yX2JwcwAAAAAABA==",
+        "AAAAAgAAAAAAAAAAAAAADUFjdGlvbk91dGNvbWUAAAAAAAAIAAAAAAAAAAAAAAAIRXhlY3V0ZWQAAAAAAAAAAAAAAAZGYWlsZWQAAAAAAAAAAAAAAAAACUNhbmNlbGxlZAAAAAAAAAAAAAAAAAAAB0V4cGlyZWQAAAAAAAAAAAAAAAAKU3VwZXJzZWRlZAAAAAAAAAAAAAAAAAAITm90UmVhZHkAAAAAAAAAAAAAAAdQZW5kaW5nAAAAAAAAAAAAAAAAE1JlcXVpcmVzTGlxdWlkYXRpb24A",
+        "AAAAAgAAAAAAAAAAAAAADUFjdGlvblBheWxvYWQAAAAAAAAEAAAAAQAAAAAAAAAKTWFya2V0T3BlbgAAAAAAAQAAB9AAAAALT3BlblBheWxvYWQAAAAAAQAAAAAAAAAJTGltaXRPcGVuAAAAAAAAAgAAB9AAAAALT3BlblBheWxvYWQAAAAH0AAAABBUcmlnZ2VyQ29uZGl0aW9uAAAAAQAAAAAAAAAIRGVjcmVhc2UAAAABAAAH0AAAAA9EZWNyZWFzZVBheWxvYWQAAAAAAQAAAAAAAAAFQ2xvc2UAAAAAAAABAAAH0AAAAAxDbG9zZVBheWxvYWQ=",
+        "AAAAAgAAAAAAAAAAAAAADUZhaWx1cmVSZWFzb24AAAAAAAAJAAAAAAAAAAAAAAASUHJpY2VCb3VuZEV4Y2VlZGVkAAAAAAAAAAAAAAAAABBDYXBhY2l0eUV4Y2VlZGVkAAAAAAAAAAAAAAATRXhwb3N1cmVDYXBFeGNlZWRlZAAAAAAAAAAAAAAAAA5TaWRlUmVzdHJpY3RlZAAAAAAAAAAAAAAAAAAWSW5zdWZmaWNpZW50Q29sbGF0ZXJhbAAAAAAAAAAAAAAAAAAPVW5wYXlhYmxlUHJvZml0AAAAAAAAAAAAAAAADFBvc2l0aW9uR29uZQAAAAAAAAAAAAAADE1hcmtldFBhdXNlZAAAAAAAAAAAAAAADFNpemVUb29TbWFsbA==",
+        "AAAAAQAAAAAAAAAAAAAADUtlZXBlclJld2FyZHMAAAAAAAAKAAAAAAAAAANhZGwAAAAACwAAAAAAAAAFY2xvc2UAAAAAAAALAAAAAAAAAAhkZWNyZWFzZQAAAAsAAAAAAAAABmV4cGlyeQAAAAAACwAAAAAAAAALbGltaXRfb3JkZXIAAAAACwAAAAAAAAALbGlxdWlkYXRpb24AAAAACwAAAAAAAAAKbHBfcmVzb2x2ZQAAAAAACwAAAAAAAAAEb3BlbgAAAAsAAAAAAAAAAnNsAAAAAAALAAAAAAAAAAJ0cAAAAAAACw==",
         "AAAAAgAAAAAAAAAAAAAADUxwUmVxdWVzdEtpbmQAAAAAAAACAAAAAAAAAAAAAAAHRGVwb3NpdAAAAAAAAAAAAAAAAApXaXRoZHJhd2FsAAA=",
-        "AAAAAQAAAEtEYXRhIHJlcXVpcmVkIGR1cmluZyBhIFdBU00gbWlncmF0aW9uLiBTaW5nbGUgZGVmaW5pdGlvbiBmb3IgYWxsIGNvbnRyYWN0cy4AAAAAAAAAAA1NaWdyYXRpb25EYXRhAAAAAAAAAQAAAAAAAAAHdmVyc2lvbgAAAAAE",
-        "AAAAAQAAAbBQZW5kaW5nIFdBU00gdXBncmFkZSDigJQgc2V0IGJ5IGBwcm9wb3NlX3VwZ3JhZGVgLCBjb25zdW1lZCBieSBgdXBncmFkZWAKKGNsZWFyZWQgYXRvbWljYWxseSBvbiBhIHN1Y2Nlc3NmdWwgaW5zdGFsbCksIG9yIGNsZWFyZWQgYnkgYGNhbmNlbF91cGdyYWRlYC4KU2luZ2xlIHNoYXBlIGFjcm9zcyBldmVyeSBwcm90b2NvbCBjb250cmFjdC4gQ29udHJhY3RzIHN0b3JlIGl0IGF0CnRoZSBzaGFyZWQgYHBlbmRpbmdfdXBncmFkZWAgU3ltYm9sIGtleSBpbiB0aGVpciBvd24gaW5zdGFuY2Ugc3RvcmFnZSAoc2VlCmBjcmF0ZTo6dXBncmFkZTo6cGVuZGluZ191cGdyYWRlX2tleWApLiBgdXBncmFkZWAgcmVmdXNlcyB0byBpbnN0YWxsCnVubGVzcyBgcGVuZGluZy53YXNtX2hhc2hgIG1hdGNoZXMgdGhlIHN1cHBsaWVkIGhhc2ggYW5kIGBub3cgPj0gZXRhYC4AAAAAAAAADlBlbmRpbmdVcGdyYWRlAAAAAAACAAAAAAAAAANldGEAAAAABgAAAAAAAAAJd2FzbV9oYXNoAAAAAAAD7gAAACA=",
-        "AAAAAgAAAAAAAAAAAAAAD0xwUmVxdWVzdFN0YXR1cwAAAAAEAAAAAAAAAAAAAAAHUGVuZGluZwAAAAAAAAAAAAAAAAdTZXR0bGVkAAAAAAAAAAAAAAAABkZhaWxlZAAAAAAAAAAAAAAAAAAHRXhwaXJlZAA=",
-        "AAAAAQAAAN1UaGUgY2FsbGVyLXN1cHBsaWVkIGZpZWxkcyBvZiBhIGBwbGFjZV9lbnRyeV9vcmRlcmAgcmVxdWVzdCwgYnVuZGxlZCBzbwp0aGUgZW50cnkgcG9pbnQgc3RheXMgd2l0aGluIFNvcm9iYW4ncyBwYXJhbWV0ZXIgbGltaXQuIGBvd25lcmAgYW5kCmBtYXJrZXRgIGFyZSBwYXNzZWQgYWxvbmdzaWRlOyBgaWRgIGFuZCBgdHJpZ2dlcl9hYm92ZWAgYXJlIGRlcml2ZWQgYXQKcGxhY2VtZW50LgAAAAAAAAAAAAAQRW50cnlPcmRlclBhcmFtcwAAAAkAAAAAAAAAEGFjY2VwdGFibGVfcHJpY2UAAAALAAAAAAAAAApjb2xsYXRlcmFsAAAAAAALAAAAAAAAABBleGVjdXRpb25fYnVkZ2V0AAAACwAAAAAAAAAKZXhwaXJlc19hdAAAAAAABgAAAAAAAAAHaXNfbG9uZwAAAAABAAAAAAAAAARzaXplAAAACwAAAAAAAAAJc3RvcF9sb3NzAAAAAAAACwAAAAAAAAALdGFrZV9wcm9maXQAAAAACwAAAAAAAAANdHJpZ2dlcl9wcmljZQAAAAAAAAs=",
-        "AAAAAQAAAAAAAAAAAAAAEFNldHRsZW1lbnRSZXN1bHQAAAACAAAAPFNoYXJlcyBtaW50ZWQgZm9yIGEgZGVwb3NpdCBvciBhc3NldHMgcGFpZCBmb3IgYSB3aXRoZHJhd2FsLgAAAAZhbW91bnQAAAAAAAsAAAAAAAAABnN0YXR1cwAAAAAH0AAAABBTZXR0bGVtZW50U3RhdHVz",
-        "AAAAAgAAAAAAAAAAAAAAEFNldHRsZW1lbnRTdGF0dXMAAAACAAAAAAAAAAAAAAAHU2V0dGxlZAAAAAAAAAAAAAAAAAZGYWlsZWQAAA==",
-        "AAAAAQAAAAAAAAAAAAAAEkFjY291bnRpbmdTbmFwc2hvdAAAAAAACgAAAAAAAAAOY2FzaF9scF9lcXVpdHkAAAAAAAsAAAAAAAAADmNhc2hfc2hvcnRmYWxsAAAAAAALAAAAAAAAAA9mcmVlX2xwX2NhcGl0YWwAAAAACwAAAAAAAAAVbHBfYmxvY2tlZF9zaWRlX2NvdW50AAAAAAAABAAAAAAAAAANbm9uX2xwX2NsYWltcwAAAAAAAAsAAAAAAAAAE29wZW5fcG9zaXRpb25fY291bnQAAAAABgAAAAAAAAANcGh5c2ljYWxfY2FzaAAAAAAAAAsAAAAAAAAAFXJlcXVpcmVkX3Jpc2tfYmFja2luZwAAAAAAAAsAAAAAAAAAEHRvdGFsX3Jpc2tfdW5pdHMAAAALAAAAAAAAAAl2YXVsdF9uYXYAAAAAAAAL",
-        "AAAABQAAALVFbWl0dGVkIGJ5IGBwcm9wb3NlX3VwZ3JhZGVgLiBPZmYtY2hhaW4gbW9uaXRvcmluZyByZWNvcmRzIHRoZSBwcm9wb3NlZApgd2FzbV9oYXNoYCArIGBldGFgIGFuZCBmbGFncyBhbnkgc3Vic2VxdWVudCBgdXBncmFkZSgpYCBjYWxsIHdob3NlIGhhc2gKZGl2ZXJnZXMgb3IgdGhhdCBmaXJlcyBiZWZvcmUgYGV0YWAuAAAAAAAAAAAAAA9VcGdyYWRlUHJvcG9zZWQAAAAAAQAAAAZ1cGdwcnAAAAAAAAIAAAAAAAAACXdhc21faGFzaAAAAAAAA+4AAAAgAAAAAAAAAAAAAAADZXRhAAAAAAYAAAAAAAAAAQ==",
-        "AAAABQAAAC9FbWl0dGVkIGJ5IGBjYW5jZWxfdXBncmFkZWAgKFBBVVNFUiB2ZXRvIHBhdGgpLgAAAAAAAAAAEFVwZ3JhZGVDYW5jZWxsZWQAAAABAAAABnVwZ2NhbgAAAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAE=",
+        "AAAAAQAAAAAAAAAAAAAADU1pZ3JhdGlvbkRhdGEAAAAAAAABAAAAAAAAAAd2ZXJzaW9uAAAAAAQ=",
+        "AAAAAQAAAAAAAAAAAAAADVBlbmRpbmdBY3Rpb24AAAAAAAAJAAAAAAAAAAlhY3Rpb25faWQAAAAAAAAGAAAAAAAAABJjb21taXRfb2JzZXJ2ZWRfYXQAAAAAAAYAAAAAAAAACmNyZWF0ZWRfYXQAAAAAAAYAAAAAAAAAE2VzY3Jvd2VkX2NvbGxhdGVyYWwAAAAACwAAAAAAAAANZXhlY3V0ZV9hZnRlcgAAAAAAAAYAAAAAAAAABGtpbmQAAAfQAAAACkFjdGlvbktpbmQAAAAAAAAAAAAJbWFya2V0X2lkAAAAAAAAEQAAAAAAAAAFb3duZXIAAAAAAAATAAAAAAAAAAdwYXlsb2FkAAAAB9AAAAANQWN0aW9uUGF5bG9hZAAAAA==",
+        "AAAAAQAAAAAAAAAAAAAADlBlbmRpbmdVcGdyYWRlAAAAAAACAAAAAAAAAANldGEAAAAABgAAAAAAAAAJd2FzbV9oYXNoAAAAAAAD7gAAACA=",
+        "AAAAAQAAAAAAAAAAAAAADlJlbWFpbmRlckdyb3VwAAAAAAAEAAAAAAAAABZkaXN0cmlidXRpb25fcmVtYWluZGVyAAAAAAALAAAAAAAAABJscF9wYXllcl9yZW1haW5kZXIAAAAAAAsAAAAAAAAAHHJlY2VpdmVyX2xpYWJpbGl0eV9yZW1haW5kZXIAAAALAAAAAAAAABhyZWNlaXZlcl9wYXllcl9yZW1haW5kZXIAAAAL",
+        "AAAAAQAAAAAAAAAAAAAAD0RlY3JlYXNlUGF5bG9hZAAAAAADAAAAAAAAABBhY2NlcHRhYmxlX3ByaWNlAAAACwAAAAAAAAALcG9zaXRpb25faWQAAAAABgAAAAAAAAAMc2l6ZV9yZW1vdmVkAAAACw==",
+        "AAAAAgAAAAAAAAAAAAAAD0xwUmVxdWVzdFN0YXR1cwAAAAADAAAAAAAAAAAAAAAHUGVuZGluZwAAAAAAAAAAAAAAAAdTZXR0bGVkAAAAAAAAAAAAAAAABkZhaWxlZAAA",
+        "AAAAAQAAAAAAAAAAAAAAD1BlbmRpbmdGZWVzVmlldwAAAAAEAAAAAAAAAAZib3Jyb3cAAAAAAAsAAAAAAAAAE2Z1bmRpbmdfcGFpZF90b19scHMAAAAACwAAAAAAAAAZZnVuZGluZ19wYWlkX3RvX3JlY2VpdmVycwAAAAAAAAsAAAAAAAAAEGZ1bmRpbmdfcmVjZWl2ZWQAAAAL",
+        "AAAAAQAAAAAAAAAAAAAAEFBlbmRpbmdQcmljZUZlZWQAAAACAAAAAAAAAAxlZmZlY3RpdmVfYXQAAAAGAAAAAAAAAApwcmljZV9mZWVkAAAAAAAT",
+        "AAAAAQAAAAAAAAAAAAAAEFNldHRsZW1lbnRSZXN1bHQAAAADAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAAAAAABnJld2FyZAAAAAAACwAAAAAAAAAGc3RhdHVzAAAAAAfQAAAAEFNldHRsZW1lbnRTdGF0dXM=",
+        "AAAAAgAAAAAAAAAAAAAAEFNldHRsZW1lbnRTdGF0dXMAAAADAAAAAAAAAAAAAAAHU2V0dGxlZAAAAAAAAAAAAAAAAAZGYWlsZWQAAAAAAAAAAAAAAAAACE5vdFJlYWR5",
+        "AAAAAQAAAAAAAAAAAAAAEFRyaWdnZXJDb25kaXRpb24AAAACAAAAAAAAAA10cmlnZ2VyX2Fib3ZlAAAAAAAAAQAAAAAAAAANdHJpZ2dlcl9wcmljZQAAAAAAAAs=",
+        "AAAAAQAAAAAAAAAAAAAAEkFjY291bnRpbmdTbmFwc2hvdAAAAAAADAAAAAAAAAAOY2FzaF9scF9lcXVpdHkAAAAAAAsAAAAAAAAADmNhc2hfc2hvcnRmYWxsAAAAAAALAAAAAAAAABdkZWxldmVyYWdpbmdfc2lkZV9jb3VudAAAAAAEAAAAAAAAAA9mcmVlX2xwX2NhcGl0YWwAAAAACwAAAAAAAAAXbWluX2VxdWl0eV9jbGVhcl9vZl9hZGwAAAAACwAAAAAAAAANbm9uX2xwX2NsYWltcwAAAAAAAAsAAAAAAAAAE29wZW5fcG9zaXRpb25fY291bnQAAAAABgAAAAAAAAANcGh5c2ljYWxfY2FzaAAAAAAAAAsAAAAAAAAAFXJlcXVpcmVkX3Jpc2tfYmFja2luZwAAAAAAAAsAAAAAAAAAFXJlc3RyaWN0ZWRfc2lkZV9jb3VudAAAAAAAAAQAAAAAAAAAEHRvdGFsX3Jpc2tfdW5pdHMAAAALAAAAAAAAAAl2YXVsdF9uYXYAAAAAAAAL",
+        "AAAAAQAAAAAAAAAAAAAAElRyaWdnZXJJbnN0cnVjdGlvbgAAAAAABQAAAAAAAAAQYWNjZXB0YWJsZV9wcmljZQAAAAsAAAAAAAAAEmNvbW1pdF9vYnNlcnZlZF9hdAAAAAAABgAAAAAAAAAMY29tbWl0dGVkX2F0AAAABgAAAAAAAAANZXhlY3V0ZV9hZnRlcgAAAAAAAAYAAAAAAAAADXRyaWdnZXJfcHJpY2UAAAAAAAAL",
+        "AAAAAQAAAAAAAAAAAAAAE1BlbmRpbmdHbG9iYWxDb25maWcAAAAAAgAAAAAAAAAGY29uZmlnAAAAAAfQAAAADEdsb2JhbENvbmZpZwAAAAAAAAAMZWZmZWN0aXZlX2F0AAAABg==",
+        "AAAAAQAAAAAAAAAAAAAAE1BlbmRpbmdNYXJrZXRDb25maWcAAAAAAgAAAAAAAAAGY29uZmlnAAAAAAfQAAAADE1hcmtldENvbmZpZwAAAAAAAAAMZWZmZWN0aXZlX2F0AAAABg==",
+        "AAAABQAAAEVBIG9uZS1zaG90IGNyb3NzLWNvbnRyYWN0IHdpcmluZyAoYHNldF92YXVsdGAsIGBzZXRfcmVxdWVzdF9yb3V0ZXJgKS4AAAAAAAAAAAAABVdpcmVkAAAAAAAAAQAAAAV3aXJlZAAAAAAAAAMAAAAAAAAABnRhcmdldAAAAAAAEQAAAAAAAAAAAAAAB2FkZHJlc3MAAAAAEwAAAAAAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAB",
+        "AAAABQAAACNBIGNvbXBsZXRlZCBwb3N0LXVwZ3JhZGUgbWlncmF0aW9uLgAAAAAAAAAACE1pZ3JhdGVkAAAAAQAAAAhtaWdyYXRlZAAAAAIAAAAAAAAAB3ZlcnNpb24AAAAABAAAAAAAAAAAAAAACG9wZXJhdG9yAAAAEwAAAAAAAAAB",
+        "AAAAAQAAAAAAAAAAAAAAC0V2ZW50SGVhZGVyAAAAAAQAAAAAAAAABWFjdG9yAAAAAAAAEwAAAAAAAAANZXZlbnRfdmVyc2lvbgAAAAAAAAQAAAAAAAAAEGxlZGdlcl90aW1lc3RhbXAAAAAGAAAAAAAAAAZtYXJrZXQAAAAAABE=",
+        "AAAABQAAAAAAAAAAAAAAD1VwZ3JhZGVQcm9wb3NlZAAAAAABAAAABnVwZ3BycAAAAAAAAgAAAAAAAAAJd2FzbV9oYXNoAAAAAAAD7gAAACAAAAAAAAAAAAAAAANldGEAAAAABgAAAAAAAAAB",
+        "AAAABQAAAAAAAAAAAAAAEFVwZ3JhZGVDYW5jZWxsZWQAAAABAAAABnVwZ2NhbgAAAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAE=",
         "AAAABAAAAAAAAAAAAAAAEFVwZ3JhZGVhYmxlRXJyb3IAAAABAAAAQVdoZW4gbWlncmF0aW9uIGlzIGF0dGVtcHRlZCBidXQgbm90IGFsbG93ZWQgZHVlIHRvIHVwZ3JhZGUgc3RhdGUuAAAAAAAAE01pZ3JhdGlvbk5vdEFsbG93ZWQAAAAETA==",
         "AAAABQAAACpFdmVudCBlbWl0dGVkIHdoZW4gdGhlIG1lcmtsZSByb290IGlzIHNldC4AAAAAAAAAAAAHU2V0Um9vdAAAAAABAAAACHNldF9yb290AAAAAQAAAAAAAAAEcm9vdAAAAA4AAAAAAAAAAg==",
         "AAAABQAAACdFdmVudCBlbWl0dGVkIHdoZW4gYW4gaW5kZXggaXMgY2xhaW1lZC4AAAAAAAAAAApTZXRDbGFpbWVkAAAAAAABAAAAC3NldF9jbGFpbWVkAAAAAAEAAAAAAAAABWluZGV4AAAAAAAAAAAAAAAAAAAC",
         "AAAABAAAAAAAAAAAAAAAFk1lcmtsZURpc3RyaWJ1dG9yRXJyb3IAAAAAAAMAAAAbVGhlIG1lcmtsZSByb290IGlzIG5vdCBzZXQuAAAAAApSb290Tm90U2V0AAAAAAUUAAAAJ1RoZSBwcm92aWRlZCBpbmRleCB3YXMgYWxyZWFkeSBjbGFpbWVkLgAAAAATSW5kZXhBbHJlYWR5Q2xhaW1lZAAAAAUVAAAAFVRoZSBwcm9vZiBpcyBpbnZhbGlkLgAAAAAAAAxJbnZhbGlkUHJvb2YAAAUW",
-        "AAAAAgAAAD1TdG9yYWdlIGtleXMgZm9yIHRoZSBkYXRhIGFzc29jaWF0ZWQgd2l0aCBgTWVya2xlRGlzdHJpYnV0b3JgAAAAAAAAAAAAABtNZXJrbGVEaXN0cmlidXRvclN0b3JhZ2VLZXkAAAAAAgAAAAAAAAAoVGhlIE1lcmtsZSByb290IG9mIHRoZSBkaXN0cmlidXRpb24gdHJlZQAAAARSb290AAAAAQAAACNNYXBzIGFuIGluZGV4IHRvIGl0cyBjbGFpbWVkIHN0YXR1cwAAAAAHQ2xhaW1lZAAAAAABAAAABA==",
         "AAAAAgAAACpSb3VuZGluZyBkaXJlY3Rpb24gZm9yIGRpdmlzaW9uIG9wZXJhdGlvbnMAAAAAAAAAAAAIUm91bmRpbmcAAAADAAAAAAAAACVSb3VuZCB0b3dhcmQgbmVnYXRpdmUgaW5maW5pdHkgKGRvd24pAAAAAAAABUZsb29yAAAAAAAAAAAAACNSb3VuZCB0b3dhcmQgcG9zaXRpdmUgaW5maW5pdHkgKHVwKQAAAAAEQ2VpbAAAAAAAAAAeUm91bmQgdG93YXJkIHplcm8gKHRydW5jYXRpb24pAAAAAAAIVHJ1bmNhdGU=",
         "AAAABAAAAAAAAAAAAAAAFlNvcm9iYW5GaXhlZFBvaW50RXJyb3IAAAAAAAIAAAAcQXJpdGhtZXRpYyBvdmVyZmxvdyBvY2N1cnJlZAAAAAhPdmVyZmxvdwAABdwAAAAQRGl2aXNpb24gYnkgemVybwAAAA5EaXZpc2lvbkJ5WmVybwAAAAAF3Q==",
-        "AAAABAAAAAAAAAAAAAAAC0NyeXB0b0Vycm9yAAAAAAMAAAApVGhlIG1lcmtsZSBwcm9vZiBsZW5ndGggaXMgb3V0IG9mIGJvdW5kcy4AAAAAAAAWTWVya2xlUHJvb2ZPdXRPZkJvdW5kcwAAAAAFeAAAACdUaGUgaW5kZXggb2YgdGhlIGxlYWYgaXMgb3V0IG9mIGJvdW5kcy4AAAAAFk1lcmtsZUluZGV4T3V0T2ZCb3VuZHMAAAAABXkAAAAYTm8gZGF0YSBpbiBoYXNoZXIgc3RhdGUuAAAAEEhhc2hlckVtcHR5U3RhdGUAAAV6",
         "AAAABQAAACpFdmVudCBlbWl0dGVkIHdoZW4gdGhlIGNvbnRyYWN0IGlzIHBhdXNlZC4AAAAAAAAAAAAGUGF1c2VkAAAAAAABAAAABnBhdXNlZAAAAAAAAAAAAAI=",
         "AAAABQAAACxFdmVudCBlbWl0dGVkIHdoZW4gdGhlIGNvbnRyYWN0IGlzIHVucGF1c2VkLgAAAAAAAAAIVW5wYXVzZWQAAAABAAAACHVucGF1c2VkAAAAAAAAAAI=",
         "AAAABAAAAAAAAAAAAAAADVBhdXNhYmxlRXJyb3IAAAAAAAACAAAANFRoZSBvcGVyYXRpb24gZmFpbGVkIGJlY2F1c2UgdGhlIGNvbnRyYWN0IGlzIHBhdXNlZC4AAAANRW5mb3JjZWRQYXVzZQAAAAAAA+gAAAA4VGhlIG9wZXJhdGlvbiBmYWlsZWQgYmVjYXVzZSB0aGUgY29udHJhY3QgaXMgbm90IHBhdXNlZC4AAAANRXhwZWN0ZWRQYXVzZQAAAAAAA+k=",
+        "AAAAAgAAAD1TdG9yYWdlIGtleXMgZm9yIHRoZSBkYXRhIGFzc29jaWF0ZWQgd2l0aCBgTWVya2xlRGlzdHJpYnV0b3JgAAAAAAAAAAAAABtNZXJrbGVEaXN0cmlidXRvclN0b3JhZ2VLZXkAAAAAAgAAAAAAAAAoVGhlIE1lcmtsZSByb290IG9mIHRoZSBkaXN0cmlidXRpb24gdHJlZQAAAARSb290AAAAAQAAACNNYXBzIGFuIGluZGV4IHRvIGl0cyBjbGFpbWVkIHN0YXR1cwAAAAAHQ2xhaW1lZAAAAAABAAAABA==",
+        "AAAABAAAAAAAAAAAAAAAC0NyeXB0b0Vycm9yAAAAAAMAAAApVGhlIG1lcmtsZSBwcm9vZiBsZW5ndGggaXMgb3V0IG9mIGJvdW5kcy4AAAAAAAAWTWVya2xlUHJvb2ZPdXRPZkJvdW5kcwAAAAAFeAAAACdUaGUgaW5kZXggb2YgdGhlIGxlYWYgaXMgb3V0IG9mIGJvdW5kcy4AAAAAFk1lcmtsZUluZGV4T3V0T2ZCb3VuZHMAAAAABXkAAAAYTm8gZGF0YSBpbiBoYXNoZXIgc3RhdGUuAAAAEEhhc2hlckVtcHR5U3RhdGUAAAV6",
         "AAAAAgAAACJTdG9yYWdlIGtleSBmb3IgdGhlIHBhdXNhYmxlIHN0YXRlAAAAAAAAAAAAElBhdXNhYmxlU3RvcmFnZUtleQAAAAAAAQAAAAAAAAAySW5kaWNhdGVzIHdoZXRoZXIgdGhlIGNvbnRyYWN0IGlzIGluIHBhdXNlZCBzdGF0ZS4AAAAAAAZQYXVzZWQAAA==" ]),
       options
     )
@@ -621,12 +585,15 @@ export class Client extends ContractClient {
   public readonly fromJSON = {
     migrate: this.txFromJSON<null>,
         upgrade: this.txFromJSON<null>,
+        skip_head: this.txFromJSON<null>,
         get_request: this.txFromJSON<LpRequest>,
         resolve_next: this.txFromJSON<SettlementResult>,
         cancel_upgrade: this.txFromJSON<null>,
+        claim_lp_payout: this.txFromJSON<i128>,
         propose_upgrade: this.txFromJSON<null>,
         request_deposit: this.txFromJSON<u64>,
         request_withdrawal: this.txFromJSON<u64>,
+        lp_payout_claimable: this.txFromJSON<i128>,
         next_request_to_resolve: this.txFromJSON<u64>
   }
 }

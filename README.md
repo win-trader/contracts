@@ -19,11 +19,11 @@ This is one of four repos:
 - `packages/protocol-math/` — `@win-trader/protocol-math`: pure TS mirror of on-chain math (quotes, fees, PnL, liquidation price), no network calls
 - `packages/protocol-clients/` — `@win-trader/protocol-clients`: helpers to instantiate a binding against a network + signer
 - `packages/config/` — `@win-trader/config`: network/address registry (`addresses.json`) + protocol constants
-- `scripts/` — deploy and admin scripts (deploy, upgrade, grant-keepers, add-market, provision-keys)
+- `scripts/` — deploy and admin scripts (deploy, upgrade, add-market, provision-keys); `scripts/lib/protocol.sh` holds the network parameters and config JSON they share
 
 ## Prerequisites
 
-- Rust + `wasm32v1-none` target, and the `stellar` CLI
+- Rust 1.98.1 with the `wasm32v1-none` target (pinned in `rust-toolchain.toml`), and the `stellar` CLI 27.0.0 (pinned in the Makefile; it bundles the WASM optimizer)
 - Node ≥ 18 and `pnpm`
 
 ## Common commands
@@ -31,7 +31,8 @@ This is one of four repos:
 Contracts (Rust):
 
 - `make build` — compile contracts to WASM
-- `make optimize` — optimize the WASM with `stellar contract optimize`
+- `make optimize` — optimize the WASM with `stellar contract optimize`, then fail if any contract exceeds the 131,072-byte network limit
+- `make repro` — the canonical build: the same steps inside a pinned `rust:1.98.1` Linux image (needs Docker), output in `target/repro/`. Byte-identical to CI. Host builds differ by platform (Apple-silicon and x86-64 Linux order functions differently), so audited and deployed hashes come from this target, and testnet/mainnet deploys and upgrades use it automatically.
 - `make check` — type-check the Rust workspace
 - `make bind` — `optimize` + generate and build the TS bindings into `packages/bindings/`
 
@@ -44,10 +45,10 @@ TS packages:
 Local network + deploy:
 
 - `make up` / `make down` / `make reset` — local Stellar network
-- `make deploy` / `make deploy-testnet` / `make deploy-mainnet` — deploy and record addresses
-- `make cex-oracles-testnet` — deploy and wire Binance/KuCoin oracle contracts on testnet
-- `make deploy-testnet-full` — provision testnet keys, deploy core contracts, then deploy/wire CEX oracles
-- `make upgrade-local` / `make upgrade-testnet`, `make grant-keepers`, `make add-market`
+- `make deploy` / `make deploy-testnet` / `make deploy-mainnet` — deploy and record addresses. Local deploys the mock oracle and mock token. Testnet needs `PRICE_FEED_ADDR` (a third-party SEP-40 feed). Mainnet also needs `ASSET_ADDR` (the USDC SAC) and `UPGRADER_ADDR`, `PAUSER_ADDR`, `UNPAUSER_ADDR`, `ORACLE_ADDR`, `PROTOCOL_ADDR`, none of which may be the admin
+- `make deploy-testnet-full` — provision testnet keys, then deploy the core contracts
+- `make upgrade-propose` / `make upgrade-execute` — timelocked upgrade in two steps (set `NETWORK_KEY`, and `UPGRADE_SOURCE` to the UPGRADER identity)
+- `make add-market SYMBOL=…` — register a market the price feed already serves
 
 The fee and vault rewrite requires a fresh deployment. Its economic state is
 not compatible with contracts deployed before the request router was added.
@@ -80,8 +81,10 @@ config loader falls back to the in-package combined file.
 Run the on-chain testnet deploy from this repo:
 
 ```bash
-make deploy-testnet-full
+PRICE_FEED_ADDR=C... make deploy-testnet-full
 ```
+
+`PRICE_FEED_ADDR` is the third-party SEP-40 price feed. The in-repo mock oracle is local-only.
 
 That produces:
 

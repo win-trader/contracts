@@ -37,7 +37,6 @@ impl ConfigManagerContract {
         }
         .publish(&env);
         storage::save_upgrade_timelock(&env, shared::constants::DEFAULT_UPGRADE_TIMELOCK);
-        storage::set_initialized(&env);
         bump_instance_ttl(&env);
     }
 }
@@ -77,10 +76,6 @@ impl ConfigManager for ConfigManagerContract {
     fn has_role(env: Env, role: Symbol, account: Address) -> bool {
         bump_instance_ttl(&env);
         has_role_local(&env, &role, &account)
-    }
-
-    fn bump_config_state(env: Env) {
-        bump_instance_ttl(&env);
     }
 
     fn propose_admin(env: Env, caller: Address, new_admin: Address) {
@@ -178,6 +173,7 @@ impl ConfigManagerContract {
         require_upgrader(&env, &operator);
         ensure_can_complete_migration(&env);
         storage::save_version(&env, data.version);
+        shared::events::Migrated { version: data.version, operator }.publish(&env);
         complete_migration(&env);
     }
 }

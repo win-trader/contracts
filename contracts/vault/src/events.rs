@@ -1,12 +1,7 @@
-//! LP share lifecycle and governance events.
-
 use soroban_sdk::{contractevent, Address};
 
 use shared::LpConfig;
 
-/// A queued deposit settled: `assets` entered the vault, `shares` minted to
-/// `owner` (§13.5). `share_supply` and `vault_nav` are the post-settlement
-/// totals, so the indexer can track share pricing without a separate read.
 #[contractevent(topics = ["lpdep"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DepositSettled {
@@ -17,8 +12,6 @@ pub struct DepositSettled {
     pub vault_nav: i128,
 }
 
-/// A queued withdrawal settled: `shares` burned, `assets` paid to `owner`
-/// (§13.6). `share_supply` and `vault_nav` are the post-settlement totals.
 #[contractevent(topics = ["lpwd"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalSettled {

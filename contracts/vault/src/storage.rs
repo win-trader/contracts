@@ -4,7 +4,6 @@ use soroban_sdk::{contracttype, Address, Env};
 #[contracttype]
 #[derive(Clone)]
 pub enum Key {
-    Initialized,
     ConfigManager,
     PositionManager,
     RequestRouter,

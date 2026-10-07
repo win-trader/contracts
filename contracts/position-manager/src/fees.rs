@@ -1,109 +1,144 @@
-//! Position fee accounting — doc §11.
-//!
-//! Capitalization settles every accrued amount against stored collateral in
-//! the §11.4 collection order (receiver-backed funding, then negative price
-//! PnL, then LP-backed funding, then borrow) so a shortfall lands on the
-//! least-protected claim, then resets the debt baselines.
-
-use soroban_sdk::Env;
+use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use shared::constants::BPS;
-use shared::{Market, Position};
+use shared::{Market, MarketConfig, Position};
 
+use crate::errors::PositionManagerError;
 use crate::events::{self, FeeSource};
 use crate::funding;
 use crate::ledger::{self, Ledger};
 use crate::{math, storage};
 
-/// What one capitalization actually moved. Feeds the settlement events and
-/// the close waterfall's bad-debt calculation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CollectedFees {
-    /// Funding credit moved from the guaranteed receiver claim into stored
-    /// collateral (label move — total non-LP claims unchanged, §8.3).
     pub receiver_credit: i128,
-    /// Receiver-backed payer funding collected from collateral.
     pub receiver_funding_paid: i128,
-    /// LP-backed payer funding collected from collateral.
     pub lp_funding_paid: i128,
-    /// Borrow fee collected from collateral.
     pub borrow_paid: i128,
-    /// Negative price PnL collected from collateral.
     pub loss_collected: i128,
-    /// Accrued obligations the position value could not cover.
     pub unpaid: i128,
 }
 
-/// §11.4 — split a collected opening or borrow fee between the risk-keeper
-/// reserve, protocol claimable revenue, and (implicitly) residual LP cash.
-///
-/// `referral` is a carve-out already credited to a referrer by the caller
-/// (only nonzero on a referred closing fee, §11.1); it comes purely out of
-/// the protocol slice, so the keeper and LP shares — computed off the full
-/// `collected` — are never diluted. `keeper + lp + protocol + referral ==
-/// collected`, and `protocol ≥ 0` because the validated share sum bounds
-/// `keeper + lp + referral ≤ collected`.
-pub fn split_revenue(
+#[allow(clippy::too_many_arguments)]
+pub fn distribute_open_close_revenue(
     env: &Env,
     ledger: &mut Ledger,
+    market: &Symbol,
+    actor: &Address,
     collected: i128,
-    referral: i128,
     source: FeeSource,
     position_id: u64,
+) -> i128 {
+    if collected <= 0 {
+        return 0;
+    }
+    let config = storage::get_global_config(env);
+    let lp = math::mul_div_floor(env, collected, config.fee_lp_revenue_share_bps as i128, BPS);
+    let protocol = math::sub(env, collected, lp);
+    ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
+    events::emit_revenue_split(
+        env, market, actor, position_id, source, collected, lp, protocol,
+    );
+    protocol
+}
+
+pub fn distribute_borrow_revenue(
+    env: &Env,
+    ledger: &mut Ledger,
+    market: &Symbol,
+    actor: &Address,
+    collected: i128,
+    position_id: u64,
 ) {
-    if collected == 0 {
+    if collected <= 0 {
         return;
     }
     let config = storage::get_global_config(env);
-    let keeper = math::mul_div_floor(
+    let lp = math::mul_div_floor(
         env,
         collected,
-        config.risk_keeper_revenue_share_bps as i128,
+        config.borrow_lp_revenue_share_bps as i128,
         BPS,
     );
-    let lp = math::mul_div_floor(env, collected, config.lp_revenue_share_bps as i128, BPS);
-    let protocol = math::sub(
-        env,
-        math::sub(env, math::sub(env, collected, keeper), lp),
-        referral,
-    );
-    ledger.credit(env, ledger::Bucket::KeeperReserve, keeper);
+    let protocol = math::sub(env, collected, lp);
     ledger.credit(env, ledger::Bucket::ProtocolClaimable, protocol);
     events::emit_revenue_split(
         env,
+        market,
+        actor,
         position_id,
-        source,
+        FeeSource::Borrow,
         collected,
-        keeper,
         lp,
         protocol,
-        referral,
     );
 }
 
-/// §11.4 — capitalize all accrued amounts plus `negative_pnl` against the
-/// position's stored collateral, in the specified collection order, then
-/// reset the debt baselines. Collateral from the current action and realized
-/// positive PnL must already be in stored collateral when this runs.
+pub fn calculate_opening_fee(env: &Env, added_size: i128, config: &MarketConfig) -> i128 {
+    if added_size <= 0 {
+        panic_with_error!(env, PositionManagerError::InvalidAmount);
+    }
+    math::mul_div_ceil(env, added_size, config.open_fee_bps as i128, BPS)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn calculate_closing_fee(
+    env: &Env,
+    size_removed: i128,
+    payable_pnl: i128,
+    pending: &funding::PendingFees,
+    borrow_due: i128,
+    keeper_reward: i128,
+    config: &MarketConfig,
+) -> i128 {
+    if payable_pnl <= 0 {
+        return 0;
+    }
+    let size_component = math::mul_div_ceil(env, size_removed, config.close_size_fee_bps as i128, BPS);
+    let pnl_component = math::mul_div_ceil(env, payable_pnl, config.close_pnl_fee_bps as i128, BPS);
+    let nominal = core::cmp::min(
+        payable_pnl,
+        core::cmp::max(size_component, pnl_component),
+    );
+    let mut after_senior = math::add(env, payable_pnl, pending.funding_received);
+    after_senior = math::sub(env, after_senior, pending.funding_paid_to_receivers);
+    after_senior = math::sub(env, after_senior, pending.funding_paid_to_lps);
+    after_senior = math::sub(env, after_senior, borrow_due);
+    after_senior = math::sub(env, after_senior, keeper_reward);
+    core::cmp::min(nominal, core::cmp::max(after_senior, 0))
+}
+
+fn credit_received_funding(env: &Env, ledger: &mut Ledger, market: &mut Market, amount: i128) {
+    if amount <= 0 {
+        return;
+    }
+    if market.pending_receiver_funding < amount
+        || ledger.pending_receiver_funding_total < amount
+    {
+        panic_with_error!(env, PositionManagerError::InvariantViolation);
+    }
+    market.pending_receiver_funding = math::sub(env, market.pending_receiver_funding, amount);
+    ledger.release(env, ledger::Bucket::ReceiverFunding, amount);
+}
+
 pub fn capitalize(
     env: &Env,
     ledger: &mut Ledger,
+    market_id: &Symbol,
+    actor: &Address,
     position: &mut Position,
     market: &mut Market,
     negative_pnl: i128,
 ) -> CollectedFees {
     let pending = funding::pending_fees(env, ledger, position, market);
-    let receiver_credit = core::cmp::min(
-        pending.funding_received,
-        ledger.pending_receiver_funding_total,
-    );
+    let receiver_credit = pending.funding_received;
 
     let (receiver_collected, loss_collected, lp_collected, borrow_collected) = {
         let is_long = position.is_long;
+        credit_received_funding(env, ledger, market, receiver_credit);
         let side = market.side_mut(is_long);
         if receiver_credit > 0 {
-            let released = ledger.release(env, ledger::Bucket::ReceiverFunding, receiver_credit);
-            ledger::add_stored_collateral(env, ledger, position, side, released);
+            ledger::add_stored_collateral(env, ledger, position, side, receiver_credit);
         }
         let receiver_collected = ledger::collect_stored_collateral(
             env,
@@ -131,15 +166,8 @@ pub fn capitalize(
         )
     };
 
-    split_revenue(
-        env,
-        ledger,
-        borrow_collected,
-        0,
-        FeeSource::Borrow,
-        position.id,
-    );
-    funding::reset_debts(env, ledger, position, market);
+    distribute_borrow_revenue(env, ledger, market_id, actor, borrow_collected, position.id);
+    funding::snapshot_funding_indices(position, market);
 
     let guaranteed_and_loss = math::add(
         env,
@@ -162,29 +190,5 @@ pub fn capitalize(
         borrow_paid: borrow_collected,
         loss_collected,
         unpaid,
-    }
-}
-
-/// §11.1 — the closing-fee tier for removing `base_removed` from the
-/// `is_long` side: low when the removal improves or preserves the book's
-/// base-exposure skew, high when it worsens it.
-pub fn tiered_close_fee_bps(env: &Env, market: &Market, is_long: bool, base_removed: i128) -> u32 {
-    let skew_before = math::skew_abs(env, market.long.base_exposure, market.short.base_exposure);
-    let (long_after, short_after) = if is_long {
-        (
-            math::sub(env, market.long.base_exposure, base_removed),
-            market.short.base_exposure,
-        )
-    } else {
-        (
-            market.long.base_exposure,
-            math::sub(env, market.short.base_exposure, base_removed),
-        )
-    };
-    let skew_after = math::skew_abs(env, long_after, short_after);
-    if skew_after <= skew_before {
-        market.config.close_fee_low_bps
-    } else {
-        market.config.close_fee_high_bps
     }
 }

@@ -5,12 +5,10 @@ members = [
     "contracts/vault",
     "contracts/position-manager",
     "contracts/config-manager",
-    "contracts/oracle",
-    "contracts/oracle-router",
+    "contracts/market-governor",
     "contracts/request-router",
     "mocks/mock-token",
     "mocks/mock-oracle",
-    "test-suites",
 ]
 
 [workspace.dependencies]
