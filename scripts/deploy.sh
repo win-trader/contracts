@@ -393,7 +393,7 @@ jq \
        oracleRouter:    {address: $feed,       startLedger: $feedL},
        mockToken:       {address: $mockToken,  startLedger: $mockTokenL}}
    | del(.[$net].contracts.binanceOracle, .[$net].contracts.kucoinOracle, .[$net].contracts.oracle2)
-   | if $mockOracle == "" then . else .[$net].contracts.oracle = {address: $mockOracle, startLedger: $mockOracleL} end' \
+   | if $mockOracle == "" then del(.[$net].contracts.oracle) else .[$net].contracts.oracle = {address: $mockOracle, startLedger: $mockOracleL} end' \
   "$ADDRESSES_FILE" > "$TMP_ADDR"
 mv "$TMP_ADDR" "$ADDRESSES_FILE"
 
