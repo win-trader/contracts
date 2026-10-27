@@ -8,7 +8,8 @@ use spec_harness::*;
 use cex_feed::{CexFeedContract, CexFeedContractClient, FeedConfig, SourcePrice};
 use shared::constants::ROLE_ORACLE;
 use shared::{defaults, ActionOutcome};
-use soroban_sdk::{testutils::Address as _, vec, Address, Symbol};
+use position_manager::PositionManagerError;
+use soroban_sdk::{testutils::{Address as _, Ledger}, vec, Address, Symbol};
 
 struct Feed<'a> {
     client: CexFeedContractClient<'a>,
@@ -19,7 +20,8 @@ struct Feed<'a> {
 impl Feed<'_> {
     fn publish(&self, p: &Protocol, publisher: &Address, price: i128) {
         let batch = vec![&p.env, SourcePrice { symbol: p.market.clone(), price }];
-        self.client.set_prices(publisher, &batch);
+        self.client
+            .set_prices(publisher, &p.env.ledger().timestamp(), &batch);
     }
 }
 
@@ -98,5 +100,10 @@ fn a_silent_publisher_stops_settlement_instead_of_pricing_from_one_source() {
     let action = c.create_market_open(&p.trader, &p.market, &order);
     p.wait(31);
     feed.publish(&p, &feed.binance, usd(50_000));
-    assert!(c.try_settle_market_open(&p.keeper, &action).is_err());
+    assert_eq!(
+        c.try_settle_market_open(&p.keeper, &action),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            PositionManagerError::PriceUnavailable as u32
+        )))
+    );
 }

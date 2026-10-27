@@ -33,7 +33,7 @@ under the live app), not a patch.
 | `positionManager` | PositionManager: positions, actions, live config, events for trading |
 | `vault` | Vault: cash and `sLP` |
 | `requestRouter` | RequestRouter: LP deposit and withdrawal queue |
-| `oracleRouter` | The price feed: `cex-feed` off local (SEP-40 `lastprice(Asset)`, `decimals()`; read as `Asset::Other(market)`). The Binance and KuCoin publishers call `set_prices(publisher, [{symbol, price}])` (every symbol in one transaction) on it; `source_price(publisher, symbol)` shows each one's last push |
+| `oracleRouter` | The price feed: `cex-feed` off local (SEP-40 `lastprice(Asset)`, `decimals()`; read as `Asset::Other(market)`). The Binance and KuCoin publishers call `set_prices(publisher, observed_at, [{symbol, price}])` (every symbol in one transaction; stamped `min(observed_at, ledger time)`) on it; `source_price(publisher, symbol)` shows each one's last push |
 | `mockToken`, `oracle` | Local and testnet only |
 
 Index events from all of `configManager`, `governor`, `positionManager`,

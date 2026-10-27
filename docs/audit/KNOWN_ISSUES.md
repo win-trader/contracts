@@ -13,18 +13,32 @@ in scope and welcome.
 Prices come from the in-house `cex-feed` contract: the median of the
 Binance and KuCoin publishers that published within `max_source_age_seconds`,
 or no price below `min_sources` or past `max_deviation_bps` (T-27). Each
-source is stamped with the ledger time of its publish. The PositionManager
+source is stamped `min(observed_at, ledger time)`: the publisher states when
+it read the exchange, and the stamp is never later than the ledger, so a
+price that lands late cannot pass as observed after a commit it predates. A
+publisher can make its own prices look older, never newer. The PositionManager
 checks only that a price is positive, not stamped in the future, and no older
 than `max_price_age_seconds`. So a quorum of publisher keys is trusted: if
 `min_sources` of them lie together, a wrong price settles orders, liquidates
 positions, and moves value between traders and LPs. One lying publisher
-against an honest one can move the two-source median by at most about
-`max_deviation_bps`. The feed address can only change through the governor's
-timelock; the feed's publisher set only through its own.
+against an honest one can move the two-source median by up to
+`max_deviation_bps` (50 bps by default), because the median of two is their
+average. The feed address can only change through the governor's timelock;
+the feed's publisher set only through its own.
+
+ORACLE and ADMIN can each remove a publisher at once. That never adds trust,
+but it is not free: below `min_sources` it stops pricing until a new set
+clears the feed's timelock (at least a day), and with three or more
+publishers the choice of which one to drop moves the median. Both roles are
+trusted (K-2, E-4).
 
 Operating requirements:
 
 - Keep `min_sources` at 2. At 1, either publisher key alone sets the price.
+  `deploy.sh` refuses less on mainnet, and refuses a publisher that is the
+  admin, the keeper or a role holder.
+- Run the publisher hosts on NTP. A clock behind the ledger makes prices
+  look older than they are (fills wait longer); one ahead is clamped.
 - A fill needs an observation stamped *after* the commit (§8.6); the feed
   stamps the oldest counted source, so every counted publisher must publish
   after the commit. The publishers force a publish every 20 seconds, so

@@ -55,7 +55,7 @@ fi
 
 require_identity() {
   if ! stellar keys address "$1" >/dev/null 2>&1; then
-    echo "❌ Identity '$1' not found. Run: NETWORK_KEY=$NETWORK_KEY bash scripts/provision-keys.sh"
+    echo "❌ Identity '$1' not found. Run: NETWORK_KEY=$NETWORK_KEY bash scripts/provision-keys.sh" >&2
     exit 1
   fi
 }
@@ -87,9 +87,25 @@ if [[ -n "$DEPLOY_CEX_FEED" && "$BINANCE_PUBLISHER_ADDR" == "$KUCOIN_PUBLISHER_A
   echo "❌ The Binance and KuCoin publishers must be different accounts."
   exit 1
 fi
-if [[ -n "$DEPLOY_CEX_FEED" ]] && [[ "$BINANCE_PUBLISHER_ADDR" == "$ADMIN_ADDR" || "$KUCOIN_PUBLISHER_ADDR" == "$ADMIN_ADDR" ]]; then
-  echo "❌ A price publisher must not be the admin account."
-  exit 1
+FEED_MAX_SOURCE_AGE_SECONDS="${FEED_MAX_SOURCE_AGE_SECONDS:-30}"
+FEED_MAX_DEVIATION_BPS="${FEED_MAX_DEVIATION_BPS:-50}"
+FEED_MIN_SOURCES="${FEED_MIN_SOURCES:-2}"
+FEED_TIMELOCK_SECONDS="${FEED_TIMELOCK_SECONDS:-${CONFIG_TIMELOCK_SECONDS:-172800}}"
+if [[ -n "$DEPLOY_CEX_FEED" ]]; then
+  # The cex-feed constructor's bounds, checked before anything is deployed.
+  if (( FEED_TIMELOCK_SECONDS < 86400 || FEED_TIMELOCK_SECONDS > 2592000 )) \
+    || (( FEED_MIN_SOURCES < 1 || FEED_MIN_SOURCES > 2 )) \
+    || (( FEED_MAX_SOURCE_AGE_SECONDS < 1 || FEED_MAX_SOURCE_AGE_SECONDS > 3600 )) \
+    || (( FEED_MAX_DEVIATION_BPS < 1 || FEED_MAX_DEVIATION_BPS > 2000 )); then
+    echo "❌ Feed config out of bounds: timelock 86400..2592000, min_sources 1..2 (two publishers), age 1..3600, deviation 1..2000 bps."
+    exit 1
+  fi
+  for publisher_addr in "$BINANCE_PUBLISHER_ADDR" "$KUCOIN_PUBLISHER_ADDR"; do
+    if [[ "$publisher_addr" == "$ADMIN_ADDR" || "$publisher_addr" == "$KEEPER_ADDR" ]]; then
+      echo "❌ A price publisher must not be the admin or keeper account."
+      exit 1
+    fi
+  done
 fi
 if [[ "$NETWORK_KEY" == "mainnet" ]]; then
   if [[ -z "$ASSET_ADDR" ]]; then
@@ -102,6 +118,18 @@ if [[ "$NETWORK_KEY" == "mainnet" ]]; then
       exit 1
     fi
   done
+  if [[ -n "$DEPLOY_CEX_FEED" ]]; then
+    if (( FEED_MIN_SOURCES < 2 )); then
+      echo "❌ FEED_MIN_SOURCES must be 2 on mainnet: at 1, either publisher key alone sets the price."
+      exit 1
+    fi
+    for role in "${ROLES[@]}"; do
+      if [[ "$(holder "$role")" == "$BINANCE_PUBLISHER_ADDR" || "$(holder "$role")" == "$KUCOIN_PUBLISHER_ADDR" ]]; then
+        echo "❌ ${role}_ADDR must not be a price publisher."
+        exit 1
+      fi
+    done
+  fi
   if [[ "$(holder UPGRADER)" == "$(holder PAUSER)" ]]; then
     echo "❌ UPGRADER_ADDR and PAUSER_ADDR must differ: the pause key cancels upgrades."
     exit 1
@@ -221,13 +249,13 @@ echo "  config-manager : $CM_ID"
 FEED_LEDGER=0
 if [[ -n "$DEPLOY_CEX_FEED" ]]; then
   FEED_CONFIG=$(jq -nc \
-    --argjson max_source_age_seconds "${FEED_MAX_SOURCE_AGE_SECONDS:-30}" \
-    --argjson max_deviation_bps "${FEED_MAX_DEVIATION_BPS:-100}" \
-    --argjson min_sources "${FEED_MIN_SOURCES:-2}" \
+    --argjson max_source_age_seconds "$FEED_MAX_SOURCE_AGE_SECONDS" \
+    --argjson max_deviation_bps "$FEED_MAX_DEVIATION_BPS" \
+    --argjson min_sources "$FEED_MIN_SOURCES" \
     '$ARGS.named')
   PRICE_FEED_ADDR=$(deploy cex-feed \
     --config_manager "$CM_ID" \
-    --timelock_seconds "${FEED_TIMELOCK_SECONDS:-${CONFIG_TIMELOCK_SECONDS:-172800}}" \
+    --timelock_seconds "$FEED_TIMELOCK_SECONDS" \
     --publishers "[\"$BINANCE_PUBLISHER_ADDR\",\"$KUCOIN_PUBLISHER_ADDR\"]" \
     --config "$FEED_CONFIG")
   FEED_LEDGER=$(current_ledger)

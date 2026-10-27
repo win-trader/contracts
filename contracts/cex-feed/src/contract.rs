@@ -50,9 +50,11 @@ impl CexFeedContract {
         shared::bump_instance_ttl(&env);
     }
 
-    /// Record `publisher`'s prices, each stamped with the ledger time. One
-    /// call carries every symbol, so a publisher pays one transaction a tick.
-    pub fn set_prices(env: Env, publisher: Address, prices: Vec<SourcePrice>) {
+    /// Record `publisher`'s prices, observed on its exchange at `observed_at`.
+    /// The stamp is `min(observed_at, ledger time)`: a price that lands late
+    /// keeps its older observation time, so it can never pass as observed
+    /// after a commit it predates. One call carries every symbol.
+    pub fn set_prices(env: Env, publisher: Address, observed_at: u64, prices: Vec<SourcePrice>) {
         publisher.require_auth();
         if !storage::publishers(&env).contains(&publisher) {
             panic_with_error!(&env, CexFeedError::NotPublisher);
@@ -60,7 +62,7 @@ impl CexFeedContract {
         if prices.is_empty() || prices.len() > MAX_BATCH {
             panic_with_error!(&env, CexFeedError::InvalidPrice);
         }
-        let timestamp = env.ledger().timestamp();
+        let timestamp = core::cmp::min(observed_at, env.ledger().timestamp());
         for entry in prices.iter() {
             if entry.price <= 0 || entry.price > MAX_PRICE {
                 panic_with_error!(&env, CexFeedError::InvalidPrice);
@@ -173,9 +175,10 @@ impl CexFeedContract {
         shared::bump_instance_ttl(&env);
     }
 
-    /// Drop a compromised publisher now. Only ever removes trust: with fewer
+    /// Drop a compromised publisher now. Never adds a publisher; with fewer
     /// publishers than `min_sources`, `lastprice` returns `None` and the
-    /// protocol stops settling until a new set is applied.
+    /// protocol stops settling until a new set is applied. A pending proposal
+    /// that includes the removed publisher is cancelled with it.
     pub fn remove_publisher(env: Env, caller: Address, publisher: Address) {
         require_oracle_or_admin(&env, &caller);
         let mut publishers = storage::publishers(&env);
@@ -185,6 +188,12 @@ impl CexFeedContract {
         publishers.remove(index);
         storage::save_publishers(&env, &publishers);
         events::emit_sources_changed(&env, &caller, &publishers, &storage::config(&env));
+        if let Some(pending) = storage::pending_sources(&env) {
+            if pending.publishers.contains(&publisher) {
+                storage::clear_pending_sources(&env);
+                events::emit_sources_proposal_cancelled(&env, &caller);
+            }
+        }
         shared::bump_instance_ttl(&env);
     }
 }

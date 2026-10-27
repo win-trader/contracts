@@ -67,7 +67,7 @@ impl Setup {
     }
     fn publish(&self, publisher: &Address, price: i128) {
         self.feed
-            .set_prices(publisher, &one(&self.env, &self.btc(), price));
+            .set_prices(publisher, &u64::MAX, &one(&self.env, &self.btc(), price));
     }
 }
 
@@ -175,22 +175,32 @@ fn only_publishers_publish_positive_bounded_prices() {
     let stranger = Address::generate(&s.env);
     let btc = s.btc();
     assert_eq!(
-        error(s.feed.try_set_prices(&stranger, &one(&s.env, &btc, 1))),
+        error(
+            s.feed
+                .try_set_prices(&stranger, &u64::MAX, &one(&s.env, &btc, 1))
+        ),
         CexFeedError::NotPublisher
     );
     assert_eq!(
-        error(s.feed.try_set_prices(&s.binance, &one(&s.env, &btc, 0))),
-        CexFeedError::InvalidPrice
-    );
-    assert_eq!(
-        error(s.feed.try_set_prices(&s.binance, &one(&s.env, &btc, -1))),
+        error(
+            s.feed
+                .try_set_prices(&s.binance, &u64::MAX, &one(&s.env, &btc, 0))
+        ),
         CexFeedError::InvalidPrice
     );
     assert_eq!(
         error(
             s.feed
-                .try_set_prices(&s.binance, &one(&s.env, &btc, i128::MAX / 10_000))
+                .try_set_prices(&s.binance, &u64::MAX, &one(&s.env, &btc, -1))
         ),
+        CexFeedError::InvalidPrice
+    );
+    assert_eq!(
+        error(s.feed.try_set_prices(
+            &s.binance,
+            &u64::MAX,
+            &one(&s.env, &btc, i128::MAX / 10_000)
+        )),
         CexFeedError::InvalidPrice
     );
     assert_eq!(s.feed.source_price(&s.binance, &btc), None);
@@ -203,7 +213,7 @@ fn set_prices_requires_the_publishers_signature() {
     let btc = s.btc();
     assert!(s
         .feed
-        .try_set_prices(&s.binance, &one(&s.env, &btc, 1))
+        .try_set_prices(&s.binance, &u64::MAX, &one(&s.env, &btc, 1))
         .is_err());
 }
 
@@ -267,7 +277,7 @@ fn publisher_set_changes_wait_for_the_timelock() {
     assert_eq!(
         error(
             s.feed
-                .try_set_prices(&s.kucoin, &one(&s.env, &s.btc(), 100_0000000))
+                .try_set_prices(&s.kucoin, &u64::MAX, &one(&s.env, &s.btc(), 100_0000000))
         ),
         CexFeedError::NotPublisher
     );
@@ -369,9 +379,9 @@ fn three_sources_take_the_middle_one() {
     );
     let feed = CexFeedContractClient::new(&env, &id);
     let btc = Symbol::new(&env, "BTCUSD");
-    feed.set_prices(&p[0], &one(&env, &btc, 100_0000000));
-    feed.set_prices(&p[1], &one(&env, &btc, 100_5000000));
-    feed.set_prices(&p[2], &one(&env, &btc, 99_9000000));
+    feed.set_prices(&p[0], &u64::MAX, &one(&env, &btc, 100_0000000));
+    feed.set_prices(&p[1], &u64::MAX, &one(&env, &btc, 100_5000000));
+    feed.set_prices(&p[2], &u64::MAX, &one(&env, &btc, 99_9000000));
     assert_eq!(
         feed.lastprice(&Asset::Other(btc)).unwrap().price,
         100_0000000
@@ -393,7 +403,7 @@ fn one_call_publishes_every_symbol_at_the_same_stamp() {
             price: 3_000_0000000,
         },
     ];
-    s.feed.set_prices(&s.binance, &batch);
+    s.feed.set_prices(&s.binance, &u64::MAX, &batch);
     assert_eq!(
         s.feed.lastprice(&Asset::Other(eth)),
         Some(PriceData {
@@ -419,7 +429,7 @@ fn one_bad_price_rejects_the_whole_batch() {
         },
     ];
     assert_eq!(
-        error(s.feed.try_set_prices(&s.binance, &batch)),
+        error(s.feed.try_set_prices(&s.binance, &u64::MAX, &batch)),
         CexFeedError::InvalidPrice
     );
     assert_eq!(s.feed.source_price(&s.binance, &s.btc()), None);
@@ -429,7 +439,10 @@ fn one_bad_price_rejects_the_whole_batch() {
 fn batches_are_non_empty_and_bounded() {
     let s = setup(1);
     assert_eq!(
-        error(s.feed.try_set_prices(&s.binance, &Vec::new(&s.env))),
+        error(
+            s.feed
+                .try_set_prices(&s.binance, &u64::MAX, &Vec::new(&s.env))
+        ),
         CexFeedError::InvalidPrice
     );
     let mut batch = Vec::new(&s.env);
@@ -440,9 +453,77 @@ fn batches_are_non_empty_and_bounded() {
         });
     }
     assert_eq!(
-        error(s.feed.try_set_prices(&s.binance, &batch)),
+        error(s.feed.try_set_prices(&s.binance, &u64::MAX, &batch)),
         CexFeedError::InvalidPrice
     );
     batch.pop_back();
-    s.feed.set_prices(&s.binance, &batch);
+    s.feed.set_prices(&s.binance, &u64::MAX, &batch);
+}
+
+#[test]
+fn a_late_landing_price_keeps_its_observation_time() {
+    let s = setup(1);
+    s.advance(10);
+    // Observed 8s ago, landing now: it must not count as observed after
+    // anything committed in between.
+    s.feed.set_prices(
+        &s.binance,
+        &(START + 2),
+        &one(&s.env, &s.btc(), 100_0000000),
+    );
+    assert_eq!(s.feed.lastprice(&s.asset()).unwrap().timestamp, START + 2);
+}
+
+#[test]
+fn an_observation_time_ahead_of_the_ledger_is_clamped() {
+    let s = setup(1);
+    s.feed.set_prices(
+        &s.binance,
+        &(START + 60),
+        &one(&s.env, &s.btc(), 100_0000000),
+    );
+    assert_eq!(s.feed.lastprice(&s.asset()).unwrap().timestamp, START);
+}
+
+#[test]
+fn removing_a_publisher_cancels_a_proposal_that_includes_it() {
+    let s = setup(2);
+    let fresh = Address::generate(&s.env);
+    let with_kucoin = vec![&s.env, s.kucoin.clone(), fresh.clone()];
+    s.feed.propose_sources(&s.oracle, &with_kucoin, &config(2));
+    s.feed.remove_publisher(&s.admin, &s.kucoin);
+    assert_eq!(s.feed.pending_sources(), None);
+
+    let without_kucoin = vec![&s.env, s.binance.clone(), fresh];
+    s.feed
+        .propose_sources(&s.oracle, &without_kucoin, &config(2));
+    s.feed.remove_publisher(&s.admin, &s.binance);
+    // Binance is in this proposal too, so it is cancelled as well.
+    assert_eq!(s.feed.pending_sources(), None);
+}
+
+#[test]
+fn a_proposal_without_the_removed_publisher_survives() {
+    let s = setup(1);
+    let fresh = Address::generate(&s.env);
+    s.feed.propose_sources(
+        &s.oracle,
+        &vec![&s.env, s.binance.clone(), fresh],
+        &config(1),
+    );
+    s.feed.remove_publisher(&s.admin, &s.kucoin);
+    assert!(s.feed.pending_sources().is_some());
+}
+
+#[test]
+fn deviation_is_compared_exactly() {
+    let s = setup(2);
+    // Median 101.005, distance 1.005 = 99.50 bps: inside 100.
+    s.publish(&s.binance, 100_0000000);
+    s.publish(&s.kucoin, 102_0100000);
+    assert!(s.feed.lastprice(&s.asset()).is_some());
+    // Median 101.0102, distance 1.0102 = 100.01 bps: floor division would
+    // round it to 100 and accept it.
+    s.publish(&s.kucoin, 102_0204000);
+    assert_eq!(s.feed.lastprice(&s.asset()), None);
 }

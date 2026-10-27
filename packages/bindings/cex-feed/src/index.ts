@@ -481,10 +481,12 @@ export interface Client {
 
   /**
    * Construct and simulate a set_prices transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Record `publisher`'s prices, each stamped with the ledger time. One
-   * call carries every symbol, so a publisher pays one transaction a tick.
+   * Record `publisher`'s prices, observed on its exchange at `observed_at`.
+   * The stamp is `min(observed_at, ledger time)`: a price that lands late
+   * keeps its older observation time, so it can never pass as observed
+   * after a commit it predates. One call carries every symbol.
    */
-  set_prices: ({publisher, prices}: {publisher: string, prices: Array<SourcePrice>}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
+  set_prices: ({publisher, observed_at, prices}: {publisher: string, observed_at: u64, prices: Array<SourcePrice>}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
   /**
    * Construct and simulate a source_price transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -517,9 +519,10 @@ export interface Client {
 
   /**
    * Construct and simulate a remove_publisher transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Drop a compromised publisher now. Only ever removes trust: with fewer
+   * Drop a compromised publisher now. Never adds a publisher; with fewer
    * publishers than `min_sources`, `lastprice` returns `None` and the
-   * protocol stops settling until a new set is applied.
+   * protocol stops settling until a new set is applied. A pending proposal
+   * that includes the removed publisher is cancelled with it.
    */
   remove_publisher: ({caller, publisher}: {caller: string, publisher: string}, options?: MethodOptions) => Promise<AssembledTransaction<null>>
 
@@ -560,14 +563,14 @@ export class Client extends ContractClient {
         "AAAAAAAAAC1TRVAtNDA6IHByaWNlcyBjYXJyeSBgUFJJQ0VfREVDSU1BTFNgIHBsYWNlcy4AAAAAAAAIZGVjaW1hbHMAAAAAAAAAAQAAAAQ=",
         "AAAAAAAAAKNTRVAtNDA6IHRoZSBtZWRpYW4gb2YgdGhlIGZyZXNoIHNvdXJjZXMgZm9yIGBPdGhlcihzeW1ib2wpYCwgc3RhbXBlZAp3aXRoIHRoZSBvbGRlc3Qgb2YgdGhlbS4gYE5vbmVgIGJlbG93IGBtaW5fc291cmNlc2AgZnJlc2ggc291cmNlcyBvcgpwYXN0IGBtYXhfZGV2aWF0aW9uX2Jwc2AuAAAAAAlsYXN0cHJpY2UAAAAAAAABAAAAAAAAAAVhc3NldAAAAAAAB9AAAAAFQXNzZXQAAAAAAAABAAAD6AAAB9AAAAAJUHJpY2VEYXRhAAAA",
         "AAAAAAAAAAAAAAAKcHVibGlzaGVycwAAAAAAAAAAAAEAAAPqAAAAEw==",
-        "AAAAAAAAAIpSZWNvcmQgYHB1Ymxpc2hlcmAncyBwcmljZXMsIGVhY2ggc3RhbXBlZCB3aXRoIHRoZSBsZWRnZXIgdGltZS4gT25lCmNhbGwgY2FycmllcyBldmVyeSBzeW1ib2wsIHNvIGEgcHVibGlzaGVyIHBheXMgb25lIHRyYW5zYWN0aW9uIGEgdGljay4AAAAAAApzZXRfcHJpY2VzAAAAAAACAAAAAAAAAAlwdWJsaXNoZXIAAAAAAAATAAAAAAAAAAZwcmljZXMAAAAAA+oAAAfQAAAAC1NvdXJjZVByaWNlAAAAAAA=",
+        "AAAAAAAAAQtSZWNvcmQgYHB1Ymxpc2hlcmAncyBwcmljZXMsIG9ic2VydmVkIG9uIGl0cyBleGNoYW5nZSBhdCBgb2JzZXJ2ZWRfYXRgLgpUaGUgc3RhbXAgaXMgYG1pbihvYnNlcnZlZF9hdCwgbGVkZ2VyIHRpbWUpYDogYSBwcmljZSB0aGF0IGxhbmRzIGxhdGUKa2VlcHMgaXRzIG9sZGVyIG9ic2VydmF0aW9uIHRpbWUsIHNvIGl0IGNhbiBuZXZlciBwYXNzIGFzIG9ic2VydmVkCmFmdGVyIGEgY29tbWl0IGl0IHByZWRhdGVzLiBPbmUgY2FsbCBjYXJyaWVzIGV2ZXJ5IHN5bWJvbC4AAAAACnNldF9wcmljZXMAAAAAAAMAAAAAAAAACXB1Ymxpc2hlcgAAAAAAABMAAAAAAAAAC29ic2VydmVkX2F0AAAAAAYAAAAAAAAABnByaWNlcwAAAAAD6gAAB9AAAAALU291cmNlUHJpY2UAAAAAAA==",
         "AAAAAAAAADZPbmUgcHVibGlzaGVyJ3MgbGFzdCBwcmljZSBmb3IgYHN5bWJvbGAsIGZyZXNoIG9yIG5vdC4AAAAAAAxzb3VyY2VfcHJpY2UAAAACAAAAAAAAAAlwdWJsaXNoZXIAAAAAAAATAAAAAAAAAAZzeW1ib2wAAAAAABEAAAABAAAD6AAAB9AAAAAJUHJpY2VEYXRhAAAA",
         "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAQAAAAAAAAADmNvbmZpZ19tYW5hZ2VyAAAAAAATAAAAAAAAABB0aW1lbG9ja19zZWNvbmRzAAAABgAAAAAAAAAKcHVibGlzaGVycwAAAAAD6gAAABMAAAAAAAAABmNvbmZpZwAAAAAH0AAAAApGZWVkQ29uZmlnAAAAAAAA",
         "AAAAAAAAADhQZXJtaXNzaW9ubGVzcyBvbmNlIGR1ZTsgbGFwc2VzIG9uZSB0aW1lbG9jayBhZnRlciB0aGF0LgAAAA1hcHBseV9zb3VyY2VzAAAAAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAA==",
         "AAAAAAAAAAAAAAAOY2FuY2VsX3NvdXJjZXMAAAAAAAEAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAA=",
         "AAAAAAAAAAAAAAAPcGVuZGluZ19zb3VyY2VzAAAAAAAAAAABAAAD6AAAB9AAAAAOUGVuZGluZ1NvdXJjZXMAAA==",
         "AAAAAAAAAGlSZXBsYWNlIHRoZSBwdWJsaXNoZXIgc2V0IGFuZCBjb25maWcgYWZ0ZXIgYHRpbWVsb2NrX3NlY29uZHNgOyBhIG5ldwpwcm9wb3NhbCBvdmVyd3JpdGVzIHRoZSBwZW5kaW5nIG9uZS4AAAAAAAAPcHJvcG9zZV9zb3VyY2VzAAAAAAMAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAKcHVibGlzaGVycwAAAAAD6gAAABMAAAAAAAAABmNvbmZpZwAAAAAH0AAAAApGZWVkQ29uZmlnAAAAAAAA",
-        "AAAAAAAAALtEcm9wIGEgY29tcHJvbWlzZWQgcHVibGlzaGVyIG5vdy4gT25seSBldmVyIHJlbW92ZXMgdHJ1c3Q6IHdpdGggZmV3ZXIKcHVibGlzaGVycyB0aGFuIGBtaW5fc291cmNlc2AsIGBsYXN0cHJpY2VgIHJldHVybnMgYE5vbmVgIGFuZCB0aGUKcHJvdG9jb2wgc3RvcHMgc2V0dGxpbmcgdW50aWwgYSBuZXcgc2V0IGlzIGFwcGxpZWQuAAAAABByZW1vdmVfcHVibGlzaGVyAAAAAgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAlwdWJsaXNoZXIAAAAAAAATAAAAAA==",
+        "AAAAAAAAAQdEcm9wIGEgY29tcHJvbWlzZWQgcHVibGlzaGVyIG5vdy4gTmV2ZXIgYWRkcyBhIHB1Ymxpc2hlcjsgd2l0aCBmZXdlcgpwdWJsaXNoZXJzIHRoYW4gYG1pbl9zb3VyY2VzYCwgYGxhc3RwcmljZWAgcmV0dXJucyBgTm9uZWAgYW5kIHRoZQpwcm90b2NvbCBzdG9wcyBzZXR0bGluZyB1bnRpbCBhIG5ldyBzZXQgaXMgYXBwbGllZC4gQSBwZW5kaW5nIHByb3Bvc2FsCnRoYXQgaW5jbHVkZXMgdGhlIHJlbW92ZWQgcHVibGlzaGVyIGlzIGNhbmNlbGxlZCB3aXRoIGl0LgAAAAAQcmVtb3ZlX3B1Ymxpc2hlcgAAAAIAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAJcHVibGlzaGVyAAAAAAAAEwAAAAA=",
         "AAAAAAAAAAAAAAAQdGltZWxvY2tfc2Vjb25kcwAAAAAAAAABAAAABg==",
         "AAAAAgAAAEZTRVAtNDAgYXNzZXQgaWRlbnRpZmllci4gTWFya2V0cyBhcmUgcXVvdGVkIGFzIGBPdGhlcihtYXJrZXQgc3ltYm9sKWAuAAAAAAAAAAAABUFzc2V0AAAAAAAAAgAAAAEAAAAAAAAAB1N0ZWxsYXIAAAAAAQAAABMAAAABAAAAAAAAAAVPdGhlcgAAAAAAAAEAAAAR",
         "AAAAAQAAAAAAAAAAAAAACVByaWNlRGF0YQAAAAAAAAIAAAAAAAAABXByaWNlAAAAAAAACwAAAAAAAAAJdGltZXN0YW1wAAAAAAAABg==",

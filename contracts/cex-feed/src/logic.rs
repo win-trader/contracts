@@ -61,8 +61,9 @@ pub fn aggregate(env: &Env, symbol: &Symbol) -> Option<PriceData> {
     let median = median(&prices);
     let low = prices.first_unchecked();
     let high = prices.last_unchecked();
-    let deviation = core::cmp::max(high - median, median - low) * BPS / median;
-    if deviation > config.max_deviation_bps as i128 {
+    // Exact: `distance / median > max_deviation_bps / BPS`, without rounding.
+    let distance = core::cmp::max(high - median, median - low);
+    if distance * BPS > config.max_deviation_bps as i128 * median {
         return None;
     }
     Some(PriceData {
