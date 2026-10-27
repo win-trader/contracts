@@ -1,121 +1,119 @@
-// Direct ports of contracts/position-manager/src/math.rs. Same shape, same
-// semantics, same rounding (integer division everywhere). All amounts are
-// protocol-scaled bigints.
+// Ports of the PositionManager's math (contracts/position-manager/src/math.rs,
+// risk.rs, borrow.rs), with the same rounding directions. All amounts are
+// protocol-scaled bigints (PRECISION for prices and USD, INDEX_PRECISION for
+// rates and indices).
+//
+// Funding previews are not ported: they integrate a skew EMA over time
+// (window.rs), so read accrued funding from the indexer instead.
 
-import { BPS, INDEX_PRECISION, SECONDS_PER_YEAR } from "./constants.js";
+import { BPS, INDEX_PRECISION, PRECISION, SECONDS_PER_DAY } from "./constants.js";
 
+const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b;
+
+/** Base units a new position acquires: floor for longs, ceil for shorts (`base_added`). */
+export function baseExposure(size: bigint, price: bigint, is_long: boolean): bigint {
+  return is_long ? (size * PRECISION) / price : ceilDiv(size * PRECISION, price);
+}
+
+/** Raw PnL of `size` notional holding `base` units at `price` (`math::pnl`). */
+export function pnl(size: bigint, base: bigint, price: bigint, is_long: boolean): bigint {
+  return is_long ? (base * price) / PRECISION - size : size - ceilDiv(base * price, PRECISION);
+}
+
+/** Raw PnL of a position opened at `entry_price`, marked at `mark_price`. */
 export function calcUnrealizedPnl(
   size: bigint,
   entry_price: bigint,
   mark_price: bigint,
   is_long: boolean,
 ): bigint {
-  if (entry_price === 0n || size === 0n) return 0n;
-  const price_diff = is_long ? mark_price - entry_price : entry_price - mark_price;
-  return (size * price_diff) / entry_price;
+  if (entry_price <= 0n || size <= 0n) return 0n;
+  return pnl(size, baseExposure(size, entry_price, is_long), mark_price, is_long);
 }
 
-export function calcBorrowFee(
+/** Risk units backing `size` (`risk_units_for`). */
+export function riskUnits(size: bigint, market_risk_factor_bps: bigint): bigint {
+  return (size * market_risk_factor_bps) / BPS;
+}
+
+/** The effective collateral at or below which a position is liquidatable. */
+export function liquidationThreshold(
   size: bigint,
-  entry_borrow_index: bigint,
-  current_borrow_index: bigint,
+  maintenance_margin_bps: bigint,
+  liquidation_reward: bigint,
 ): bigint {
-  return ((current_borrow_index - entry_borrow_index) * size) / INDEX_PRECISION;
+  const maintenance = ceilDiv(size * maintenance_margin_bps, BPS);
+  return maintenance > liquidation_reward ? maintenance : liquidation_reward;
 }
 
-export function calcFundingFee(
-  size: bigint,
-  entry_funding_index: bigint,
-  current_funding_index: bigint,
-  is_long: boolean,
-): bigint {
-  const delta = current_funding_index - entry_funding_index;
-  return is_long
-    ? -((delta * size) / INDEX_PRECISION)
-    : (delta * size) / INDEX_PRECISION;
-}
-
-export function calcHealth(
+/**
+ * The first price at which a position opened at `entry_price` with
+ * `collateral` becomes liquidatable, before any fee accrues. For a long it is
+ * the highest liquidatable price; for a short, the lowest. `null` when no
+ * positive price liquidates it.
+ */
+export function liquidationPriceAtOpen(
+  entry_price: bigint,
   collateral: bigint,
-  unrealized_pnl: bigint,
-  borrow_fee: bigint,
-  funding_fee: bigint,
-): bigint {
-  return collateral + unrealized_pnl - borrow_fee + funding_fee;
-}
-
-export function calcUtilizationBps(reserved: bigint, total_assets: bigint): bigint {
-  if (total_assets <= 0n) return 0n;
-  return (reserved * BPS) / total_assets;
-}
-
-export function calcBorrowRate(
-  utilization_bps: bigint,
-  base_borrow_rate: bigint,
-  slope1: bigint,
-  slope2: bigint,
-  optimal_util: bigint,
-): bigint {
-  if (utilization_bps <= optimal_util) {
-    return base_borrow_rate + (utilization_bps * slope1) / BPS;
-  }
-  return (
-    base_borrow_rate +
-    (optimal_util * slope1) / BPS +
-    ((utilization_bps - optimal_util) * slope2) / BPS
-  );
-}
-
-export function calcFundingRate(
-  long_oi: bigint,
-  short_oi: bigint,
-  base_funding_rate: bigint,
-): bigint {
-  const total = long_oi + short_oi;
-  if (total === 0n) return 0n;
-  // bigint is unbounded, so the Rust contract's progressive-halving fallback
-  // for i128 overflow is unnecessary. Direct division gives identical results
-  // for any input that wouldn't have overflowed i128 in the contract.
-  const imbalance = long_oi - short_oi;
-  return (imbalance * base_funding_rate) / total;
-}
-
-export function accumulateBorrowIndex(
-  current_index: bigint,
-  rate_bps: bigint,
-  time_delta: bigint,
-): bigint {
-  return (
-    current_index +
-    (rate_bps * INDEX_PRECISION * time_delta) / (BPS * SECONDS_PER_YEAR)
-  );
-}
-
-export function accumulateFundingIndex(
-  current_index: bigint,
-  rate_bps: bigint,
-  time_delta: bigint,
-): bigint {
-  return (
-    current_index +
-    (rate_bps * INDEX_PRECISION * time_delta) / (BPS * SECONDS_PER_YEAR)
-  );
-}
-
-export function isTpTriggered(
-  take_profit: bigint,
-  mark_price: bigint,
+  size: bigint,
   is_long: boolean,
-): boolean {
+  maintenance_margin_bps: bigint,
+  liquidation_reward: bigint,
+): bigint | null {
+  if (collateral <= 0n || size <= 0n || entry_price <= 0n) return null;
+  const base = baseExposure(size, entry_price, is_long);
+  const threshold = liquidationThreshold(size, maintenance_margin_bps, liquidation_reward);
+  if (is_long) {
+    // Liquidatable while floor(base·p/P) ≤ size + threshold − collateral.
+    const k = size + threshold - collateral;
+    if (k < 0n) return null;
+    return ceilDiv((k + 1n) * PRECISION, base) - 1n;
+  }
+  // Liquidatable once ceil(base·p/P) ≥ collateral + size − threshold.
+  const m = collateral + size - threshold;
+  if (m <= 0n) return 0n;
+  return ((m - 1n) * PRECISION) / base + 1n;
+}
+
+/** Utilization of LP equity by open risk, capped at 100% (`utilization_bps`). */
+export function utilizationBps(total_risk_units: bigint, cash_lp_equity: bigint): bigint {
+  if (total_risk_units === 0n) return 0n;
+  if (cash_lp_equity <= 0n) return BPS;
+  const u = (total_risk_units * BPS) / cash_lp_equity;
+  return u < BPS ? u : BPS;
+}
+
+/** Borrow rate in bps per day, scaled by INDEX_PRECISION: base + max_variable · u² (`borrow::rate_at`). */
+export function borrowRate(
+  utilization_bps: bigint,
+  base_borrow_rate_bps_day: bigint,
+  max_variable_borrow_bps_day: bigint,
+): bigint {
+  const u = (utilization_bps * INDEX_PRECISION) / BPS;
+  return base_borrow_rate_bps_day * INDEX_PRECISION + max_variable_borrow_bps_day * ((u * u) / INDEX_PRECISION);
+}
+
+/** Borrow index growth over `seconds` at `rate` (whole units; the contract carries the remainder). */
+export function borrowIndexDelta(rate: bigint, seconds: bigint): bigint {
+  return (rate * seconds) / (BPS * SECONDS_PER_DAY);
+}
+
+/** Borrow fee due on a position: actual accrual, but never below its window minimum (`calculate_pending`). */
+export function pendingBorrow(
+  risk_units: bigint,
+  index_delta: bigint,
+  stored_minimum_borrow_fee: bigint,
+): bigint {
+  const actual = ceilDiv(risk_units * index_delta, INDEX_PRECISION);
+  return actual > stored_minimum_borrow_fee ? actual : stored_minimum_borrow_fee;
+}
+
+export function isTpTriggered(take_profit: bigint, mark_price: bigint, is_long: boolean): boolean {
   if (take_profit <= 0n) return false;
   return is_long ? mark_price >= take_profit : mark_price <= take_profit;
 }
 
-export function isSlTriggered(
-  stop_loss: bigint,
-  mark_price: bigint,
-  is_long: boolean,
-): boolean {
+export function isSlTriggered(stop_loss: bigint, mark_price: bigint, is_long: boolean): boolean {
   if (stop_loss <= 0n) return false;
   return is_long ? mark_price <= stop_loss : mark_price >= stop_loss;
 }

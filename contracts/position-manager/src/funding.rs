@@ -1,49 +1,27 @@
-//! Funding mechanics — doc §8, whole life in one module.
-//!
-//! Funding prices net directional imbalance, blended with its history: the
-//! side the §8.1 integral skew points at pays a quadratic rate on its size
-//! open interest; the other side's traders receive the share matched by
-//! their counter-exposure (capped at the whole flow — the payer can be the
-//! lighter side) and LPs receive the rest. Receiver funding is guaranteed
-//! when it accrues (§5.4 of the theory doc), which is why the payer flow is
-//! split into a receiver-backed index and an LP-backed index with different
-//! collection accounting.
-//!
-//! Reading top to bottom: `accrue` advances the indices and recognizes the
-//! receiver liability per elapsed window; `cold_start` seeds the EMA on a
-//! book's first open; `refresh_display`/`set_display` derive the displayed
-//! payer side and rate; `pending_fees`/`reset_debts` are the per-position
-//! index-clock boundary; `release_residue` sweeps the rounding residue when
-//! the book empties. The market's funding fields (indices, remainders, EMA,
-//! display, clock) are written only here.
-
-use soroban_sdk::{panic_with_error, Env};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol, U256};
 
 use shared::constants::{BPS, INDEX_PRECISION, SECONDS_PER_DAY};
-use shared::{Market, PayerSide, Position};
+use shared::{Market, PayerSide, Position, RemainderGroup};
 
 use crate::errors::PositionManagerError;
 use crate::ledger::{Bucket, Ledger};
-use crate::{math, storage};
+use crate::window::{self, Segment};
+use crate::{events, math, storage};
 
-/// §10.2 — advance the market's three funding indices and the global
-/// receiver liability over the elapsed window (closed-form §8.1 integral),
-/// then advance the skew EMA itself. The window's payer is the side
-/// `∫ I dt` points at — possibly the lighter one. A second call at the same
-/// timestamp has no effect.
-///
-/// The borrow clock is piecewise-constant, but funding is not — the EMA
-/// rate decays continuously — so the window resolves through the exact
-/// closed-form integral: checkpoint frequency cannot change accrued value
-/// beyond the decay table's quantization (§3), and every division carries
-/// its remainder.
-pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
+pub fn accrue(
+    env: &Env,
+    ledger: &mut Ledger,
+    market_id: &Symbol,
+    actor: Option<&Address>,
+    market: &mut Market,
+    now: u64,
+) {
     if now <= market.last_funding_checkpoint {
         return;
     }
     let elapsed = now - market.last_funding_checkpoint;
     let half_life = storage::get_global_config(env).funding_half_life_seconds;
-    let window = math::funding_window(
+    let window = window::integrate_funding_window_by_sign(
         env,
         market.long.base_exposure,
         market.short.base_exposure,
@@ -54,7 +32,49 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
         elapsed,
     );
 
-    let long_pays = window.payer_sign > 0;
+    for (index, segment) in window.segments().enumerate() {
+        let accrued = accrue_segment(env, ledger, market, segment);
+        if let (Some(a), Some(actor)) = (accrued, actor) {
+            events::emit_funding_checkpoint(
+                env,
+                market_id,
+                actor,
+                index as u32,
+                if segment.long_pays() {
+                    PayerSide::Long
+                } else {
+                    PayerSide::Short
+                },
+                a.receiver_backed_delta,
+                a.lp_backed_delta,
+                a.receiver_delta,
+                a.liability_delta,
+                window.ema_after,
+                elapsed,
+            );
+        }
+    }
+
+    market.skew_ema = window.ema_after;
+    market.current_payer_side = window.payer_side_at_end;
+    market.current_payer_rate = window.displayed_rate_at_end;
+    market.last_funding_checkpoint = now;
+}
+
+struct SegmentAccrual {
+    receiver_backed_delta: i128,
+    lp_backed_delta: i128,
+    receiver_delta: i128,
+    liability_delta: i128,
+}
+
+fn accrue_segment(
+    env: &Env,
+    ledger: &mut Ledger,
+    market: &mut Market,
+    segment: &Segment,
+) -> Option<SegmentAccrual> {
+    let long_pays = segment.long_pays();
     let (payer_size, payer_base, receiver_size, receiver_base) = if long_pays {
         (
             market.long.size_open_interest,
@@ -70,99 +90,103 @@ pub fn accrue(env: &Env, ledger: &mut Ledger, market: &mut Market, now: u64) {
             market.long.base_exposure,
         )
     };
-    // With nobody on the payer side there is nothing to charge: the EMA
-    // still advances below, so history keeps decaying while the book waits.
-    if window.payer_sign != 0 && window.weight > 0 && payer_size > 0 {
-        // Receivers absorb the share their counter-exposure matches, capped
-        // at the whole flow — under the EMA the payer can be the *lighter*
-        // side, and the cap is what keeps the LP slice non-negative (§8.1).
-        let weight_receiver = if receiver_size == 0 || receiver_base == 0 {
-            0
-        } else if receiver_base >= payer_base {
-            window.weight
-        } else {
-            math::mul_div_floor(env, window.weight, receiver_base, payer_base)
-        };
-        let weight_lp = math::sub(env, window.weight, weight_receiver);
-
-        let denominator = BPS * SECONDS_PER_DAY as i128;
-        let (receiver_delta, receiver_rem) = carried_div(
-            env,
-            weight_receiver,
-            denominator,
-            market.receiver_payer_remainder,
-        );
-        let (lp_delta, lp_rem) =
-            carried_div(env, weight_lp, denominator, market.lp_payer_remainder);
-
-        // The liability and the receiver credit both derive from the exact
-        // amount the payer index will collect (§8.3), so a credit can never
-        // outrun its backing accrual.
-        let receiver_cash = math::mul(env, payer_size, receiver_delta);
-        let (liability_delta, pending_rem) = carried_div(
-            env,
-            receiver_cash,
-            INDEX_PRECISION,
-            market.pending_remainder,
-        );
-        ledger.credit(env, Bucket::ReceiverFunding, liability_delta);
-        market.pending_remainder = pending_rem;
-        let (credit_delta, credit_rem) = if receiver_size > 0 {
-            carried_div(
-                env,
-                receiver_cash,
-                receiver_size,
-                market.receiver_index_remainder,
-            )
-        } else {
-            (0, market.receiver_index_remainder)
-        };
-
-        if long_pays {
-            market.receiver_backed_index_long =
-                math::add(env, market.receiver_backed_index_long, receiver_delta);
-            market.lp_backed_index_long = math::add(env, market.lp_backed_index_long, lp_delta);
-            market.receiver_index_short = math::add(env, market.receiver_index_short, credit_delta);
-        } else {
-            market.receiver_backed_index_short =
-                math::add(env, market.receiver_backed_index_short, receiver_delta);
-            market.lp_backed_index_short = math::add(env, market.lp_backed_index_short, lp_delta);
-            market.receiver_index_long = math::add(env, market.receiver_index_long, credit_delta);
-        }
-        market.receiver_payer_remainder = receiver_rem;
-        market.lp_payer_remainder = lp_rem;
-        market.receiver_index_remainder = credit_rem;
+    let zero = U256::from_u32(env, 0);
+    if payer_size == 0 || segment.funding_weight == zero {
+        return None;
     }
-    market.skew_ema = window.ema_after;
-    set_display(env, market, window.integral_now);
-    market.last_funding_checkpoint = now;
+
+    let carries = market.payer_remainders(long_pays).clone();
+
+    let receiver_weight = if receiver_size == 0 || receiver_base == 0 {
+        zero
+    } else if receiver_base >= payer_base {
+        segment.funding_weight.clone()
+    } else {
+        math::wide_mul_div_floor(env, &segment.funding_weight, receiver_base, payer_base)
+    };
+    let lp_weight = segment.funding_weight.sub(&receiver_weight);
+
+    let denominator = math::mul(env, INDEX_PRECISION, BPS * SECONDS_PER_DAY as i128);
+    let (receiver_payer_delta, receiver_payer_rem) = math::carried_div(
+        env,
+        &receiver_weight,
+        denominator,
+        carries.receiver_payer_remainder,
+    );
+    let (lp_payer_delta, lp_payer_rem) =
+        math::carried_div(env, &lp_weight, denominator, carries.lp_payer_remainder);
+
+    let receiver_backing_scaled = math::widen_mul(env, payer_size, receiver_payer_delta);
+    let (liability_delta, liability_rem) = math::carried_div(
+        env,
+        &receiver_backing_scaled,
+        INDEX_PRECISION,
+        carries.receiver_liability_remainder,
+    );
+    ledger.credit(env, Bucket::ReceiverFunding, liability_delta);
+    market.pending_receiver_funding =
+        math::add(env, market.pending_receiver_funding, liability_delta);
+
+    let (credit_delta, distribution_rem) = if receiver_size > 0 {
+        math::carried_div(
+            env,
+            &receiver_backing_scaled,
+            receiver_size,
+            carries.distribution_remainder,
+        )
+    } else {
+        (0, carries.distribution_remainder)
+    };
+
+    if long_pays {
+        market.receiver_backed_index_long = math::add(
+            env,
+            market.receiver_backed_index_long,
+            receiver_payer_delta,
+        );
+        market.lp_backed_index_long = math::add(env, market.lp_backed_index_long, lp_payer_delta);
+        market.receiver_index_short = math::add(env, market.receiver_index_short, credit_delta);
+    } else {
+        market.receiver_backed_index_short = math::add(
+            env,
+            market.receiver_backed_index_short,
+            receiver_payer_delta,
+        );
+        market.lp_backed_index_short = math::add(env, market.lp_backed_index_short, lp_payer_delta);
+        market.receiver_index_long = math::add(env, market.receiver_index_long, credit_delta);
+    }
+
+    let carries = market.payer_remainders_mut(long_pays);
+    carries.receiver_payer_remainder = receiver_payer_rem;
+    carries.lp_payer_remainder = lp_payer_rem;
+    carries.receiver_liability_remainder = liability_rem;
+    carries.distribution_remainder = distribution_rem;
+
+    Some(SegmentAccrual {
+        receiver_backed_delta: receiver_payer_delta,
+        lp_backed_delta: lp_payer_delta,
+        receiver_delta: credit_delta,
+        liability_delta,
+    })
 }
 
-/// One accumulator advance: `(numerator + remainder) / divisor`, returning
-/// the delta and the carried remainder. `divisor` must be positive.
-fn carried_div(env: &Env, numerator: i128, divisor: i128, remainder: i128) -> (i128, i128) {
-    let total = math::add(env, numerator, remainder);
-    (total / divisor, total % divisor)
+// A distribution carry is only valid for the receiver size it was produced under (§4.5.1).
+pub fn reset_receiver_distribution_remainder(market: &mut Market, changed_side_is_long: bool) {
+    market
+        .payer_remainders_mut(!changed_side_is_long)
+        .distribution_remainder = 0;
 }
 
-/// §8.1 cold start — an empty book carries no history, and zero is not "no
-/// information": it would grant a one-sided launch a decaying discount. The
-/// EMA starts at the skew the first open creates.
 pub fn cold_start(env: &Env, market: &mut Market) {
     market.skew_ema = math::skew_frac(env, market.long.base_exposure, market.short.base_exposure);
 }
 
-/// §8.3 — with no open positions anywhere, aggregate conservation makes
-/// every market size zero: release the unassigned rounding residue to LP
-/// residual cash without a market loop.
-pub fn release_residue(env: &Env, ledger: &mut Ledger) {
-    if ledger.open_position_count == 0 {
-        let residue = ledger.pending_receiver_funding_total;
-        ledger.release(env, Bucket::ReceiverFunding, residue);
+pub fn verify_no_final_receiver_residue(env: &Env, ledger: &Ledger) {
+    if ledger.open_position_count == 0 && ledger.pending_receiver_funding_total != 0 {
+        panic_with_error!(env, PositionManagerError::InvariantViolation);
     }
 }
 
-/// Map a signed integral skew onto the two display fields.
 fn set_display(env: &Env, market: &mut Market, integral: i128) {
     market.current_payer_side = if integral > 0 {
         PayerSide::Long
@@ -175,36 +199,27 @@ fn set_display(env: &Env, market: &mut Market, integral: i128) {
         math::rate_from_integral(env, market.config.max_funding_rate_bps_day, integral);
 }
 
-/// §11.2 — the pending amounts a position has accrued since its debt
-/// baselines were last reset. All four are non-negative by construction; a
-/// negative value means a decreasing index or corrupted baseline.
 #[derive(Clone, Copy, Debug)]
 pub struct PendingFees {
-    /// Owed to receiver-backed funding (rounds up, §16).
     pub funding_paid_to_receivers: i128,
-    /// Owed to LP-backed funding (rounds up, §16).
     pub funding_paid_to_lps: i128,
-    /// Funding credit receivable (rounds down, §16).
     pub funding_received: i128,
-    /// Owed borrow fee on risk units (rounds up, §16).
     pub borrow: i128,
 }
 
-/// §8.1 — refresh the market's displayed payer side and rate from the
-/// post-mutation book and EMA. A market that just emptied keeps no funding
-/// memory: the EMA and the rounding remainders are wiped so the next open
-/// cold-starts, and the displayed rate is zero rather than a stale blend.
-/// Accrual happens in `accrue`; the two display fields exist for events and
-/// off-chain consumers.
-pub fn refresh_display(env: &Env, market: &mut Market) {
+pub fn refresh_display(env: &Env, ledger: &mut Ledger, market: &mut Market) {
     if market.long.size_open_interest == 0 && market.short.size_open_interest == 0 {
         market.skew_ema = 0;
-        market.receiver_payer_remainder = 0;
-        market.lp_payer_remainder = 0;
-        market.receiver_index_remainder = 0;
-        market.pending_remainder = 0;
+        market.long_payer_remainders = RemainderGroup::default();
+        market.short_payer_remainders = RemainderGroup::default();
         market.current_payer_side = PayerSide::None;
         market.current_payer_rate = 0;
+        let owed = market.pending_receiver_funding;
+        if owed > 0 {
+            let released = ledger.release(env, Bucket::ReceiverFunding, owed);
+            market.pending_receiver_funding =
+                math::sub(env, market.pending_receiver_funding, released);
+        }
         return;
     }
     let skew = math::skew_frac(env, market.long.base_exposure, market.short.base_exposure);
@@ -213,9 +228,6 @@ pub fn refresh_display(env: &Env, market: &mut Market) {
     set_display(env, market, integral);
 }
 
-/// §11.2 — pending amounts for a position against the current indices.
-/// Panics with `InvariantViolation` if any pending amount is negative — that
-/// identifies an invalid baseline or a decreasing index, not bad arithmetic.
 pub fn pending_fees(
     env: &Env,
     ledger: &Ledger,
@@ -223,60 +235,55 @@ pub fn pending_fees(
     market: &Market,
 ) -> PendingFees {
     let indices = market.funding_indices(position.is_long);
-    let funding_paid_to_receivers = math::sub(
+    // Round once from the index delta; rounding both ends can over-credit receivers.
+    let receiver_payer_delta = index_delta(
         env,
-        math::index_value_ceil(env, position.size, indices.receiver_backed_payer),
-        position.funding_paid_to_receivers_debt,
+        indices.receiver_backed_payer,
+        position.receiver_payer_index_snapshot,
     );
-    let funding_paid_to_lps = math::sub(
-        env,
-        math::index_value_ceil(env, position.size, indices.lp_backed_payer),
-        position.funding_paid_to_lps_debt,
-    );
-    let funding_received = math::sub(
-        env,
-        math::index_value_floor(env, position.size, indices.receiver),
-        position.funding_received_debt,
-    );
-    let borrow = math::sub(
-        env,
-        math::index_value_ceil(env, position.risk_units, ledger.borrow_index),
-        position.borrow_debt,
-    );
-    if funding_paid_to_receivers < 0
-        || funding_paid_to_lps < 0
-        || funding_received < 0
-        || borrow < 0
-    {
-        panic_with_error!(env, PositionManagerError::InvariantViolation);
-    }
-    // §11.2 — minimum borrow charge: every settlement pays at least the
-    // configured index delta on its risk units (anti-churn floor; the
-    // invariant check above runs on the raw accrual, not the floored
-    // value). Baselines reset per touch, so the floor applies per
-    // capitalization.
-    let borrow_floor = math::index_value_ceil(
-        env,
-        position.risk_units,
-        storage::get_global_config(env).min_borrow_index_delta,
-    );
+    let lp_payer_delta = index_delta(env, indices.lp_backed_payer, position.lp_payer_index_snapshot);
+    let receiver_delta = index_delta(env, indices.receiver, position.receiver_index_snapshot);
     PendingFees {
-        funding_paid_to_receivers,
-        funding_paid_to_lps,
-        funding_received,
-        borrow: core::cmp::max(borrow, borrow_floor),
+        funding_paid_to_receivers: math::index_value_ceil(env, position.size, receiver_payer_delta),
+        funding_paid_to_lps: math::index_value_ceil(env, position.size, lp_payer_delta),
+        funding_received: math::index_value_floor(env, position.size, receiver_delta),
+        borrow: crate::borrow::calculate_pending(env, ledger, position),
     }
 }
 
-/// §11.4 step 7 — reset every debt baseline to the current index values so
-/// the position's next accrual starts now (§18.4: new size starts at the
-/// current baseline).
-pub fn reset_debts(env: &Env, ledger: &Ledger, position: &mut Position, market: &Market) {
+pub fn index_delta(env: &Env, current: i128, snapshot: i128) -> i128 {
+    let delta = math::sub(env, current, snapshot);
+    if delta < 0 {
+        panic_with_error!(env, PositionManagerError::InvariantViolation);
+    }
+    delta
+}
+
+pub fn snapshot_funding_indices(position: &mut Position, market: &Market) {
     let indices = market.funding_indices(position.is_long);
-    position.funding_paid_to_receivers_debt =
-        math::index_value_ceil(env, position.size, indices.receiver_backed_payer);
-    position.funding_paid_to_lps_debt =
-        math::index_value_ceil(env, position.size, indices.lp_backed_payer);
-    position.funding_received_debt = math::index_value_floor(env, position.size, indices.receiver);
-    position.borrow_debt = math::index_value_ceil(env, position.risk_units, ledger.borrow_index);
+    position.receiver_payer_index_snapshot = indices.receiver_backed_payer;
+    position.lp_payer_index_snapshot = indices.lp_backed_payer;
+    position.receiver_index_snapshot = indices.receiver;
+}
+
+#[cfg(feature = "testutils")]
+pub fn preview_pending_fees(
+    env: &Env,
+    ledger: &Ledger,
+    position: &Position,
+    market: &Market,
+    now: u64,
+) -> PendingFees {
+    let mut ledger_copy = ledger.clone();
+    let mut market_copy = market.clone();
+    crate::borrow::accrue(env, &mut ledger_copy, None, now);
+    accrue(
+        env,
+        &mut ledger_copy,
+        &position.market,
+        None,
+        &mut market_copy,
+        now,
+    );
+    pending_fees(env, &ledger_copy, position, &market_copy)
 }

@@ -7,6 +7,9 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 doctest = false
 
+[features]
+testutils = ["soroban-sdk/testutils"]
+
 [dependencies]
 soroban-sdk = { workspace = true }
 shared = { workspace = true }

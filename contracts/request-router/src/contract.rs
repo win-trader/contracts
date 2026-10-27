@@ -1,7 +1,7 @@
 use shared::constants::{ROLE_PAUSER, ROLE_UPGRADER};
 use shared::{
     ConfigManagerClient, LpRequest, MigrationData, RequestRouter, SettlementResult,
-    TimelockedUpgradeable, UpgradeFailure,
+    TimelockedUpgradeable, UpgradeFailure, VaultClient,
 };
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, BytesN, Env};
 use stellar_contract_utils::upgradeable::{complete_migration, ensure_can_complete_migration};
@@ -25,15 +25,11 @@ impl RequestRouterContract {
         env: Env,
         asset_address: Address,
         vault_address: Address,
-        oracle_router: Address,
         config_manager_address: Address,
     ) {
         storage::set(&env, &storage::Key::Asset, &asset_address);
         storage::set(&env, &storage::Key::Vault, &vault_address);
-        storage::set(&env, &storage::Key::OracleRouter, &oracle_router);
         storage::set(&env, &storage::Key::ConfigManager, &config_manager_address);
-        storage::set(&env, &storage::Key::NextId, &1u64);
-        storage::set(&env, &storage::Key::NextToResolve, &1u64);
         shared::bump_instance_ttl(&env);
     }
 }
@@ -60,6 +56,19 @@ impl RequestRouter for RequestRouterContract {
         storage::next_to_resolve(&env)
     }
 
+    fn skip_head(env: Env, caller: Address) {
+        require_role(&env, &caller, ROLE_PAUSER);
+        requests::skip_head(&env, caller);
+    }
+
+    fn claim_lp_payout(env: Env, owner: Address) -> i128 {
+        requests::claim_lp_payout(&env, owner)
+    }
+
+    fn lp_payout_claimable(env: Env, owner: Address) -> i128 {
+        storage::claimable(&env, &owner)
+    }
+
     fn propose_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>) {
         <Self as TimelockedUpgradeable>::propose(&env, caller, wasm_hash);
     }
@@ -79,6 +88,7 @@ impl RequestRouterContract {
         require_role(&env, &operator, ROLE_UPGRADER);
         ensure_can_complete_migration(&env);
         storage::save_version(&env, &data);
+        shared::events::Migrated { version: data.version, operator }.publish(&env);
         complete_migration(&env);
     }
 }
@@ -97,7 +107,10 @@ impl TimelockedUpgradeable for RequestRouterContract {
     }
 
     fn _timelock_seconds(env: &Env) -> u64 {
-        ConfigManagerClient::new(env, &storage::config_manager(env)).get_upgrade_timelock()
+        let upgrade =
+            ConfigManagerClient::new(env, &storage::config_manager(env)).get_upgrade_timelock();
+        let config = VaultClient::new(env, &storage::vault(env)).config_timelock_seconds();
+        core::cmp::max(upgrade, config)
     }
 
     fn _panic_with_upgrade_error(env: &Env, failure: UpgradeFailure) -> ! {

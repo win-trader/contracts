@@ -1,16 +1,5 @@
-//! Shared cross-contract event shapes for the upgrade flow. Defining the events
-//! here (instead of redeclaring them in each contract's `events.rs`) means
-//! off-chain consumers parse one shape across protocol contracts.
-//!
-//! Topic strings are part of the on-chain event identity — they MUST be the
-//! literals listed below so an indexer keyed on `topic0` can dispatch
-//! contract-agnostically.
+use soroban_sdk::{contractevent, contracttype, Address, BytesN, Env, Symbol};
 
-use soroban_sdk::{contractevent, Address, BytesN};
-
-/// Emitted by `propose_upgrade`. Off-chain monitoring records the proposed
-/// `wasm_hash` + `eta` and flags any subsequent `upgrade()` call whose hash
-/// diverges or that fires before `eta`.
 #[contractevent(topics = ["upgprp"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeProposed {
@@ -18,9 +7,54 @@ pub struct UpgradeProposed {
     pub eta: u64,
 }
 
-/// Emitted by `cancel_upgrade` (PAUSER veto path).
+/// A one-shot cross-contract wiring (`set_vault`, `set_request_router`).
+#[contractevent(topics = ["wired"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Wired {
+    pub target: Symbol,
+    pub address: Address,
+    pub caller: Address,
+}
+
+/// A completed post-upgrade migration.
+#[contractevent(topics = ["migrated"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Migrated {
+    pub version: u32,
+    pub operator: Address,
+}
+
 #[contractevent(topics = ["upgcan"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeCancelled {
     pub caller: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventHeader {
+    pub event_version: u32,
+    pub ledger_timestamp: u64,
+    pub market: Symbol,
+    pub actor: Address,
+}
+
+pub const EVENT_VERSION: u32 = 1;
+
+pub fn header(env: &Env, market: &Symbol, actor: &Address) -> EventHeader {
+    EventHeader {
+        event_version: EVENT_VERSION,
+        ledger_timestamp: env.ledger().timestamp(),
+        market: market.clone(),
+        actor: actor.clone(),
+    }
+}
+
+pub fn vault_header(env: &Env, actor: &Address) -> EventHeader {
+    EventHeader {
+        event_version: EVENT_VERSION,
+        ledger_timestamp: env.ledger().timestamp(),
+        market: Symbol::new(env, "vault"),
+        actor: actor.clone(),
+    }
 }

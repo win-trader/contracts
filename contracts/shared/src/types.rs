@@ -1,28 +1,5 @@
-use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Symbol};
 
-/// Global safety thresholds for price validation.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct OracleConfig {
-    /// Maximum allowed spread between oracle sources in basis points
-    /// (e.g., 100 = 1%). Bounded at `crate::constants::MAX_DEVIATION_BPS_CEILING`.
-    pub max_deviation_bps: i128,
-    /// Maximum age of an external SEP-40 price feed before it is rejected
-    /// as stale (in seconds).
-    pub staleness_threshold: u64,
-    /// How long a cached aggregated price remains valid after the router
-    /// fetch (in seconds). A cache hit also requires every source timestamp
-    /// used for the cached median to remain within `staleness_threshold`.
-    /// Must be > 0 and <= `staleness_threshold`.
-    pub cache_duration: u64,
-    /// Minimum number of source responses that must agree within
-    /// `max_deviation_bps` for OracleRouter to return a price. Floored at
-    /// `crate::constants::MIN_REQUIRED_SOURCES_FLOOR`, ceilinged at
-    /// `crate::constants::MAX_ORACLE_SOURCES`.
-    pub min_required_sources: u32,
-}
-
-/// Represents a single trader's open leveraged position.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Position {
@@ -30,76 +7,174 @@ pub struct Position {
     pub owner: Address,
     pub market: Symbol,
     pub is_long: bool,
-    /// USD notional at `PRICE_PRECISION`.
     pub size: i128,
-    /// Asset units at `PRICE_PRECISION`.
     pub base_exposure: i128,
-    /// Trader-owned collateral recorded in contract state (the doc's
-    /// "stored collateral"). Effective collateral — stored collateral after
-    /// pending fees and funding credits — is always derived, never stored.
     pub stored_collateral: i128,
-    /// Fixed gross capacity assigned when risk opens.
     pub risk_units: i128,
-    pub borrow_debt: i128,
-    pub funding_paid_to_receivers_debt: i128,
-    pub funding_paid_to_lps_debt: i128,
-    pub funding_received_debt: i128,
-    /// Cash owned by an optional-order executor.
-    pub execution_budget: i128,
-    pub last_increased_time: u64,
-    /// Trigger price for the optional take-profit order; `0` = none.
-    pub take_profit: i128,
-    /// Trigger price for the optional stop-loss order; `0` = none.
-    pub stop_loss: i128,
+    pub borrow_index_snapshot: i128,
+    pub stored_minimum_borrow_fee: i128,
+    pub receiver_payer_index_snapshot: i128,
+    pub lp_payer_index_snapshot: i128,
+    pub receiver_index_snapshot: i128,
+    pub opened_at: u64,
+    pub pending_mutation_action_id: Option<u64>,
+    pub take_profit: Trigger,
+    pub stop_loss: Trigger,
 }
 
-/// The caller-supplied fields of a `place_entry_order` request, bundled so
-/// the entry point stays within Soroban's parameter limit. `owner` and
-/// `market` are passed alongside; `id` and `trigger_above` are derived at
-/// placement.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Trigger {
+    None,
+    Attached(TriggerInstruction),
+}
+
+impl Trigger {
+    pub fn instruction(&self) -> Option<&TriggerInstruction> {
+        match self {
+            Trigger::Attached(i) => Some(i),
+            Trigger::None => None,
+        }
+    }
+
+    pub fn is_attached(&self) -> bool {
+        matches!(self, Trigger::Attached(_))
+    }
+
+    pub fn price(&self) -> i128 {
+        match self {
+            Trigger::Attached(i) => i.trigger_price,
+            Trigger::None => 0,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TriggerInstruction {
+    pub trigger_price: i128,
+    pub acceptable_price: i128,
+    pub committed_at: u64,
+    pub execute_after: u64,
+    pub commit_observed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionKind {
+    MarketOpen,
+    LimitOpen,
+    Decrease,
+    Close,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct EntryOrderParams {
+pub enum ActionPayload {
+    MarketOpen(OpenPayload),
+    LimitOpen(OpenPayload, TriggerCondition),
+    Decrease(DecreasePayload),
+    Close(ClosePayload),
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct OpenPayload {
     pub is_long: bool,
     pub size: i128,
-    pub collateral: i128,
-    pub execution_budget: i128,
-    pub take_profit: i128,
-    pub stop_loss: i128,
+    pub submitted_collateral: i128,
     pub acceptable_price: i128,
-    pub trigger_price: i128,
     pub expires_at: u64,
-}
-
-/// A pending limit/stop entry order: the frozen `open_position` arguments
-/// plus a trigger condition and an expiry. Placing one only writes this
-/// record — no funds move. A keeper's `execute_entry_order` pulls the
-/// collateral via the owner's token allowance and opens the position
-/// exactly as a market open would.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct EntryOrder {
-    pub id: u64,
-    pub owner: Address,
-    pub market: Symbol,
-    pub is_long: bool,
-    // --- frozen open_position arguments ---
-    pub size: i128,
-    pub collateral: i128,
-    pub execution_budget: i128,
     pub take_profit: i128,
     pub stop_loss: i128,
-    pub acceptable_price: i128,
-    // --- trigger + lifetime ---
-    /// The oracle price at which the order becomes fillable.
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TriggerCondition {
     pub trigger_price: i128,
-    /// True → fill when price ≥ trigger (stop/breakout entry); false → fill
-    /// when price ≤ trigger (limit/dip entry). Inferred at placement from
-    /// the trigger vs. the current price.
     pub trigger_above: bool,
-    /// Ledger timestamp after which the order is dead and swept on the next
-    /// touch (user-configurable max TTL).
-    pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DecreasePayload {
+    pub position_id: u64,
+    pub size_removed: i128,
+    pub acceptable_price: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ClosePayload {
+    pub position_id: u64,
+    pub acceptable_price: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub action_id: u64,
+    pub owner: Address,
+    pub market_id: Symbol,
+    pub kind: ActionKind,
+    pub created_at: u64,
+    pub execute_after: u64,
+    pub commit_observed_at: u64,
+    pub escrowed_collateral: i128,
+    pub payload: ActionPayload,
+}
+
+impl ActionPayload {
+    pub fn open(&self) -> Option<&OpenPayload> {
+        match self {
+            ActionPayload::MarketOpen(open) | ActionPayload::LimitOpen(open, _) => Some(open),
+            _ => None,
+        }
+    }
+
+    pub fn position_id(&self) -> Option<u64> {
+        match self {
+            ActionPayload::Decrease(p) => Some(p.position_id),
+            ActionPayload::Close(p) => Some(p.position_id),
+            _ => None,
+        }
+    }
+
+    pub fn acceptable_price(&self) -> i128 {
+        match self {
+            ActionPayload::MarketOpen(o) | ActionPayload::LimitOpen(o, _) => o.acceptable_price,
+            ActionPayload::Decrease(p) => p.acceptable_price,
+            ActionPayload::Close(p) => p.acceptable_price,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionOutcome {
+    Executed,
+    Failed,
+    Cancelled,
+    Expired,
+    Superseded,
+    NotReady,
+    Pending,
+    RequiresLiquidation,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureReason {
+    PriceBoundExceeded,
+    CapacityExceeded,
+    ExposureCapExceeded,
+    SideRestricted,
+    InsufficientCollateral,
+    UnpayableProfit,
+    PositionGone,
+    MarketPaused,
+    SizeTooSmall,
 }
 
 #[contracttype]
@@ -119,6 +194,8 @@ pub struct MarketSide {
     pub stored_collateral_total: i128,
     pub risk_units: i128,
     pub risk_state: RiskState,
+    pub hard_cap_payout_factor: i128,
+    pub hard_cap_reference_pnl: i128,
 }
 
 impl MarketSide {
@@ -129,6 +206,8 @@ impl MarketSide {
             stored_collateral_total: 0,
             risk_units: 0,
             risk_state: RiskState::Normal,
+            hard_cap_payout_factor: crate::constants::INDEX_PRECISION,
+            hard_cap_reference_pnl: 0,
         }
     }
 }
@@ -139,9 +218,6 @@ impl Default for MarketSide {
     }
 }
 
-/// Which side currently pays funding (§8.1: the side the blended integral
-/// skew points at — under the EMA this can be the *lighter* side for a
-/// while after the book flips). `None` when the blend is exactly zero.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PayerSide {
@@ -153,31 +229,38 @@ pub enum PayerSide {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketConfig {
-    /// §11.1 closing-fee tier when the close improves or preserves skew.
-    pub close_fee_low_bps: u32,
-    /// §11.1 closing-fee tier when the close worsens skew.
-    pub close_fee_high_bps: u32,
+    pub open_fee_bps: u32,
+    pub close_size_fee_bps: u32,
+    pub close_pnl_fee_bps: u32,
     pub max_funding_rate_bps_day: i128,
-    /// §8.1 weight of the instantaneous skew in the funding blend, in bps;
-    /// the rest is the half-life EMA. `BPS` reproduces pure instant skew.
     pub instant_weight_bps: u32,
     pub market_risk_factor_bps: u32,
-    pub max_long_size_open_interest: i128,
-    pub max_short_size_open_interest: i128,
-    pub max_long_base_exposure: i128,
-    pub max_short_base_exposure: i128,
+    pub initial_margin_bps: u32,
+    pub maintenance_margin_bps: u32,
     pub recovery_pnl_factor_bps: u32,
     pub warning_pnl_factor_bps: u32,
     pub adl_pnl_factor_bps: u32,
     pub hard_cap_pnl_factor_bps: u32,
-    /// Margin required to open or add risk (§12.3). Divides max leverage:
-    /// a position may not be created closer to liquidation than this.
-    pub initial_margin_bps: u32,
-    /// Margin below which the position is liquidatable (§12.3). Must not
-    /// exceed `initial_margin_bps`; the gap is the entry buffer.
-    pub maintenance_margin_bps: u32,
-    pub liquidation_reward_bps: u32,
-    pub adl_reward_bps: u32,
+    pub max_long_size_open_interest: i128,
+    pub max_short_size_open_interest: i128,
+    pub max_long_base_exposure: i128,
+    pub max_short_base_exposure: i128,
+    pub order_execution_delay_seconds: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeeperRewards {
+    pub open: i128,
+    pub limit_order: i128,
+    pub decrease: i128,
+    pub close: i128,
+    pub tp: i128,
+    pub sl: i128,
+    pub expiry: i128,
+    pub liquidation: i128,
+    pub adl: i128,
+    pub lp_resolve: i128,
 }
 
 #[contracttype]
@@ -185,31 +268,21 @@ pub struct MarketConfig {
 pub struct GlobalConfig {
     pub min_collateral: i128,
     pub min_position_lifetime: u64,
-    /// §8.1 half-life of the funding skew EMA, seconds (global: one memory
-    /// horizon for every market).
+    pub max_order_lifetime_seconds: u64,
+    pub max_market_order_lifetime: u64,
+    pub min_borrow_fee_seconds: u64,
     pub funding_half_life_seconds: u64,
+    pub max_price_age_seconds: u64,
     pub risk_capacity_limit_bps: u32,
     pub base_borrow_rate_bps_day: i128,
     pub max_variable_borrow_bps_day: i128,
-    /// §9.2 borrow-curve exponent, bps: 20_000 = u² (legacy quadratic),
-    /// 10_000 = linear. Bounded to ≤ 100_000 (e ≤ 10) by validation.
-    pub borrow_exponent_bps: u32,
-    /// §11.2 minimum borrow charge per capitalization: an index delta at
-    /// `INDEX_PRECISION` scale applied to the position's risk units
-    /// (2e11 = 2 bps of notional at a 10% market risk factor). Zero
-    /// disables the floor.
-    pub min_borrow_index_delta: i128,
-    pub lp_revenue_share_bps: u32,
-    pub risk_keeper_revenue_share_bps: u32,
-    /// §11.1 share of a closing fee routed to the trader's referrer, carved
-    /// from the protocol slice (keeper and LP shares are untouched). `0`
-    /// disables referral accrual globally — a kill switch. Validated so
-    /// `lp + keeper + referral ≤ BPS`, keeping the protocol remainder ≥ 0.
-    pub referral_fee_share_bps: u32,
-    pub hard_cap_factor_limit_bps: u32,
-    pub max_adl_reward: i128,
-    pub max_insolvent_touch_reward: i128,
+    pub fee_lp_revenue_share_bps: u32,
+    pub borrow_lp_revenue_share_bps: u32,
+    pub config_timelock_seconds: u64,
     pub max_active_markets: u32,
+    pub global_hard_cap_limit_bps: u32,
+    pub hard_cap_relatch_band_bps: u32,
+    pub keeper_rewards: KeeperRewards,
 }
 
 #[contracttype]
@@ -217,49 +290,39 @@ pub struct GlobalConfig {
 pub struct LpConfig {
     pub max_withdraw_utilization_bps: u32,
     pub min_deposit_nav_factor_bps: u32,
-    pub lp_request_delay: u64,
+    pub lp_request_delay_seconds: u64,
 }
 
-/// Authoritative per-market state: the side aggregates, the funding indices,
-/// the funding EMA, and the market configuration.
-///
-/// Soroban limits UDT field names to 30 characters, so where a doc glossary
-/// term is longer the field drops the redundant qualifier and its doc
-/// comment carries the full term (e.g. `receiver_backed_index_long` is the
-/// doc's `receiver_backed_payer_index` for the long side).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Market {
     pub long: MarketSide,
     pub short: MarketSide,
-    /// Cumulative payer fee per unit of dominant-side size whose collection
-    /// restores cash backing an already-accrued receiver claim (§8.2).
     pub receiver_backed_index_long: i128,
     pub receiver_backed_index_short: i128,
-    /// Cumulative payer fee per unit of dominant-side size that is LP
-    /// revenue on collection (§8.2).
     pub lp_backed_index_long: i128,
     pub lp_backed_index_short: i128,
-    /// Cumulative funding credit per unit of light-side size (§8.2).
     pub receiver_index_long: i128,
     pub receiver_index_short: i128,
     pub current_payer_side: PayerSide,
-    /// `INDEX_PRECISION`-scaled bps/day payer rate as of the last refresh.
     pub current_payer_rate: i128,
-    /// §8.1 signed EMA of the instantaneous skew: a fraction of one at
-    /// `INDEX_PRECISION` scale, positive when history says longs dominate.
-    /// Decays toward the current skew with the global half-life.
     pub skew_ema: i128,
     pub last_funding_checkpoint: u64,
-    pub receiver_payer_remainder: i128,
-    pub lp_payer_remainder: i128,
-    pub receiver_index_remainder: i128,
-    /// Sub-stroop carry of the receiver-liability accrual (§8.3).
-    pub pending_remainder: i128,
+    pub long_payer_remainders: RemainderGroup,
+    pub short_payer_remainders: RemainderGroup,
+    pub pending_receiver_funding: i128,
     pub config: MarketConfig,
 }
 
-/// The three funding indices that apply to one position direction (§8.2).
+#[contracttype]
+#[derive(Clone, Debug, Default)]
+pub struct RemainderGroup {
+    pub receiver_payer_remainder: i128,
+    pub lp_payer_remainder: i128,
+    pub receiver_liability_remainder: i128,
+    pub distribution_remainder: i128,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FundingIndices {
     pub receiver_backed_payer: i128,
@@ -268,8 +331,6 @@ pub struct FundingIndices {
 }
 
 impl Market {
-    /// A market with empty sides, zeroed indices, and its funding clock
-    /// started at `now`.
     pub fn new(config: MarketConfig, now: u64) -> Self {
         Market {
             long: MarketSide::new(),
@@ -284,10 +345,9 @@ impl Market {
             current_payer_rate: 0,
             skew_ema: 0,
             last_funding_checkpoint: now,
-            receiver_payer_remainder: 0,
-            lp_payer_remainder: 0,
-            receiver_index_remainder: 0,
-            pending_remainder: 0,
+            long_payer_remainders: RemainderGroup::default(),
+            short_payer_remainders: RemainderGroup::default(),
+            pending_receiver_funding: 0,
             config,
         }
     }
@@ -308,7 +368,22 @@ impl Market {
         }
     }
 
-    /// The indices that apply to a position on the given direction.
+    pub fn payer_remainders(&self, long_pays: bool) -> &RemainderGroup {
+        if long_pays {
+            &self.long_payer_remainders
+        } else {
+            &self.short_payer_remainders
+        }
+    }
+
+    pub fn payer_remainders_mut(&mut self, long_pays: bool) -> &mut RemainderGroup {
+        if long_pays {
+            &mut self.long_payer_remainders
+        } else {
+            &mut self.short_payer_remainders
+        }
+    }
+
     pub fn funding_indices(&self, is_long: bool) -> FundingIndices {
         if is_long {
             FundingIndices {
@@ -338,24 +413,9 @@ pub struct AccountingSnapshot {
     pub vault_nav: i128,
     pub total_risk_units: i128,
     pub open_position_count: u64,
-    pub lp_blocked_side_count: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct RoundPrice {
-    pub symbol: Symbol,
-    pub price: i128,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct OracleRound {
-    pub id: u64,
-    pub timestamp: u64,
-    pub previous_id: u64,
-    pub previous_timestamp: u64,
-    pub prices: Vec<RoundPrice>,
+    pub restricted_side_count: u32,
+    pub deleveraging_side_count: u32,
+    pub min_equity_clear_of_adl: i128,
 }
 
 #[contracttype]
@@ -371,7 +431,6 @@ pub enum LpRequestStatus {
     Pending,
     Settled,
     Failed,
-    Expired,
 }
 
 #[contracttype]
@@ -381,6 +440,8 @@ pub struct LpRequest {
     pub owner: Address,
     pub kind: LpRequestKind,
     pub amount: i128,
+    /// The resolve reward fixed when the request was made.
+    pub reward: i128,
     pub request_time: u64,
     pub execute_after: u64,
     pub status: LpRequestStatus,
@@ -391,28 +452,52 @@ pub struct LpRequest {
 pub enum SettlementStatus {
     Settled,
     Failed,
+    NotReady,
 }
 
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SettlementResult {
     pub status: SettlementStatus,
-    /// Shares minted for a deposit or assets paid for a withdrawal.
     pub amount: i128,
+    pub reward: i128,
 }
 
-/// Data required during a WASM migration. Single definition for all contracts.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingFeesView {
+    pub funding_paid_to_receivers: i128,
+    pub funding_paid_to_lps: i128,
+    pub funding_received: i128,
+    pub borrow: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingGlobalConfig {
+    pub config: GlobalConfig,
+    pub effective_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingPriceFeed {
+    pub price_feed: Address,
+    pub effective_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingMarketConfig {
+    pub config: MarketConfig,
+    pub effective_at: u64,
+}
+
 #[contracttype]
 pub struct MigrationData {
     pub version: u32,
 }
 
-/// Pending WASM upgrade — set by `propose_upgrade`, consumed by `upgrade`
-/// (cleared atomically on a successful install), or cleared by `cancel_upgrade`.
-/// Single shape across every protocol contract. Contracts store it at
-/// the shared `pending_upgrade` Symbol key in their own instance storage (see
-/// `crate::upgrade::pending_upgrade_key`). `upgrade` refuses to install
-/// unless `pending.wasm_hash` matches the supplied hash and `now >= eta`.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct PendingUpgrade {

@@ -1,15 +1,16 @@
-use soroban_sdk::{contractevent, Env, Symbol};
+use super::EventHeader;
+use soroban_sdk::{contractevent, Address, Env, Symbol};
 
 #[contractevent(topics = ["mktstatus"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketStatusChanged {
-    pub market: Symbol,
+    pub header: EventHeader,
     pub disabled: bool,
 }
 
-pub fn emit_market_status_changed(env: &Env, market: &Symbol, disabled: bool) {
+pub fn emit_market_status_changed(env: &Env, market: &Symbol, actor: &Address, disabled: bool) {
     MarketStatusChanged {
-        market: market.clone(),
+        header: super::header(env, market, actor),
         disabled,
     }
     .publish(env);

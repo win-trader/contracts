@@ -10,5 +10,7 @@ target/
 deployments/local.json
 packages/config/addresses.json.bak.*
 
-# High-volume generated integration/fuzz snapshots.
-test-suites/test_snapshots/
+# High-volume generated integration/fuzz snapshots. The soroban test harness
+# writes one JSON ledger dump per test run; they are reproducible output, not
+# fixtures anything asserts against.
+**/test_snapshots/

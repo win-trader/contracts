@@ -4,16 +4,19 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ConfigManagerError {
-    AlreadyInitialized = 1,
-    NotInitialized = 2,
-    Unauthorized = 3,
-    UpgradeTimelockTooShort = 6,
-    InvalidAdminProposal = 7,
-    NotPendingAdmin = 8,
-    NoPendingAdmin = 9,
-    NoPendingUpgrade = 10,
-    UpgradeTimelockNotElapsed = 11,
-    UpgradeHashMismatch = 12,
-    AdminProposalExpired = 13,
-    UpgradeTimelockTooLong = 14,
+    Unauthorized = 300,
+    NotPendingAdmin = 301,
+
+    NoPendingAdmin = 310,
+    NoPendingUpgrade = 311,
+
+    NotInitialized = 320,
+    AlreadyInitialized = 321,
+    UpgradeTimelockNotElapsed = 322,
+    AdminProposalExpired = 323,
+
+    InvalidAdminProposal = 330,
+    UpgradeTimelockTooShort = 331,
+    UpgradeTimelockTooLong = 332,
+    UpgradeHashMismatch = 333,
 }

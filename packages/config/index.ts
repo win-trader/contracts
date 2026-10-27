@@ -16,13 +16,13 @@ export interface NetworkContracts {
   requestRouter: ContractInfo;
   positionManager: ContractInfo;
   configManager: ContractInfo;
+  /** MarketGovernor: proposals and timelocks for config changes. Absent on deployments predating the split. */
+  governor?: ContractInfo;
+  /** The SEP-40 price feed the PositionManager reads: `cex-feed` off local,
+   *  which the Binance and KuCoin publishers push to. */
   oracleRouter: ContractInfo;
-  oracle: ContractInfo;
-  /** Secondary admin-published oracle used before live CEX sources are wired. */
-  oracle2?: ContractInfo;
-  /** Per-source oracle instances populated by scripts/deploy-cex-oracles.sh. */
-  binanceOracle: ContractInfo;
-  kucoinOracle: ContractInfo;
+  /** Local only: the unauthenticated mock oracle (same address as oracleRouter). */
+  oracle?: ContractInfo;
   /** Test-only mock USDC token. Empty address on mainnet. */
   mockToken: ContractInfo;
 }

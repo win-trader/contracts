@@ -1,8 +1,3 @@
-//! Mock SEP-41 fungible token for use in integration tests.
-//!
-//! Exposes a capped public faucet (`mint`), admin seeding (`admin_mint`), and
-//! optional transfer restrictions for deployed testnet environments.
-
 #![no_std]
 
 use soroban_sdk::{
@@ -21,6 +16,7 @@ pub enum MockTokenError {
     Unauthorized = 2,
     MintCapExceeded = 3,
     TransferRestricted = 4,
+    ReceiverCannotReceive = 5,
 }
 
 #[contracttype]
@@ -30,6 +26,7 @@ enum MockTokenDataKey {
     ProtocolContract(Address),
     PublicMinted(Address),
     PublicMintCapUsd,
+    ReceiveBlocked(Address),
 }
 
 #[contract]
@@ -37,7 +34,6 @@ pub struct MockToken;
 
 #[contractimpl]
 impl MockToken {
-    /// Deploy and configure the mock token.
     pub fn initialize(env: Env, admin: Address, decimals: u32, name: String, symbol: String) {
         if env.storage().instance().has(&MockTokenDataKey::Admin) {
             panic_with_error!(env, MockTokenError::AlreadyInitialized);
@@ -51,8 +47,6 @@ impl MockToken {
         Base::set_metadata(&env, decimals, name, symbol);
     }
 
-    /// Public faucet mint. Once protocol restrictions are activated, each
-    /// address gets one mint of up to 5,000 test USDC.
     pub fn mint(env: Env, to: Address, amount: i128) {
         if restrictions_active(&env) {
             to.require_auth();
@@ -61,18 +55,12 @@ impl MockToken {
         Base::mint(&env, &to, amount);
     }
 
-    /// Admin-only mint for deployment seeding and simulations. This bypasses
-    /// the public faucet cap and must not be exposed as a user faucet path.
-    /// The credit consumes the recipient's one-shot faucet claim: a wallet
-    /// funded directly must never also claim the public mint on top.
     pub fn admin_mint(env: Env, admin: Address, to: Address, amount: i128) {
         require_admin(&env, &admin);
         set_public_minted(&env, &to, public_minted(&env, &to) + amount);
         Base::mint(&env, &to, amount);
     }
 
-    /// Activate protocol-only transfer mode and mark the two perps contracts
-    /// that may receive from users and pay back to users.
     pub fn configure_protocol(env: Env, admin: Address, vault: Address, position_manager: Address) {
         require_admin(&env, &admin);
         set_protocol_contract(&env, &vault, true);
@@ -88,6 +76,13 @@ impl MockToken {
         env.storage()
             .instance()
             .set(&MockTokenDataKey::RestrictionsActive, &true);
+    }
+
+    pub fn set_receive_blocked(env: Env, admin: Address, account: Address, blocked: bool) {
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&MockTokenDataKey::ReceiveBlocked(account), &blocked);
     }
 
     pub fn restrictions_active(env: Env) -> bool {
@@ -106,9 +101,6 @@ impl MockToken {
         public_mint_cap(&env)
     }
 
-    /// Admin-set faucet cap in whole USD, so weekly competition stakes can
-    /// change without redeploying the token. Already-claimed addresses are
-    /// unaffected (the claim is one-shot regardless of amount).
     pub fn set_public_mint_cap(env: Env, admin: Address, cap_usd: i128) {
         require_admin(&env, &admin);
         if cap_usd <= 0 {
@@ -120,7 +112,6 @@ impl MockToken {
     }
 }
 
-/// SEP-41 token interface — auto-implemented by OZ Base.
 #[contractimpl(contracttrait)]
 impl FungibleToken for MockToken {
     type ContractType = Base;
@@ -137,7 +128,6 @@ impl FungibleToken for MockToken {
     }
 }
 
-/// Burn support — auto-implemented by OZ FungibleBurnable.
 #[contractimpl(contracttrait)]
 impl FungibleBurnable for MockToken {}
 
@@ -175,6 +165,14 @@ fn is_protocol_contract(env: &Env, contract: &Address) -> bool {
 }
 
 fn require_protocol_endpoint(env: &Env, from: &Address, to: &Address) {
+    if env
+        .storage()
+        .instance()
+        .get(&MockTokenDataKey::ReceiveBlocked(to.clone()))
+        .unwrap_or(false)
+    {
+        panic_with_error!(env, MockTokenError::ReceiverCannotReceive);
+    }
     if !restrictions_active(env) {
         return;
     }
@@ -207,9 +205,6 @@ fn public_mint_cap(env: &Env) -> i128 {
 }
 
 fn add_public_mint(env: &Env, account: &Address, amount: i128) {
-    // `PublicMinted` doubles as the one-shot claim marker. Checking the stored
-    // amount preserves the claimed state for addresses that minted under an
-    // earlier contract version, without adding a storage migration.
     if amount <= 0 || amount > public_mint_cap(env) || public_minted(env, account) > 0 {
         panic_with_error!(env, MockTokenError::MintCapExceeded);
     }
@@ -320,15 +315,12 @@ mod tests {
         assert_eq!(token.balance(&user), amount);
         assert_eq!(token.public_minted(&user), amount);
 
-        // A credited wallet can no longer stack a public faucet claim on
-        // top of its funding.
         let err = token.try_mint(&user, &1).unwrap_err().unwrap();
         assert_eq!(
             err,
             soroban_sdk::Error::from_contract_error(MockTokenError::MintCapExceeded as u32)
         );
 
-        // Further admin credits still work and accumulate the record.
         token.admin_mint(&admin, &user, &amount);
         assert_eq!(token.balance(&user), 2 * amount);
         assert_eq!(token.public_minted(&user), 2 * amount);

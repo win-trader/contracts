@@ -1,37 +1,35 @@
+use super::EventHeader;
 use shared::Position;
-use soroban_sdk::{contractevent, Address, Env, Symbol};
+use soroban_sdk::{contractevent, Address, Env};
 
 #[contractevent(topics = ["posopen"], data_format = "map")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PositionOpened {
     #[topic]
     pub position_id: u64,
+    pub header: EventHeader,
     pub owner: Address,
-    pub market: Symbol,
     pub is_long: bool,
     pub size: i128,
     pub base_exposure: i128,
     pub stored_collateral: i128,
-    pub execution_budget: i128,
     pub price: i128,
-    /// Zero means no trigger set.
     pub take_profit: i128,
     pub stop_loss: i128,
 }
 
-pub fn emit_opened(env: &Env, position: &Position, price: i128) {
+pub fn emit_opened(env: &Env, actor: &Address, position: &Position, price: i128) {
     PositionOpened {
         position_id: position.id,
+        header: super::header(env, &position.market, actor),
         owner: position.owner.clone(),
-        market: position.market.clone(),
         is_long: position.is_long,
         size: position.size,
         base_exposure: position.base_exposure,
         stored_collateral: position.stored_collateral,
-        execution_budget: position.execution_budget,
         price,
-        take_profit: position.take_profit,
-        stop_loss: position.stop_loss,
+        take_profit: position.take_profit.price(),
+        stop_loss: position.stop_loss.price(),
     }
     .publish(env);
 }

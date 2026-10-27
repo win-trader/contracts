@@ -1,6 +1,6 @@
-use shared::constants::{BPS, ROLE_ADMIN, ROLE_PAUSER, ROLE_UPGRADER};
+use shared::constants::{BPS, ROLE_ADMIN, ROLE_PAUSER, ROLE_UNPAUSER, ROLE_UPGRADER};
 use shared::{
-    AccountingSnapshot, ConfigManagerClient, LpConfig, MigrationData, OracleRound,
+    AccountingSnapshot, ConfigManagerClient, LpConfig, MigrationData,
     PositionManagerClient, SettlementResult, SettlementStatus, TimelockedUpgradeable,
     UpgradeFailure, VaultInterface,
 };
@@ -17,8 +17,11 @@ use stellar_tokens::{
 use crate::errors::VaultError;
 use crate::{events, storage};
 
-const VIRTUAL_ASSETS: i128 = 1;
-const VIRTUAL_SHARES: i128 = 1_000_000;
+const NAV_OFFSET: i128 = 1;
+const SHARE_OFFSET: i128 = shared::constants::SHARE_SCALE;
+
+const REQUIRED_ASSET_DECIMALS: u32 = shared::constants::PRICE_DECIMALS;
+const REQUIRED_SHARE_DECIMALS: u32 = REQUIRED_ASSET_DECIMALS + 6;
 
 #[contract]
 pub struct VaultContract;
@@ -47,11 +50,17 @@ fn require_router(env: &Env, caller: &Address) {
     shared::bump_instance_ttl(env);
 }
 
+// `set_lp_config` takes effect immediately, so it may tune the withdrawal
+// gate but not close it: below this floor an admin could freeze every
+// withdrawal without notice (THREAT_MODEL T-04).
+const MIN_WITHDRAW_UTILIZATION_BPS: u32 = 5_000;
+
 fn validate_config(env: &Env, config: &LpConfig) {
-    if config.max_withdraw_utilization_bps > BPS as u32
+    if config.max_withdraw_utilization_bps < MIN_WITHDRAW_UTILIZATION_BPS
+        || config.max_withdraw_utilization_bps > BPS as u32
         || config.min_deposit_nav_factor_bps > BPS as u32
-        || config.lp_request_delay == 0
-        || config.lp_request_delay > shared::constants::SHARED_BUMP_SECONDS
+        || config.lp_request_delay_seconds == 0
+        || config.lp_request_delay_seconds > shared::constants::SHARED_BUMP_SECONDS
     {
         panic_with_error!(env, VaultError::InvalidConfig);
     }
@@ -66,12 +75,12 @@ fn cash(env: &Env) -> i128 {
 }
 
 fn mul_div_floor(env: &Env, a: i128, b: i128, d: i128) -> i128 {
-    shared::math::mul_div_floor(a, b, d)
+    shared::math::mul_div_floor(env, a, b, d)
         .unwrap_or_else(|| panic_with_error!(env, VaultError::ArithmeticError))
 }
 
 fn mul_div_ceil(env: &Env, a: i128, b: i128, d: i128) -> i128 {
-    shared::math::mul_div_ceil(a, b, d)
+    shared::math::mul_div_ceil(env, a, b, d)
         .unwrap_or_else(|| panic_with_error!(env, VaultError::ArithmeticError))
 }
 
@@ -79,18 +88,44 @@ fn transfer_asset(env: &Env, from: &Address, to: &Address, amount: i128) {
     TokenClient::new(env, &asset(env)).transfer(from, to, &amount);
 }
 
-fn snapshot(env: &Env, round: &OracleRound, mutating: bool) -> AccountingSnapshot {
+fn snapshot(env: &Env, mutating: bool) -> AccountingSnapshot {
     let physical = cash(env);
     let pm = PositionManagerClient::new(env, &storage::position_manager(env));
     if mutating {
-        pm.prepare_lp_snapshot(&env.current_contract_address(), round, &physical)
+        pm.prepare_lp_snapshot(&env.current_contract_address(), &physical)
     } else {
-        pm.accounting_snapshot(round, &physical)
+        pm.accounting_snapshot(&physical)
     }
 }
 
-fn settlement_blocked(s: &AccountingSnapshot) -> bool {
-    s.cash_shortfall > 0 || s.lp_blocked_side_count > 0
+fn vault_is_short(s: &AccountingSnapshot) -> bool {
+    s.cash_shortfall > 0
+}
+
+fn lp_resolve_reward(env: &Env) -> i128 {
+    PositionManagerClient::new(env, &storage::position_manager(env))
+        .global_config()
+        .keeper_rewards
+        .lp_resolve
+}
+
+fn lp_paused(env: &Env) -> bool {
+    storage::get::<bool>(env, &storage::Key::Paused).unwrap_or(false)
+        || PositionManagerClient::new(env, &storage::position_manager(env)).is_paused()
+}
+
+fn config_timelock_seconds(env: &Env) -> u64 {
+    PositionManagerClient::new(env, &storage::position_manager(env))
+        .global_config()
+        .config_timelock_seconds
+}
+
+fn failed() -> SettlementResult {
+    SettlementResult {
+        status: SettlementStatus::Failed,
+        amount: 0,
+        reward: 0,
+    }
 }
 
 #[contractimpl(contracttrait)]
@@ -122,6 +157,11 @@ impl VaultContract {
         validate_config(&env, &lp_config);
         Vault::set_asset(&env, asset_address);
         Vault::set_decimals_offset(&env, 6);
+        if TokenClient::new(&env, &asset(&env)).decimals() != REQUIRED_ASSET_DECIMALS
+            || Vault::decimals(&env) != REQUIRED_SHARE_DECIMALS
+        {
+            panic_with_error!(&env, VaultError::InvalidConfig);
+        }
         Base::set_metadata(
             &env,
             Vault::decimals(&env),
@@ -131,8 +171,6 @@ impl VaultContract {
         storage::set(&env, &storage::Key::ConfigManager, &config_manager);
         storage::set(&env, &storage::Key::PositionManager, &position_manager);
         storage::set(&env, &storage::Key::LpConfig, &lp_config);
-        storage::set(&env, &storage::Key::Paused, &false);
-        storage::set(&env, &storage::Key::Initialized, &true);
         shared::bump_instance_ttl(&env);
     }
 }
@@ -145,6 +183,12 @@ impl VaultInterface for VaultContract {
             panic_with_error!(&env, VaultError::AlreadyInitialized);
         }
         storage::set(&env, &storage::Key::RequestRouter, &request_router);
+        shared::events::Wired {
+            target: soroban_sdk::Symbol::new(&env, "request_router"),
+            address: request_router,
+            caller,
+        }
+        .publish(&env);
     }
 
     fn receive_collateral(env: Env, caller: Address, from: Address, amount: i128) {
@@ -153,20 +197,6 @@ impl VaultInterface for VaultContract {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
         transfer_asset(&env, &from, &env.current_contract_address(), amount);
-    }
-
-    fn pull_from_allowance(env: Env, caller: Address, from: Address, amount: i128) -> bool {
-        require_pm(&env, &caller);
-        if amount <= 0 {
-            panic_with_error!(&env, VaultError::InvalidAmount);
-        }
-        // The vault is the approved spender; `try_transfer_from` catches a
-        // revoked/expired allowance or insufficient balance into `Err` so
-        // the caller can drop the order without reverting.
-        let current = env.current_contract_address();
-        TokenClient::new(&env, &asset(&env))
-            .try_transfer_from(&current, &from, &current, &amount)
-            .is_ok()
     }
 
     fn transfer_claim(
@@ -198,48 +228,37 @@ impl VaultInterface for VaultContract {
         caller: Address,
         owner: Address,
         assets: i128,
-        round: OracleRound,
     ) -> SettlementResult {
         require_router(&env, &caller);
         if assets <= 0 {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
-        if storage::get::<bool>(&env, &storage::Key::Paused).unwrap_or(false) {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+        if lp_paused(&env) {
+            panic_with_error!(&env, VaultError::Paused);
         }
-        let s = snapshot(&env, &round, true);
+        let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
-        let clean_first = s.physical_cash == 0
-            && s.non_lp_claims == 0
-            && s.total_risk_units == 0
-            && s.open_position_count == 0
-            && supply == 0;
-        let config = storage::lp_config(&env);
-        let later_ok = s.cash_lp_equity > 0
-            && s.vault_nav > 0
-            && mul_div_floor(&env, s.vault_nav, BPS, s.cash_lp_equity)
-                >= config.min_deposit_nav_factor_bps as i128;
-        let restores_capacity = s.cash_lp_equity.saturating_add(assets) >= s.required_risk_backing;
-        if settlement_blocked(&s) || !restores_capacity || (!clean_first && !later_ok) {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+
+        let eligible = if supply == 0 {
+            true
+        } else if s.cash_lp_equity == 0 {
+            false
+        } else {
+            mul_div_floor(&env, s.vault_nav, BPS, s.cash_lp_equity)
+                >= storage::lp_config(&env).min_deposit_nav_factor_bps as i128
+        };
+        if vault_is_short(&s) || !eligible {
+            return failed();
         }
+
         let shares = mul_div_floor(
             &env,
             assets,
-            supply + VIRTUAL_SHARES,
-            s.vault_nav + VIRTUAL_ASSETS,
+            supply + SHARE_OFFSET,
+            s.vault_nav + NAV_OFFSET,
         );
         if shares <= 0 {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+            return failed();
         }
         transfer_asset(&env, &caller, &env.current_contract_address(), assets);
         Base::mint(&env, &owner, shares);
@@ -257,6 +276,7 @@ impl VaultInterface for VaultContract {
         SettlementResult {
             status: SettlementStatus::Settled,
             amount: shares,
+            reward: 0,
         }
     }
 
@@ -265,33 +285,33 @@ impl VaultInterface for VaultContract {
         caller: Address,
         owner: Address,
         shares: i128,
-        round: OracleRound,
+        executor: Address,
+        reward: i128,
     ) -> SettlementResult {
         require_router(&env, &caller);
-        if shares <= 0 || Base::balance(&env, &caller) < shares {
+        if shares <= 0 || reward < 0 || Base::balance(&env, &caller) < shares {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
-        if storage::get::<bool>(&env, &storage::Key::Paused).unwrap_or(false) {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+        if lp_paused(&env) {
+            panic_with_error!(&env, VaultError::Paused);
         }
-        let s = snapshot(&env, &round, true);
+        let s = snapshot(&env, true);
         let supply = Base::total_supply(&env);
         let mut assets = mul_div_floor(
             &env,
             shares,
-            s.vault_nav + VIRTUAL_ASSETS,
-            supply + VIRTUAL_SHARES,
+            s.vault_nav + NAV_OFFSET,
+            supply + SHARE_OFFSET,
         );
-        if shares == supply
+        let empties_supply = shares == supply;
+        let clean_terminal = empties_supply
             && s.open_position_count == 0
             && s.total_risk_units == 0
-            && s.non_lp_claims == 0
-        {
+            && s.non_lp_claims == 0;
+        if clean_terminal {
             assets = s.cash_lp_equity;
         }
+
         let post_equity = s.cash_lp_equity.saturating_sub(assets);
         let post_util = if s.total_risk_units == 0 {
             0
@@ -301,24 +321,32 @@ impl VaultInterface for VaultContract {
             mul_div_ceil(&env, s.total_risk_units, BPS, post_equity)
         };
         let config = storage::lp_config(&env);
-        let empties_supply = shares == supply;
-        let unsafe_empty = empties_supply
-            && (s.open_position_count > 0 || s.total_risk_units > 0 || s.non_lp_claims > 0);
-        if settlement_blocked(&s)
+        if vault_is_short(&s)
+            || s.deleveraging_side_count > 0
+            // The payout itself must not push a side into ADL or HardCap.
+            || post_equity < s.min_equity_clear_of_adl
             || assets > s.free_lp_capital
             || post_util > config.max_withdraw_utilization_bps as i128
-            || unsafe_empty
+            || (empties_supply && !clean_terminal)
         {
-            return SettlementResult {
-                status: SettlementStatus::Failed,
-                amount: 0,
-            };
+            return failed();
         }
+
+        let reward = core::cmp::min(reward, assets);
+        let to_owner = assets - reward;
+
         Base::burn(&env, &caller, shares);
-        transfer_asset(&env, &env.current_contract_address(), &owner, assets);
+        let current = env.current_contract_address();
+        if reward > 0 {
+            transfer_asset(&env, &current, &executor, reward);
+        }
+        if to_owner > 0 {
+            // Via the router, which delivers or holds it for the owner.
+            transfer_asset(&env, &current, &caller, to_owner);
+        }
         let new_cash = cash(&env);
         PositionManagerClient::new(&env, &storage::position_manager(&env))
-            .refresh_borrow_rate(&env.current_contract_address(), &new_cash);
+            .refresh_borrow_rate(&current, &new_cash);
         events::WithdrawalSettled {
             owner,
             shares,
@@ -330,7 +358,12 @@ impl VaultInterface for VaultContract {
         SettlementResult {
             status: SettlementStatus::Settled,
             amount: assets,
+            reward,
         }
+    }
+
+    fn lp_resolve_reward(env: Env) -> i128 {
+        lp_resolve_reward(&env)
     }
 
     fn set_lp_config(env: Env, caller: Address, config: LpConfig) {
@@ -344,14 +377,20 @@ impl VaultInterface for VaultContract {
         storage::lp_config(&env)
     }
 
-    fn can_create_lp_request(env: Env) -> bool {
-        let physical = cash(&env);
-        PositionManagerClient::new(&env, &storage::position_manager(&env))
-            .can_create_lp_request(&env.current_contract_address(), &physical)
+    fn config_timelock_seconds(env: Env) -> u64 {
+        config_timelock_seconds(&env)
     }
 
-    fn accounting_snapshot(env: Env, round: OracleRound) -> AccountingSnapshot {
-        snapshot(&env, &round, false)
+    fn can_create_lp_request(env: Env) -> bool {
+        !lp_paused(&env)
+    }
+
+    fn lp_paused(env: Env) -> bool {
+        lp_paused(&env)
+    }
+
+    fn accounting_snapshot(env: Env) -> AccountingSnapshot {
+        snapshot(&env, false)
     }
 
     fn physical_cash(env: Env) -> i128 {
@@ -373,7 +412,7 @@ impl VaultInterface for VaultContract {
     }
 
     fn unpause(env: Env, caller: Address) {
-        require_role(&env, &caller, ROLE_PAUSER);
+        require_role(&env, &caller, ROLE_UNPAUSER);
         storage::set(&env, &storage::Key::Paused, &false);
         events::PauseChanged { paused: false }.publish(&env);
     }
@@ -384,10 +423,6 @@ impl VaultInterface for VaultContract {
 
     fn cancel_upgrade(env: Env, caller: Address) {
         <Self as TimelockedUpgradeable>::cancel(&env, caller);
-    }
-
-    fn bump_vault_state(env: Env) {
-        shared::bump_instance_ttl(&env);
     }
 }
 
@@ -401,6 +436,7 @@ impl VaultContract {
         require_role(&env, &operator, ROLE_UPGRADER);
         ensure_can_complete_migration(&env);
         storage::save_version(&env, data.version);
+        shared::events::Migrated { version: data.version, operator }.publish(&env);
         complete_migration(&env);
     }
 }
@@ -416,7 +452,9 @@ impl TimelockedUpgradeable for VaultContract {
         require_role(env, caller, ROLE_PAUSER);
     }
     fn _timelock_seconds(env: &Env) -> u64 {
-        ConfigManagerClient::new(env, &storage::config_manager(env)).get_upgrade_timelock()
+        let upgrade =
+            ConfigManagerClient::new(env, &storage::config_manager(env)).get_upgrade_timelock();
+        core::cmp::max(upgrade, config_timelock_seconds(env))
     }
     fn _panic_with_upgrade_error(env: &Env, failure: UpgradeFailure) -> ! {
         match failure {

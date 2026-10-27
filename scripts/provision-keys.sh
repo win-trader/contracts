@@ -12,8 +12,8 @@
 # we never let a 400 ("already funded") block the run.
 #
 # After this script the deploy pipeline assumes the named identities exist;
-# scripts/deploy*.sh and deploy-cex-oracles.sh no longer try to generate
-# their own keys, so secrets land in exactly one place.
+# scripts/deploy.sh never generates its own keys, so secrets land in
+# exactly one place.
 #
 # Usage:
 #   bash scripts/provision-keys.sh                # local
