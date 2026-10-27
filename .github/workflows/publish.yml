@@ -11,6 +11,9 @@ on:
 
 permissions:
   contents: read
+  # npm trusted publishing (OIDC): each package lists this repo and
+  # publish.yml as its trusted publisher on npmjs.com, so no token is stored.
+  id-token: write
 
 jobs:
   publish:
@@ -26,12 +29,17 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
+      # Trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.
+      - run: npm install -g npm@latest
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for d in packages/config packages/protocol-math packages/protocol-clients packages/bindings; do
             echo "::group::publish $d"
-            (cd "$d" && pnpm publish --no-git-checks --access public) || echo "skipped $d (version may already exist)"
+            id="$(node -p "const p=require('./$d/package.json'); p.name+'@'+p.version")"
+            if npm view "$id" version >/dev/null 2>&1; then
+              echo "$id is already on npm"
+            else
+              (cd "$d" && npm publish --access public)
+            fi
             echo "::endgroup::"
           done
