@@ -6,21 +6,12 @@ source after any change to an event.
 
 ## Status of `offchain`
 
-`offchain` (last commit 2026-08-20, `e711ace`) predates the settlement rewrite
-(2026-09-15, `3d000cf`/`46abafa`) and everything since. It cannot work
-against these contracts as it stands:
-
-- **Indexer.** It handles topics the contracts no longer emit
-  (`posinc`, `budgetin`, `budgetout`, `refreg`, `refset`, `refaccr`,
-  `refclaim`, `ordplace`, `ordfill`, `ordcancel`). It has no handlers for
-  most current topics (see the table below), it imports the deleted
-  `oracle-router` binding, and its oracle poller calls the router's
-  `get_price` instead of the SEP-40 `lastprice`.
-- **Keeper.** It calls `execute_order`, which no longer exists.
-- **Data model.** The `referrals` schema has nothing left to index.
-
-Porting it is a project of its own (handlers, keeper flows, DB migrations
-under the live app), not a patch.
+Ported on `offchain` branch `feat/contract-rewrite-port` (@win-trader/data
+0.19.0, migration 0030): the indexer handles every event below, and the keeper
+simulates each candidate call (liquidations first) and submits only what the
+contract would execute, with an instruction leeway capped at the network
+limit. The `app` port is on its own `feat/contract-rewrite-port` branch. Both
+need `@win-trader/config` 0.4.0 and `@win-trader/bindings` 0.3.0 from npm.
 
 ## Contracts and registry keys
 
