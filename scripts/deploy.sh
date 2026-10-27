@@ -4,15 +4,21 @@
 # scripts/provision-keys.sh.
 #
 #   NETWORK_KEY=local    bash scripts/deploy.sh
-#   NETWORK_KEY=testnet  PRICE_FEED_ADDR=C... bash scripts/deploy.sh
-#   NETWORK_KEY=mainnet  PRICE_FEED_ADDR=C... ASSET_ADDR=C... \
+#   NETWORK_KEY=testnet  bash scripts/deploy.sh
+#   NETWORK_KEY=mainnet  ASSET_ADDR=C... \
 #     UPGRADER_ADDR=G... PAUSER_ADDR=G... UNPAUSER_ADDR=G... \
 #     ORACLE_ADDR=G... PROTOCOL_ADDR=G... bash scripts/deploy.sh
 #
 # External inputs:
-#   PRICE_FEED_ADDR  Third-party SEP-40 feed (`lastprice(Asset)`, `decimals()`
-#                    of 18 or fewer; prices are rescaled to 7). Required off
-#                    local; local deploys the unauthenticated mock-oracle.
+#   PRICE_FEED_ADDR  An existing SEP-40 feed (`lastprice(Asset)`, `decimals()`
+#                    of 18 or fewer; prices are rescaled to 7). Unset, local
+#                    deploys the unauthenticated mock-oracle and every other
+#                    network deploys `cex-feed` with the `binance-oracle` and
+#                    `kucoin-oracle` identities as its publishers (override
+#                    with BINANCE_PUBLISHER_ADDR / KUCOIN_PUBLISHER_ADDR;
+#                    tune with FEED_MAX_SOURCE_AGE_SECONDS,
+#                    FEED_MAX_DEVIATION_BPS, FEED_MIN_SOURCES,
+#                    FEED_TIMELOCK_SECONDS).
 #   ASSET_ADDR       Collateral token (USDC SAC, 7 decimals). Required on
 #                    mainnet; elsewhere the mock-token faucet is deployed.
 #   *_ROLE addresses Role holders. Mainnet requires every one of them, none
@@ -63,10 +69,26 @@ ASSET_ADDR="${ASSET_ADDR:-}"
 ROLES=(UPGRADER PAUSER UNPAUSER ORACLE PROTOCOL)
 holder() { local v="${1}_ADDR"; echo "${!v:-}"; }
 
-# ---------- Guardrails ----------
+DEPLOY_CEX_FEED=""
 if [[ -z "$PRICE_FEED_ADDR" && "$NETWORK_KEY" != "local" ]]; then
-  echo "❌ PRICE_FEED_ADDR is required on '$NETWORK_KEY'. Use the third-party SEP-40 feed's address."
-  echo "    The mock-oracle accepts prices from anyone and is only deployed on local."
+  DEPLOY_CEX_FEED=1
+  publisher() {
+    local v="${1}_PUBLISHER_ADDR" identity="$2"
+    if [[ -n "${!v:-}" ]]; then echo "${!v}"; return; fi
+    require_identity "$identity"
+    stellar keys address "$identity"
+  }
+  BINANCE_PUBLISHER_ADDR=$(publisher BINANCE binance-oracle)
+  KUCOIN_PUBLISHER_ADDR=$(publisher KUCOIN kucoin-oracle)
+fi
+
+# ---------- Guardrails ----------
+if [[ -n "$DEPLOY_CEX_FEED" && "$BINANCE_PUBLISHER_ADDR" == "$KUCOIN_PUBLISHER_ADDR" ]]; then
+  echo "❌ The Binance and KuCoin publishers must be different accounts."
+  exit 1
+fi
+if [[ -n "$DEPLOY_CEX_FEED" ]] && [[ "$BINANCE_PUBLISHER_ADDR" == "$ADMIN_ADDR" || "$KUCOIN_PUBLISHER_ADDR" == "$ADMIN_ADDR" ]]; then
+  echo "❌ A price publisher must not be the admin account."
   exit 1
 fi
 if [[ "$NETWORK_KEY" == "mainnet" ]]; then
@@ -185,7 +207,7 @@ if [[ -z "$ASSET_ADDR" ]]; then
   ASSET_ADDR="$MOCK_TOKEN_ID"
   echo "  mock-token     : $MOCK_TOKEN_ID"
 fi
-if [[ -z "$PRICE_FEED_ADDR" ]]; then
+if [[ -z "$PRICE_FEED_ADDR" && -z "$DEPLOY_CEX_FEED" ]]; then
   MOCK_ORACLE_ID=$(deploy mock-oracle)
   MOCK_ORACLE_LEDGER=$(current_ledger)
   PRICE_FEED_ADDR="$MOCK_ORACLE_ID"
@@ -195,6 +217,23 @@ fi
 CM_ID=$(deploy config-manager --admin "$ADMIN_ADDR")
 CM_LEDGER=$(current_ledger)
 echo "  config-manager : $CM_ID"
+
+FEED_LEDGER=0
+if [[ -n "$DEPLOY_CEX_FEED" ]]; then
+  FEED_CONFIG=$(jq -nc \
+    --argjson max_source_age_seconds "${FEED_MAX_SOURCE_AGE_SECONDS:-30}" \
+    --argjson max_deviation_bps "${FEED_MAX_DEVIATION_BPS:-100}" \
+    --argjson min_sources "${FEED_MIN_SOURCES:-2}" \
+    '$ARGS.named')
+  PRICE_FEED_ADDR=$(deploy cex-feed \
+    --config_manager "$CM_ID" \
+    --timelock_seconds "${FEED_TIMELOCK_SECONDS:-${CONFIG_TIMELOCK_SECONDS:-172800}}" \
+    --publishers "[\"$BINANCE_PUBLISHER_ADDR\",\"$KUCOIN_PUBLISHER_ADDR\"]" \
+    --config "$FEED_CONFIG")
+  FEED_LEDGER=$(current_ledger)
+  echo "  cex-feed       : $PRICE_FEED_ADDR"
+  echo "    publishers   : binance=$BINANCE_PUBLISHER_ADDR kucoin=$KUCOIN_PUBLISHER_ADDR"
+fi
 
 # The PositionManager pins its governor at construction and the governor pins
 # the PositionManager, so the governor's address is derived from a salt first,
@@ -302,7 +341,8 @@ done
 
 # ---------- Write addresses.json ----------
 # The feed keeps the registry's `oracleRouter` key so @win-trader/config consumers
-# are unchanged; on local the mock oracle is also recorded as `oracle`.
+# are unchanged; on local the mock oracle is also recorded as `oracle`. The
+# cex-feed publishers publish to `oracleRouter`.
 echo ""
 echo "=== Writing $ADDRESSES_FILE [$NETWORK_KEY] ==="
 TMP_ADDR=$(mktemp)
@@ -313,7 +353,7 @@ jq \
   --arg pm "$PM_ID"                --argjson pmL    "${PM_LEDGER:-0}" \
   --arg cm "$CM_ID"                --argjson cmL    "${CM_LEDGER:-0}" \
   --arg gov "$GOV_ID"              --argjson govL   "${GOV_LEDGER:-0}" \
-  --arg feed "$PRICE_FEED_ADDR" \
+  --arg feed "$PRICE_FEED_ADDR"    --argjson feedL  "${FEED_LEDGER:-0}" \
   --arg mockToken "$MOCK_TOKEN_ID"   --argjson mockTokenL  "${MOCK_TOKEN_LEDGER:-0}" \
   --arg mockOracle "$MOCK_ORACLE_ID" --argjson mockOracleL "${MOCK_ORACLE_LEDGER:-0}" \
   '.[$net].contracts += {
@@ -322,8 +362,9 @@ jq \
        positionManager: {address: $pm,         startLedger: $pmL},
        configManager:   {address: $cm,         startLedger: $cmL},
        governor:        {address: $gov,        startLedger: $govL},
-       oracleRouter:    {address: $feed,       startLedger: 0},
+       oracleRouter:    {address: $feed,       startLedger: $feedL},
        mockToken:       {address: $mockToken,  startLedger: $mockTokenL}}
+   | del(.[$net].contracts.binanceOracle, .[$net].contracts.kucoinOracle, .[$net].contracts.oracle2)
    | if $mockOracle == "" then . else .[$net].contracts.oracle = {address: $mockOracle, startLedger: $mockOracleL} end' \
   "$ADDRESSES_FILE" > "$TMP_ADDR"
 mv "$TMP_ADDR" "$ADDRESSES_FILE"

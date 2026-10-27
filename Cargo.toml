@@ -7,6 +7,7 @@ members = [
     "contracts/config-manager",
     "contracts/market-governor",
     "contracts/request-router",
+    "contracts/cex-feed",
     "mocks/mock-token",
     "mocks/mock-oracle",
 ]

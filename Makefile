@@ -1,4 +1,4 @@
-CONTRACTS = vault request-router position-manager config-manager market-governor mock-oracle mock-token
+CONTRACTS = vault request-router position-manager config-manager market-governor cex-feed mock-oracle mock-token
 WASM_DIR ?= target/wasm32v1-none/release
 
 # Local network
@@ -24,6 +24,7 @@ build:
 		-p position-manager \
 		-p config-manager \
 		-p market-governor \
+		-p cex-feed \
 		-p mock-token \
 		-p mock-oracle
 

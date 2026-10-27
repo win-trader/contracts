@@ -218,6 +218,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cex-feed"
+version = "0.1.0"
+dependencies = [
+ "cex-feed",
+ "config-manager",
+ "shared",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -971,6 +981,7 @@ dependencies = [
 name = "position-manager"
 version = "0.1.0"
 dependencies = [
+ "cex-feed",
  "config-manager",
  "market-governor",
  "mock-oracle",

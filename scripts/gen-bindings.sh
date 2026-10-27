@@ -11,6 +11,7 @@ CONTRACTS=(
   position-manager
   config-manager
   market-governor
+  cex-feed
   mock-token
   mock-oracle
 )
@@ -39,7 +40,7 @@ done
 cat > "$BIND_OUT/package.json" <<'EOF'
 {
   "name": "@win-trader/bindings",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     "./vault": "./vault/dist/index.js",
@@ -47,10 +48,11 @@ cat > "$BIND_OUT/package.json" <<'EOF'
     "./position-manager": "./position-manager/dist/index.js",
     "./config-manager": "./config-manager/dist/index.js",
     "./market-governor": "./market-governor/dist/index.js",
+    "./cex-feed": "./cex-feed/dist/index.js",
     "./mock-token": "./mock-token/dist/index.js",
     "./mock-oracle": "./mock-oracle/dist/index.js"
   },
-  "files": ["vault/dist", "request-router/dist", "position-manager/dist", "config-manager/dist", "market-governor/dist", "mock-token/dist", "mock-oracle/dist"],
+  "files": ["vault/dist", "request-router/dist", "position-manager/dist", "config-manager/dist", "market-governor/dist", "cex-feed/dist", "mock-token/dist", "mock-oracle/dist"],
   "publishConfig": { "access": "public" },
   "repository": { "type": "git", "url": "git+https://github.com/win-trader/contracts.git", "directory": "packages/bindings" },
   "dependencies": {

@@ -27,3 +27,4 @@ vault = { path = "../vault", features = ["testutils"] }
 request-router = { path = "../request-router", features = ["testutils"] }
 mock-token = { path = "../../mocks/mock-token", features = ["testutils"] }
 mock-oracle = { path = "../../mocks/mock-oracle", features = ["testutils"] }
+cex-feed = { path = "../cex-feed", features = ["testutils"] }
