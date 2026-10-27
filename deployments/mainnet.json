@@ -27,19 +27,11 @@
       "address": "",
       "startLedger": 0
     },
-    "oracle": {
-      "address": "",
-      "startLedger": 0
-    },
-    "binanceOracle": {
-      "address": "",
-      "startLedger": 0
-    },
-    "kucoinOracle": {
-      "address": "",
-      "startLedger": 0
-    },
     "mockToken": {
+      "address": "",
+      "startLedger": 0
+    },
+    "governor": {
       "address": "",
       "startLedger": 0
     }
