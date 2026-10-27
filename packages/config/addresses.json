@@ -56,44 +56,32 @@
     ],
     "contracts": {
       "vault": {
-        "address": "CBESEE3Z6TFWJ7RD56TQAQCYHTGIJLSAKBMVH5LBLJH22DZNWM4PBP6V",
-        "startLedger": 4214811
+        "address": "CAUEH7Y67ZYOAUOXTSDAGXKZ5HA3YSLTSH7RHWRDJKZE2P5SZHZYYXQD",
+        "startLedger": 5416013
       },
       "requestRouter": {
-        "address": "CB7DCH7BLEAFPAFPHZNXF772NCDMCGNTYDPPJNBW5FPEZIJ7FWQ2HAKO",
-        "startLedger": 4214813
+        "address": "CCHXK26YQGKHRQNFABPAONKW4XV5A5ZR6VO22DSKIVCUGHSZ656UNLFU",
+        "startLedger": 5416015
       },
       "positionManager": {
-        "address": "CBR6ZRV2QMQHC546DACTQO2OFV5CHLZB2EEL3N3O4W2OPFJJ7S4AAPDY",
-        "startLedger": 4214807
+        "address": "CBOETXSDZRN5UYWNO72PGZOXX5YQGWJDCH4NISRH7VKC23SG3X4FNTAC",
+        "startLedger": 5416008
       },
       "configManager": {
-        "address": "CAEWJU3PO6ERL3IAPCRA26GT7YABS6Y5LEHQCWWQTU3FN4YPFSSODOMC",
-        "startLedger": 4214798
+        "address": "CCLVAR5DGCFNV2TPN5K77RBL26N7CGVC23U3FKK3QAK66KZ335HYZKJ2",
+        "startLedger": 5416001
       },
       "oracleRouter": {
-        "address": "CB3IUO2Y5NFH7LDX5EOLA63WO7QSYJSOBMMZESLBC62DEPNQJPOYDULC",
-        "startLedger": 4214800
-      },
-      "oracle": {
-        "address": "CBMSUUJY67AQSDTFFJXX3EHBNOC4KBKXRVBV2CP5QPNTMZYVAYSBMNRH",
-        "startLedger": 4214802
-      },
-      "binanceOracle": {
-        "address": "CD7INS2J3PK67QYC2XRZAIRCRYYLDD4VGRJ5WKXW7S5ZYDJ2BFXAPCK3",
-        "startLedger": 4214832
-      },
-      "kucoinOracle": {
-        "address": "CAAL5BZAQ3W2G5CZX4HVLWNQIJISQ62ZNXXYCX2LONG4FFLRRYEYONZC",
-        "startLedger": 4214833
+        "address": "CDDT4VWZF26Q524YBDTKHLJH7IUFVX74YOGD3TY5S6YPBR3OJYM4UGRT",
+        "startLedger": 5416005
       },
       "mockToken": {
-        "address": "CDYFVCEPBSEVSNYNOF3QY4ET4YROFTWGZFJ7XIX7OEJ5VNIUP6W4UNCL",
-        "startLedger": 4214804
+        "address": "CDRCQN53TOH3HE6FCK52357X6EC5YW2CCJBHU5GE6MM4KR45IPEUXKYB",
+        "startLedger": 5415998
       },
-      "oracle2": {
-        "address": "CAU2PSF2LGAKPPYIMGE6UV3AHOV2LP3DBRSVGDB6AV2CLDIQP2HZ6SAA",
-        "startLedger": 4214803
+      "governor": {
+        "address": "CC7A6NNL6PFY75WCXHS4UYCKVGLB5Y2HATIZEMEKDQYPXEEGHVJTRTMQ",
+        "startLedger": 5416010
       }
     }
   },
