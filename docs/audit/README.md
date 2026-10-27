@@ -2,7 +2,8 @@
 
 WinTrader perpetual DEX on Stellar Soroban. Liquidity providers deposit USDC
 into a vault and act as counterparty to leveraged long and short positions,
-priced by a third-party SEP-40 oracle. Trader actions are two-phase: commit,
+priced by the protocol's own SEP-40 feed (`cex-feed`, a median of Binance and
+KuCoin publishers). Trader actions are two-phase: commit,
 then a permissionless keeper settles at a fresh price.
 
 **Audit commit:** the tag `audit-2026-10-06` (not a `v*` tag; those publish to npm).
@@ -19,17 +20,16 @@ In scope, all under `contracts/`:
 | `position-manager` | Positions, pending actions, fees, funding, borrow, risk states, liquidation, ADL, settlement, LP accounting snapshot |
 | `vault` | Holds all collateral cash; LP share token (`sLP`); deposit and withdrawal settlement |
 | `request-router` | FIFO queue for delayed LP deposits and withdrawals; `skip_head` escape hatch |
+| `cex-feed` | SEP-40 price feed: median of the fresh publishers, quorum, deviation gate, timelocked publisher set; not upgradeable (added after `audit-2026-10-06`, T-27) |
 
 That is about 8,200 lines of functional Rust (excluding tests, comments and blank lines), `soroban-sdk 23.5.2`.
 
 Out of scope:
 
-- **The price oracle.** Production uses a third-party SEP-40 provider. The
-  protocol's side of that boundary is in scope (`shared/src/price_feed.rs`,
-  `position-manager/src/snapshot.rs::read_stamped_price`, the decimals
-  rescaling, and how prices are used). The provider's contract and data are
-  not. The trust assumption and its configuration requirements are K-1 in
-  [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
+- **The price publishers** (`oracles` repo): the processes that read
+  Binance and KuCoin and call `cex-feed.set_prices`. Their keys are a trust
+  boundary; K-1 in [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) states what the
+  protocol assumes of them.
 - **`mocks/`** (`mock-oracle`, `mock-token`): test-only. The mock oracle
   accepts prices from anyone and is never deployed outside local or test
   networks.
@@ -75,15 +75,19 @@ Canonical SHA-256 of the optimized WASM at the audit commit:
 | `position_manager` | 128,027 | `b4f65c8f052726529cac5862e7a713f1c8421b6e2a36b84e465634f6d92c312c` |
 | `vault` | 77,929 | `b7229af393134d0c3deb90a5e029b5b4608e1e3ec0405051bb3eeb99ee7c8a61` |
 | `request_router` | 37,384 | `d9ce1a84c05faabdcf970b8d1c13b2b37272279af2bdc54a4e16960b773414dd` |
+| `cex_feed` | — | Not in `audit-2026-10-06`; take its hash from `make repro` at the next audit tag. |
 
 The network caps contract size at 131,072 bytes; the build fails above it.
 
 ## Tests
 
-174 tests (`cargo test --workspace`), including:
+192 tests (`cargo test --workspace`), including:
 
 - `position-manager/tests/spec_*.rs`: suites derived from the specification;
 - `tests/invariants.rs`: a seeded random walk over every protocol path that
   reconciles cash, claims, aggregates and router escrow after every step;
 - `tests/threat_model.rs`, `tests/governor.rs`, `tests/review_findings.rs`:
-  a regression test for every fixed finding.
+  a regression test for every fixed finding;
+- `cex-feed/tests/feed.rs` and `position-manager/tests/cex_feed.rs`: the
+  feed's aggregation and governance, and the PositionManager settling
+  through it.

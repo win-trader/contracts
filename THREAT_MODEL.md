@@ -24,7 +24,7 @@ WinTrader is a perpetual-futures DEX. Liquidity providers deposit a single colla
 | **PositionManager (PM)** | Accounting ledger: markets, positions, pending actions, fee and funding indices, risk states, the live configuration, and the non-LP claim buckets. Directs every cash movement. Since `10c845d` it accepts configuration only from the MarketGovernor and re-validates it. | No (directs the vault) |
 | **Vault** | Holds all collateral cash and issues the LP share token (`sLP`, SEP-41). Moves cash only on PM or router instruction. Prices LP shares from the PM snapshot. | **Yes — all protocol cash** |
 | **RequestRouter** | FIFO queue for delayed LP deposits and withdrawals. Escrows assets and shares while requests are pending, and holds LP payouts that could not be delivered. | Yes (in-flight LP escrow) |
-| **Price feed** (third-party SEP-40 provider) | `lastprice(Asset)` and `decimals()`; markets are read as `Asset::Other(market symbol)` and prices rescaled to 7 decimals. Out of scope; see `docs/audit/KNOWN_ISSUES.md` K-1. | No |
+| **CexFeed** (`cex-feed`) | SEP-40 `lastprice(Asset)` and `decimals()` over the protocol's own Binance and KuCoin publishers: the median of the fresh sources, a quorum (`min_sources`), a per-source age limit and a deviation gate; `None` when any of them fails. Publisher-set changes are timelocked; removing a publisher is immediate. Markets are read as `Asset::Other(market symbol)`. See K-1 and T-27. | No (replaced through the governor's price-feed timelock) |
 
 ### 1.1 Data-flow diagram and trust boundaries
 
@@ -51,7 +51,7 @@ flowchart TB
   end
 
   subgraph DEP["TB-4 · External dependencies"]
-    PF[[Third-party SEP-40 price feed]]
+    PF[[CexFeed: SEP-40 median of CEX publishers]]
     TOK[[USDC SAC + issuer]]
   end
 
@@ -111,7 +111,7 @@ flowchart TB
 | ORACLE | Trusted | Propose and cancel price-feed replacement (through the MarketGovernor; ADMIN can also cancel) | Yes (`config_timelock_seconds`) |
 | **MarketGovernor** (contract) | Trusted by the PM | Install global/market config and price feed into the PM; deregister markets | Its own proposals are timelocked; its upgrade delay is `max(CM timelock, config_timelock)` |
 | PROTOCOL | Trusted | `claim_protocol` to any recipient, up to `protocol_claimable_total` | No |
-| Price provider (third-party) | **Fully trusted, implicitly** | Sets every price the protocol uses | No (feed changes go through the governor's timelock) |
+| Price publishers (Binance and KuCoin relays, one key each) | **Trusted as a quorum** | Each pushes its exchange's price into the CexFeed; with `min_sources = 2` neither alone can price the protocol, and one can move the median by at most about `max_deviation_bps` | Adding one: yes (`timelock_seconds`). Removing one: no |
 | USDC issuer | External, trusted | Freeze or deauthorize the vault's balance | — |
 
 ---
@@ -122,7 +122,7 @@ flowchart TB
 2. Soroban forbids contract re-entrancy. Any accidental re-entrant path traps (a liveness failure) rather than creating a theft window.
 3. Archived persistent entries are restored automatically (Protocol 23 / CAP-66), so TTL expiry of a `Position` or `Request` costs a fee but does not lose state.
 4. Privileged roles are held by separate keys, and ADMIN and UPGRADER are multisig accounts. This is **not enforced on-chain**. Since `eba596b`, `deploy.sh` refuses a mainnet deploy unless every role has a non-admin holder and UPGRADER ≠ PAUSER; multisig is still a convention.
-5. The third-party SEP-40 feed reports honest prices and timestamps, with `decimals()` of 18 or fewer (rescaled to 7). The protocol cannot detect a provider that lies about either.
+5. At least `min_sources` CexFeed publishers are honest and live. Timestamps are the ledger time of each publish, so freshness is not self-attested; prices are. The protocol cannot detect a quorum of publishers that lie.
 
 ---
 
@@ -138,7 +138,7 @@ Severity reflects likelihood × impact for a mainnet deployment holding meaningf
 | S-2 | Impersonating PM or router to make the vault move cash | `require_pm` / `require_router` compare the caller with the stored address **and** `require_auth` (`vault/src/contract.rs:37-51`) | Holds provided the addresses were wired correctly at deploy (see T-15) | Low |
 | S-3 | Impersonating the vault to call `prepare_lp_snapshot` / `refresh_borrow_rate` with a forged `physical_cash` | `require_vault` (`position-manager/src/auth.rs:23`) | None | Low |
 | S-4 | Redirecting a keeper reward to an address that did not do the work | `keeper.require_auth()` on every settlement, so the reward goes to the signer | None | Info |
-| S-5 | **Spoofed or manipulated price data** | Price must be `> 0`, `timestamp ≤ now`, and `now − timestamp ≤ max_price_age_seconds` (`snapshot.rs:11-29`); feed decimals checked on propose and apply | **No deviation bound, confidence check, TWAP, or second source inside the protocol.** The provider sets `timestamp`, so freshness is self-attested. A compromised or faulty provider can mint arbitrary PnL, liquidate any position, or drain the vault through a winning position. **→ T-01, K-1** | **Critical** |
+| S-5 | **Spoofed or manipulated price data** | Price must be `> 0`, `timestamp ≤ now`, and `now − timestamp ≤ max_price_age_seconds` (`snapshot.rs:11-29`); feed decimals checked on propose and apply | The CexFeed adds a second source, a quorum, a deviation gate and ledger-time stamps (T-27). The PositionManager itself still has no bound: a compromised publisher **quorum** can mint arbitrary PnL, liquidate any position, or drain the vault through a winning position. **→ T-01, K-1** | **High** |
 | ~~S-6~~ | *Retired: the referral program was removed in `5fad1d6`.* Referral self-referral through a sybil address | `referrer != trader` check (`referral.rs:62`) | Sybils get up to `referral_fee_share_bps` (2.5%) of their own fees back. Accepted by design. | Info |
 
 ### 5.2 Tampering
@@ -170,7 +170,7 @@ All on-chain state is public; the contracts store no secrets. The relevant threa
 | ID | Threat | Severity |
 |---|---|---|
 | I-1 | Commit transactions are public before settlement. Keepers and MEV searchers can see pending orders and their `acceptable_price`. The fresh-price rule limits what that information is worth. | Low |
-| I-2 | **Operator secrets.** `provision-keys.sh` / `deploy.sh` write the admin and keeper secrets into the plaintext `stellar` CLI identity store and `.env.<network>` files. Prices come from a third-party provider, so there are no in-house oracle publisher keys. | **High** (operational) |
+| I-2 | **Operator secrets.** `provision-keys.sh` / `deploy.sh` write the admin and keeper secrets into the plaintext `stellar` CLI identity store and `.env.<network>` files. The two CexFeed publisher keys are hot keys on the publisher host (`oracles` repo). | **High** (operational) |
 
 ### 5.5 Denial of service
 
@@ -206,7 +206,7 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 | ID | Title | Sev. | Status | Recommendation |
 |---|---|---|---|---|
 | **T-00** | PositionManager WASM exceeded the network contract-size limit | Critical | **Fixed** (`03dee9b`…`10c845d`) | Was 148,136 bytes against the 131,072-byte cap. Fixed by removing the `bump_*` entry points, the referral program and position increase; splitting configuration changes into the MarketGovernor; and making four preview/total views test-only. Now **128,027 bytes (3,045 headroom)** with the stellar CLI's bundled optimizer, after the pre-audit fixes, which was chosen over standalone binaryen (that reached 120,567). Headroom is thin: audit fixes that add code to the PM must watch size. `make optimize` and CI fail above the cap and warn below 10 KB of headroom. Verified end to end on a local quickstart network (§9.1). |
-| **T-01** | The price feed is fully trusted; no in-protocol sanity bounds | Critical | Design/Residual (accepted, K-1) | Production uses a third-party SEP-40 provider; the in-repo oracle is test-only and out of scope. The PM checks positivity, future stamps, and age only. Configure `max_price_age_seconds` and `max_market_order_lifetime` above the provider's resolution plus lag, register market symbols exactly as the provider's tickers, and monitor the feed. Consider deviation bounds or a second source before mainnet. |
+| **T-01** | The price feed is fully trusted; no in-protocol sanity bounds | Critical | **Mitigated by T-27**; residual accepted (K-1) | Production uses the in-house CexFeed (T-27): two sources, quorum, deviation gate, ledger-time stamps. The PM still checks positivity, future stamps, and age only, so a publisher quorum is trusted. Run the publishers on separate keys and hosts, keep `min_sources = 2`, and alert on publisher lag. |
 | **T-14** | Deploy and upgrade tooling is out of sync with the contracts and deploys mocks unconditionally | High | **Fixed in `eba596b`** | `deploy.sh:80-82` builds `GlobalConfig`, `LpConfig` and `MarketConfig` JSON with **fields that no longer exist** (`borrow_exponent_bps`, `lp_request_delay`, `close_fee_low_bps`, …). Lines 234-245 deploy **mock oracles published by the admin key, and a mock token**, regardless of network. Lines 330/336 grant a `KEEPER` role the contracts no longer use. `upgrade.sh:146` calls `upgrade` with no `propose_upgrade` first. **Done:** `deploy.sh` was rebuilt on a shared `scripts/lib/protocol.sh` that mirrors `shared::types`. It needs `PRICE_FEED_ADDR` off local and `ASSET_ADDR` on mainnet. Mocks never reach mainnet, and the mock oracle (unauthenticated) is local-only. Every mainnet role needs a separate non-admin holder, with UPGRADER ≠ PAUSER. After deploying, the script verifies wiring, roles and per-market prices. The WASM hash check now fails closed; it previously called a removed CLI command and always passed. `upgrade.sh` is now two-phase (propose, then execute). The dead `grant-keepers.sh` and `deploy-cex-oracles.sh` were removed. Verified end to end on a local quickstart network. **Remaining:** the multisig custody runbook, and see T-23. |
 | **T-02** | LP queue halts if any market's price is unavailable | High | **Fixed in `4f2bc35`** | The LP snapshot no longer prices markets with no open exposure, so an empty market with a dead feed cannot block the queue. For any other stuck head, PAUSER can `skip_head`: a full refund and the queue moves on, only once the request has been resolvable for a day, and never redirecting funds. **Residual:** a *live* market whose feed dies still pauses LP flows until the feed recovers or PAUSER skips each head (see D-2). |
 | **T-03** | Upgrade authority is the dominant risk; CM has the weakest timelock | High | Design/Residual | Hold UPGRADER and ADMIN in Stellar native multisig accounts. Split proposer and executor. Give CM `max(own, config_timelock)` or a longer floor. Publish reproducible builds and verify `wasm_hash`. Run 24/7 monitoring on `upgprp` events. |
@@ -227,6 +227,7 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 | T-15 | `set_vault` and `set_request_router` are one-shot with no back-reference check | Low | Mitigated off-chain | `deploy.sh` now checks the wiring after deploy: the feed and asset addresses, and a simulated `update_indices` that only succeeds through PM's stored vault. The contracts still expose no vault or router getters and do no on-chain back-reference check. |
 | T-16 | Collateral token is only checked by decimals | Low | Design | Pin the expected SAC address in the deploy runbook; document the issuer-freeze risk. |
 | T-22 | LP resolve reward was read at resolution, not at request time | Low | **Fixed in `04ffa19`** | `LpRequest.reward` is fixed at creation and used for both deposits and withdrawals; `LpRequestCreated` carries it. |
+| **T-27** | A third-party SEP-40 feed with a five-minute resolution could not serve 60-second freshness, and one provider was a single point of trust | High | **Fixed in `cex-feed`** | The in-house `cex-feed` contract serves SEP-40 from the Binance and KuCoin publishers: median of the sources fresher than `max_source_age_seconds`, `None` below `min_sources` or past `max_deviation_bps`, stamped with the oldest counted source, so a fill needs every counted source to have published after the commit. Publishers are bound to the contract; adding or replacing them is timelocked (`timelock_seconds`, at least one day; ORACLE proposes, ORACLE or ADMIN cancels), removing one is immediate and only ever fails closed. Not upgradeable: replacing it goes through the governor's price-feed timelock. Tests: `cex-feed/tests/feed.rs`, `position-manager/tests/cex_feed.rs`. |
 | **T-26** | Feed interface did not match SEP-40 (`lastprice(Symbol)`) and required exactly 7 decimals, so no third-party provider could have priced the protocol | High | **Fixed in `dd13510`** | `lastprice(Asset)` with `Asset::Other(market)`; the feed's decimals (≤ 18) are recorded at install and prices rescaled to 7. The mock oracle now speaks SEP-40, so every test exercises the real wire format. |
 | T-23 | Binding generation and the published bindings were stale | Low | **Fixed in `af8fe56`** | `gen-bindings.sh` now builds vault, request-router, position-manager, config-manager, market-governor, mock-token and mock-oracle from the current WASM. `@win-trader/bindings` is 0.2.0 (oracle-router and oracle exports removed). The `offchain` indexer must be updated to match before the next deploy. |
 | R-1 | No events for `set_vault`, `set_request_router` or `migrate` | Low | **Fixed in `51408ff`** | Shared `Wired` and `Migrated` events. |
@@ -237,7 +238,7 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 ## 7. Suggested audit focus areas
 
 0. **Contract size (T-00, fixed).** The PositionManager has about 3 KB of headroom under the 131,072-byte cap, so remediation that adds code needs to stay within it.
-1. **Oracle boundary (T-01, T-26, D-2).** The provider is out of scope; the protocol's side is in: the SEP-40 call, decimal rescaling, staleness and fresh-observation rules, and behaviour when a feed is missing or stale.
+1. **Oracle (T-01, T-26, T-27, D-2).** The CexFeed contract (aggregation, quorum, deviation gate, publisher-set timelock, fail-closed removal) and the PositionManager's side: the SEP-40 call, decimal rescaling, staleness and fresh-observation rules, and behaviour when a feed is missing or stale. The publisher processes (`oracles` repo) are out of scope; their keys are a trust boundary.
 2. **Settlement waterfall and rounding** (`settle.rs`, `fees.rs`, `ledger.rs`, `funding.rs`, `window.rs`). Check conservation of cash across every terminal path (close, liquidation, ADL, TP/SL, partial decrease), including bad debt and the LP keeper backstop in `keeper::pay_liquidation`.
 3. **`transfer_safety_claim` callers.** This vault entrypoint skips the conservation check (`vault/src/contract.rs:209`). Every PM caller must have debited a ledger bucket or position collateral first. Check that this holds on every path.
 4. **Preflight and settle parity** for decrease and close (D-4 / T-10). Position increase was removed in `b42e5fe`, taking the hardest parity path with it.
@@ -248,7 +249,7 @@ Ordered by priority. Items marked **open** should be resolved, or explicitly acc
 
 ## 8. Out of scope / not covered
 
-- The third-party price provider, the `offchain` keeper and indexer, and the `app` frontend and API. They appear here only as trust boundaries.
+- The price publisher processes (`oracles`), the `offchain` keeper and indexer, and the `app` frontend and API. They appear here only as trust boundaries.
 - `mocks/*`: test-only. `deploy.sh` deploys the mock oracle only on local networks, and the mock token never on mainnet (T-14).
 - TypeScript packages in `packages/` beyond noting that `protocol-math` mirrors on-chain maths. Divergence there causes UX errors, not on-chain loss.
 - Economic parameter tuning (fee levels, margins). The model flags only manipulation vectors.

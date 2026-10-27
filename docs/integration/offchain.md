@@ -33,13 +33,13 @@ under the live app), not a patch.
 | `positionManager` | PositionManager: positions, actions, live config, events for trading |
 | `vault` | Vault: cash and `sLP` |
 | `requestRouter` | RequestRouter: LP deposit and withdrawal queue |
-| `oracleRouter` | The third-party SEP-40 price feed (`lastprice(Asset)`, `decimals()`); read as `Asset::Other(market)` |
+| `oracleRouter` | The price feed: `cex-feed` off local (SEP-40 `lastprice(Asset)`, `decimals()`; read as `Asset::Other(market)`). The Binance and KuCoin publishers call `set_prices(publisher, [{symbol, price}])` (every symbol in one transaction) on it; `source_price(publisher, symbol)` shows each one's last push |
 | `mockToken`, `oracle` | Local and testnet only |
 
 Index events from all of `configManager`, `governor`, `positionManager`,
-`vault`, and `requestRouter`. Decode them with the specs in
-`@win-trader/bindings` 0.2.0 (`config-manager`, `market-governor`,
-`position-manager`, `vault`, `request-router`); every event's schema is also
+`vault`, `requestRouter`, and `oracleRouter` (the cex-feed). Decode them with the specs in
+`@win-trader/bindings` 0.3.0 (`config-manager`, `market-governor`,
+`position-manager`, `vault`, `request-router`, `cex-feed`); every event's schema is also
 in the deployed contract's ABI.
 
 ## Keeper entry points
@@ -60,6 +60,7 @@ the reward.
 | LP queue | `RR.resolve_next(executor)` | Pays the reward fixed when the request was made (`LpRequest.reward`) |
 | Stuck LP head | `RR.skip_head(caller)` (PAUSER) | Refunds the head in full once it has been resolvable for a day; for a head `resolve_next` cannot settle |
 | Due config proposals | `governor.apply_global_config` / `apply_market_config` / `apply_price_feed` | Permissionless once due; lapse one timelock later |
+| Due publisher-set change | `feed.apply_sources(caller)` | Permissionless once due; lapses one timelock later |
 | Storage TTL | Network `ExtendFootprintTTL` operation | No contract entry point |
 
 **Submit with an instruction leeway.** `resolve_next` passed simulation but
@@ -73,6 +74,9 @@ head can fail repeatedly (THREAT_MODEL D-1).
 
 | Contract | Topic | Event | Data format | Extra topics | Data fields |
 |---|---|---|---|---|---|
+| cex-feed | `srcprop` | `SourcesProposed` | vec |  | header, publishers, config, effective_at |
+| cex-feed | `srcset` | `SourcesChanged` | vec |  | header, publishers, config |
+| cex-feed | `srccancel` | `SourcesProposalCancelled` | vec |  | header |
 | config-manager | `role` | `RoleChange` | vec |  | role, account, is_grant |
 | config-manager | `upgtl` | `UpgradeTimelockUpdate` | vec |  | timelock_seconds |
 | config-manager | `adminprop` | `AdminProposed` | vec |  | proposer, new_admin |

@@ -10,28 +10,31 @@ in scope and welcome.
 
 ### K-1. The price feed is fully trusted (T-01)
 
-Prices come from a third-party SEP-40 provider. The PositionManager checks
-only that a price is positive, not stamped in the future, and no older than
-`max_price_age_seconds`. It has no deviation bound, confidence interval, or
-second source, and the provider stamps its own timestamps. A wrong price
-settles orders, liquidates positions, and moves value between traders and
-LPs. The feed address can only change through the governor's timelock.
+Prices come from the in-house `cex-feed` contract: the median of the
+Binance and KuCoin publishers that published within `max_source_age_seconds`,
+or no price below `min_sources` or past `max_deviation_bps` (T-27). Each
+source is stamped with the ledger time of its publish. The PositionManager
+checks only that a price is positive, not stamped in the future, and no older
+than `max_price_age_seconds`. So a quorum of publisher keys is trusted: if
+`min_sources` of them lie together, a wrong price settles orders, liquidates
+positions, and moves value between traders and LPs. One lying publisher
+against an honest one can move the two-source median by at most about
+`max_deviation_bps`. The feed address can only change through the governor's
+timelock; the feed's publisher set only through its own.
 
-Integration requirements this places on the provider and the configuration:
+Operating requirements:
 
-- The feed must implement SEP-40 `lastprice(Asset)` and `decimals()`. Markets
-  are read as `Asset::Other(<market symbol>)`, so registered market symbols
-  must match the provider's tickers exactly.
-- `decimals()` must be 18 or fewer. Prices are rescaled to 7 decimals,
-  flooring when digits are dropped.
-- `max_price_age_seconds` must exceed the provider's resolution plus its
-  publishing lag. SEP-40 feeds floor timestamps to their resolution
-  (Reflector's default is 5 minutes), so the 60-second default would make
-  most reads stale.
-- A trader action fills only on an observation stamped *after* it was
-  committed (§8.6), so fills wait up to one feed resolution.
-  `max_market_order_lifetime` must exceed that, or market orders expire
-  unfilled.
+- Keep `min_sources` at 2. At 1, either publisher key alone sets the price.
+- A fill needs an observation stamped *after* the commit (§8.6); the feed
+  stamps the oldest counted source, so every counted publisher must publish
+  after the commit. The publishers force a publish every 20 seconds, so
+  `max_market_order_lifetime` (300 s) and `max_price_age_seconds` (60 s)
+  leave room; `max_source_age_seconds` (30 s) must stay below the latter.
+- With `min_sources = 2`, either exchange or publisher going down stops
+  settlement, liquidation and LP resolution until it returns (D-2). That is
+  the price of not trusting one key. Alert on publisher lag.
+- Registered market symbols must match the tickers the publishers push
+  (`BTCUSD`, `ETHUSD`, `XLMUSD`).
 
 ### K-2. Upgrade authority can replace any contract's code (T-03)
 
