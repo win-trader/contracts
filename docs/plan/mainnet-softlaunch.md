@@ -39,6 +39,52 @@ Ten accounts, each a separate key, all funded with XLM:
 `deploy.sh` refuses a mainnet run if any role equals admin or UPGRADER equals
 PAUSER, and refuses a publisher equal to admin.
 
+Generate every key fresh for mainnet. Testnet keys have sat in Coolify, some
+of them as build arguments of old images; none of them may hold a mainnet role.
+
+### Multisig for the cold roles
+
+A role is an ordinary Stellar account, and Soroban's `require_auth` on an
+account checks its signers against the account's medium threshold. So the
+cold roles (admin, upgrader, unpauser, oracle, protocol) become native
+multisig accounts with no contract change. The pauser stays a single key: the
+kill switch has to work alone, and a pause cannot take funds. The keeper and
+the publishers stay single hot keys.
+
+After the deploy, for each cold role (2-of-3 shown; `ROLE` is the account,
+`S1`–`S3` the signers, e.g. two Ledgers and an offline backup):
+
+```bash
+# 1. Add the signers. The master key still signs alone here.
+for s in $S1 $S2 $S3; do
+  stellar tx new set-options --source-account ROLE --signer $s --signer-weight 1 --network mainnet
+done
+# 2. Require two signatures for everything, and retire the master key in the
+#    same transaction: from here only the signers can act.
+stellar tx new set-options --source-account ROLE \
+  --low-threshold 2 --med-threshold 2 --high-threshold 2 --master-weight 0 --network mainnet
+```
+
+Check the account on Horizon (`/accounts/ROLE`: three signers of weight 1,
+thresholds 2, master weight 0) before moving on to the next role. A mistake in step 2 locks the account for good, so do it on
+testnet first with the same commands.
+
+To act as a multisig role, build the transaction, simulate it (which adds the
+Soroban resources and fee), let each signer sign the envelope, then submit:
+
+```bash
+stellar contract invoke --source-account ROLE --build-only --network mainnet \
+  --id <contract> -- <function> ... \
+  | stellar tx simulate --network mainnet > tx.xdr
+stellar tx sign --sign-with-ledger --network mainnet < tx.xdr > tx1.xdr   # signer 1
+stellar tx sign --sign-with-key s2 --network mainnet < tx1.xdr > tx2.xdr  # signer 2
+stellar tx send --network mainnet < tx2.xdr
+```
+
+The role is the transaction source, so the envelope signatures authorize the
+call. A built transaction expires with its time bounds; collect the
+signatures within a few minutes, or rebuild.
+
 ## Deploy
 
 ```bash
