@@ -132,4 +132,6 @@ ADMIN) stops pricing immediately; replace it through `propose_sources`
 
 `governor.propose_market_config` with higher `max_*_size_open_interest` or
 lower `initial_margin_bps` waits `config_timelock_seconds` (one day here), then
-anyone applies it. Lowering caps or raising margin applies immediately.
+anyone applies it. Lowering caps or raising `initial_margin_bps` applies
+immediately, and only when nothing else in the market config changes. Every
+other change, a higher maintenance margin included, waits the timelock.
